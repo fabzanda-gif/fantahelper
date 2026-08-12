@@ -136,6 +136,7 @@ else:
       current_budget = team_row.iloc[0]["remaining_budget"]
       p_role = selected_player["role"]
 
+      # Conta quanti giocatori di quel ruolo ha già la squadra
       team_role_count = 0
       if rosters_data:
         for r in rosters_data:
@@ -174,25 +175,34 @@ st.divider()
 st.subheader("📊 Panoramica Squadre & Disponibilità")
 
 if not teams_df.empty:
-  bought_counts = {}
+  # Raggruppiamo i conteggi per squadra e per ruolo
+  team_role_counts = {}
+  bought_totals = {}
   if rosters_data:
     for r in rosters_data:
-      if r["teams"]:
+      if r["teams"] and r["players"]:
         t_name = r["teams"]["name"]
-        bought_counts[t_name] = bought_counts.get(t_name, 0) + 1
+        role = r["players"]["role"]
+        
+        bought_totals[t_name] = bought_totals.get(t_name, 0) + 1
+        
+        if t_name not in team_role_counts:
+          team_role_counts[t_name] = {"P": 0, "D": 0, "C": 0, "A": 0}
+        team_role_counts[t_name][role] = team_role_counts[t_name].get(role, 0) + 1
 
   teams_summary = []
   for _, t in teams_df.iterrows():
     t_name = t["name"]
     rem_budget = t["remaining_budget"]
-    bought = bought_counts.get(t_name, 0)
+    bought = bought_totals.get(t_name, 0)
     slots_left = max(0, 25 - bought)
     avg_price = round(rem_budget / slots_left, 1) if slots_left > 0 else 0
     teams_summary.append({
         "data": t,
         "bought": bought,
         "slots_left": slots_left,
-        "avg_price": avg_price
+        "avg_price": avg_price,
+        "role_counts": team_role_counts.get(t_name, {"P": 0, "D": 0, "C": 0, "A": 0})
     })
 
   teams_summary.sort(key=lambda x: (-x["avg_price"], -x["data"]["remaining_budget"], x["data"]["name"]))
@@ -207,9 +217,11 @@ if not teams_df.empty:
         t_name = t["name"]
         rem_budget = t["remaining_budget"]
         init_budget = t["initial_budget"]
-        bought = item["bought"]
-        slots_left = item["slots_left"]
         avg_price = item["avg_price"]
+        rc = item["role_counts"]
+
+        # Formattazione capacità per ruolo con lettere in grassetto
+        role_string = f"**P** {rc.get('P', 0)}/{ROLE_LIMITS['P']} | **D** {rc.get('D', 0)}/{ROLE_LIMITS['D']} | **C** {rc.get('C', 0)}/{ROLE_LIMITS['C']} | **A** {rc.get('A', 0)}/{ROLE_LIMITS['A']}"
 
         with col:
           st.markdown(f"**{t_name}**")
@@ -218,7 +230,7 @@ if not teams_df.empty:
               value=f"{rem_budget} cr",
               delta=f"{rem_budget - init_budget} cr",
           )
-          st.text(f"Comprati: {bought}/25 | Mancano: {slots_left}")
+          st.markdown(role_string)
           st.text(f"Media max/giocatore: {avg_price} cr")
           st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
           st.markdown("---")
