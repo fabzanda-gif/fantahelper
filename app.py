@@ -1,27 +1,26 @@
-import pandas as pd
 import streamlit as st
+from supabase import create_client
 
-st.set_page_config(page_title="Fantacalcio Auction Helper", layout="wide")
+# Connessione
+supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-st.title("⚽ Fantacalcio Live Assistant")
+st.set_page_config(page_title="RCD Escanol Auction", layout="wide")
+st.title("⚽ RCD Escanol Auction Center")
 
-# Inizializziamo lo stato della sessione per i crediti e le rose
-if "budget_iniziale" not in st.session_state:
-    st.session_state.budget_iniziale = 500
-    st.session_state.crediti_residui = 500
+# Recupero squadre dal DB
+teams = supabase.table("teams").select("*").execute().data
 
-st.sidebar.header("Gestione Lega")
-st.sidebar.metric(
-    label="I Miei Crediti Residui", value=st.session_state.crediti_residui
-)
+# Sidebar: Visualizzazione Budget
+st.sidebar.subheader("Budget Squadre")
+for team in teams:
+    st.sidebar.write(f"{team['name']}: {team['remaining_budget']} crediti")
 
-# Area centrale per la Command Bar (inserimento rapido)
-st.subheader("Inserimento Rapido")
-command = st.text_input(
-    "Digita comando (es: teo 18)",
-    placeholder="es. barella 25",
-    help="Premi invio per registrare l'acquisto",
-)
+# Command Bar
+command = st.text_input("Comando (es: gollini 5 zaga)", placeholder="giocatore prezzo squadra")
 
 if command:
-    st.success(f"Comando ricevuto: {command}")
+    parts = command.split()
+    if len(parts) >= 3:
+        player, price, team_name = parts[0], parts[1], parts[2]
+        st.write(f"Acquisto: {player} a {price} per {team_name}")
+        # Qui aggiungeremo la logica di inserimento in tabella 'rosters'
