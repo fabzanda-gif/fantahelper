@@ -8,6 +8,14 @@ supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
 st.title("⚽ RCD Escanol - Live Auction Assistant")
 
+# Limiti massimi per ruolo (Totale 25 giocatori)
+ROLE_LIMITS = {
+    "P": 3,
+    "D": 8,
+    "C": 8,
+    "A": 6
+}
+
 # 1. Recupero delle squadre e dei roster dal DB
 teams_data = (
     supabase.table("teams")
@@ -116,8 +124,20 @@ else:
     else:
       team_id = team_row.iloc[0]["id"]
       current_budget = team_row.iloc[0]["remaining_budget"]
+      p_role = selected_player["role"]
 
-      if purchase_price > current_budget:
+      # Controllo limite ruoli per la squadra selezionata
+      team_role_count = 0
+      if rosters_data:
+        for r in rosters_data:
+          if r["teams"] and r["teams"]["name"] == target_team and r["players"] and r["players"]["role"] == p_role:
+            team_role_count += 1
+
+      max_limit = ROLE_LIMITS.get(p_role, 25)
+
+      if team_role_count >= max_limit:
+        st.error(f"❌ Limite raggiunto! La squadra **{target_team}** ha già completato i posti per il ruolo {p_role} ({team_role_count}/{max_limit}).")
+      elif purchase_price > current_budget:
         st.error(
             f"❌ La squadra {target_team} non ha abbastanza crediti! (Budget"
             f" residuo: {current_budget})"
@@ -135,17 +155,16 @@ else:
         ).execute()
 
         st.success(
-            f"✅ Acquistato **{selected_player['name']}** a"
+            f"✅ Acquistato **{selected_player['name']}** [{p_role}] a"
             f" **{purchase_price}** crediti per **{target_team}**!"
         )
         st.rerun()
 
-# 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre
+# 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre (Ordinata)
 st.divider()
 st.subheader("📊 Panoramica Squadre & Disponibilità")
 
 if not teams_df.empty:
-  # Calcoliamo quanti giocatori ha comprato ciascuna squadra
   bought_counts = {}
   if rosters_data:
     for r in rosters_data:
@@ -153,24 +172,37 @@ if not teams_df.empty:
         t_name = r["teams"]["name"]
         bought_counts[t_name] = bought_counts.get(t_name, 0) + 1
 
-  # Dividiamo le 12 squadre in righe da 4 colonne per una visualizzazione pulita in orizzontale
-  teams_per_row = 4
-  teams_list = teams_df.to_dict(orient="records")
+  # Calcoliamo i parametri di ordinamento per ciascuna squadra
+  teams_summary = []
+  for _, t in teams_df.iterrows():
+    t_name = t["name"]
+    rem_budget = t["remaining_budget"]
+    bought = bought_counts.get(t_name, 0)
+    slots_left = max(0, 25 - bought)
+    avg_price = round(rem_budget / slots_left, 1) if slots_left > 0 else 0
+    teams_summary.append({
+        "data": t,
+        "bought": bought,
+        "slots_left": slots_left,
+        "avg_price": avg_price
+    })
 
-  for i in range(0, len(teams_list), teams_per_row):
+  # Ordinamento richiesto: disponibilità media DESC, disponibilità totale (budget) DESC, nome ASC
+  teams_summary.sort(key=lambda x: (-x["avg_price"], -x["data"]["remaining_budget"], x["data"]["name"]))
+
+  teams_per_row = 4
+  for i in range(0, len(teams_summary), teams_per_row):
     cols = st.columns(teams_per_row)
     for j, col in enumerate(cols):
-      if i + j < len(teams_list):
-        t = teams_list[i + j]
+      if i + j < len(teams_summary):
+        item = teams_summary[i + j]
+        t = item["data"]
         t_name = t["name"]
         rem_budget = t["remaining_budget"]
         init_budget = t["initial_budget"]
-        bought = bought_counts.get(t_name, 0)
-        # Rosa standard ipotizzata a 25 elementi
-        slots_left = max(0, 25 - bought)
-        avg_price = (
-            round(rem_budget / slots_left, 1) if slots_left > 0 else 0
-        )
+        bought = item["bought"]
+        slots_left = item["slots_left"]
+        avg_price = item["avg_price"]
 
         with col:
           st.markdown(f"**{t_name}**")
@@ -181,7 +213,6 @@ if not teams_df.empty:
           )
           st.text(f"Comprati: {bought}/25 | Mancano: {slots_left}")
           st.text(f"Media max/giocatore: {avg_price} cr")
-          # Semplice barra di progresso per visualizzare il budget residuo
           st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
           st.markdown("---")
 
