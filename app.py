@@ -86,7 +86,7 @@ if nfl_filter != "Tutte le squadre":
 players_data = final_query.order("name").execute().data
 available_players = [p for p in players_data if p["id"] not in bought_player_ids]
 
-# --- SIDEBAR: TOP 5 LIBERI (Sincronizzati con il ruolo principale) ---
+# --- SIDEBAR: TOP 5 LIBERI (Versione Compatta) ---
 st.sidebar.subheader("🔥 Top 5 Liberi")
 top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
 if current_role != "ALL":
@@ -98,10 +98,8 @@ top5_available = [p for p in top5_data if p["id"] not in bought_player_ids][:5]
 with st.sidebar.container(border=True):
   if top5_available:
     for idx, p in enumerate(top5_available, 1):
-      st.markdown(f"**{idx}. {p['name']}** `[{p['role']}]` ({p['team_nfl']})")
-      st.caption(f"💎 Listino: **{p['list_price']} cr**")
-      if idx < len(top5_available):
-        st.divider()
+      # Layout più compatto su riga singola / markdown ravvicinato
+      st.markdown(f"**{idx}. {p['name']}** `[{p['role']}]` ({p['team_nfl']}) — 💎 **{p['list_price']} cr**")
   else:
     st.info("Nessun giocatore disponibile.")
 
