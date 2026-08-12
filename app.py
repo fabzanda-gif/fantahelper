@@ -8,13 +8,15 @@ supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
 st.title("⚽ RCD Escanol - Live Auction Assistant")
 
-# Limiti massimi per ruolo (Totale 25 giocatori)
+# Limiti massimi per ruolo e totale per squadra
 ROLE_LIMITS = {
     "P": 3,
     "D": 8,
     "C": 8,
     "A": 6
 }
+TOTAL_SLOTS_PER_TEAM = 25
+TOTAL_TEAMS = 12
 
 # 1. Recupero delle squadre e dei roster dal DB
 teams_data = (
@@ -34,12 +36,36 @@ rosters_data = (
 
 # Estraiamo gli ID di tutti i giocatori già acquistati per filtrarli
 bought_player_ids = set()
+team_role_totals = {t["name"]: {"P": 0, "D": 0, "C": 0, "A": 0} for t in teams_data}
+team_total_bought = {t["name"]: 0 for t in teams_data}
+
 if rosters_data:
   for r in rosters_data:
     if r.get("players") and r["players"].get("id"):
       bought_player_ids.add(r["players"]["id"])
+    if r.get("teams") and r.get("players"):
+      t_name = r["teams"]["name"]
+      p_role = r["players"]["role"]
+      if t_name in team_role_totals and p_role in team_role_totals[t_name]:
+        team_role_totals[t_name][p_role] += 1
+        team_total_bought[t_name] += 1
 
-role_mapping = {
+# Verifichiamo quali ruoli sono completi per TUTTE le squadre
+completed_roles = []
+for role, max_limit in ROLE_LIMITS.items():
+  all_teams_completed_role = True
+  for t_name, counts in team_role_totals.items():
+    if counts[role] < max_limit:
+      all_teams_completed_role = False
+      break
+  if all_teams_completed_role:
+    completed_roles.append(role)
+
+# Verifichiamo se l'asta è completamente conclusa (tutte le squadre a 25 giocatori)
+auction_is_finished = all(bought >= TOTAL_SLOTS_PER_TEAM for bought in team_total_bought.values())
+
+# Costruiamo il mapping dei ruoli filtrando quelli completati
+role_mapping_full = {
     "Tutti i ruoli": "ALL",
     "Portieri (P)": "P",
     "Difensori (D)": "D",
@@ -47,50 +73,24 @@ role_mapping = {
     "Attaccanti (A)": "A",
 }
 
-# --- CORPO CENTRALE: COMMAND BAR / ASSEGNAZIONE ---
-st.subheader("🎯 Assegnazione Guidata Giocatore")
+# Rimuoviamo dal dropdown i ruoli completati (tranne "Tutti i ruoli")
+available_role_labels = {}
+for label, code in role_mapping_full.items():
+  if code == "ALL" or code not in completed_roles:
+    available_role_labels[label] = code
 
-col_r, col_t = st.columns(2)
-
-with col_r:
-  selected_role_label_main = st.selectbox(
-      "1. Seleziona Ruolo", list(role_mapping.keys()), key="main_role_select"
-  )
-  current_role = role_mapping[selected_role_label_main]
-
-query_base = supabase.table("players").select("team_nfl")
-if current_role != "ALL":
-  query_base = query_base.eq("role", current_role)
-
-all_role_players = query_base.execute().data
-available_nfl_teams = (
-    sorted(list(set([p["team_nfl"] for p in all_role_players if p["team_nfl"]])))
-    if all_role_players
-    else []
-)
-
-with col_t:
-  nfl_filter = st.selectbox(
-      "2. Filtra per Squadra Serie A (Opzionale)",
-      ["Tutte le squadre"] + available_nfl_teams,
-  )
-
-final_query = supabase.table("players").select(
-    "id, name, role, team_nfl, list_price"
-)
-if current_role != "ALL":
-  final_query = final_query.eq("role", current_role)
-if nfl_filter != "Tutte le squadre":
-  final_query = final_query.eq("team_nfl", nfl_filter)
-
-players_data = final_query.order("name").execute().data
-available_players = [p for p in players_data if p["id"] not in bought_player_ids]
-
-# --- SIDEBAR: TOP 5 LIBERI (Versione Compatta) ---
+# --- SIDEBAR: TOP 5 LIBERI ---
 st.sidebar.subheader("🔥 Top 5 Liberi")
+# Usiamo un selettore separato o sincronizzato per la sidebar
+sidebar_role_options = {l: c for l, c in available_role_labels.items() if c != "ALL"}
+sidebar_role_labels_list = ["Tutti i ruoli"] + list(sidebar_role_options.keys()) if sidebar_role_options else ["Tutti i ruoli"]
+
+selected_sidebar_label = st.sidebar.selectbox("Reparto", sidebar_role_labels_list, key="sidebar_role_select")
+current_sidebar_role = "ALL" if selected_sidebar_label == "Tutti i ruoli" else sidebar_role_options[selected_sidebar_label]
+
 top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
-if current_role != "ALL":
-  top5_query = top5_query.eq("role", current_role)
+if current_sidebar_role != "ALL":
+  top5_query = top5_query.eq("role", current_sidebar_role)
 
 top5_data = top5_query.order("list_price", desc=True).execute().data
 top5_available = [p for p in top5_data if p["id"] not in bought_player_ids][:5]
@@ -98,7 +98,6 @@ top5_available = [p for p in top5_data if p["id"] not in bought_player_ids][:5]
 with st.sidebar.container(border=True):
   if top5_available:
     for idx, p in enumerate(top5_available, 1):
-      # Layout più compatto su riga singola / markdown ravvicinato
       st.markdown(f"**{idx}. {p['name']}** `[{p['role']}]` ({p['team_nfl']}) — 💎 **{p['list_price']} cr**")
   else:
     st.info("Nessun giocatore disponibile.")
@@ -114,110 +113,141 @@ if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
   st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
   st.rerun()
 
+# --- CORPO CENTRALE ---
+st.subheader("🎯 Assegnazione Guidata Giocatore")
 
-if not available_players:
-  st.warning("Nessun giocatore disponibile trovato con questi filtri.")
+if auction_is_finished:
+  st.success("🎉 **ASTA CONCLUSA!** Tutte le squadre hanno completato le proprie rose.")
 else:
-  player_options = {
-      f"{p['name']} [{p['role']}] ({p['team_nfl']} - Listino:"
-      f" {p['list_price']})": p
-      for p in available_players
-  }
+  col_r, col_t = st.columns(2)
 
-  col1, col2, col3 = st.columns([3, 1, 2])
-
-  with col1:
-    selected_player_label = st.selectbox(
-        "3. Seleziona Giocatore", list(player_options.keys())
+  with col_r:
+    selected_role_label_main = st.selectbox(
+        "1. Seleziona Ruolo", list(available_role_labels.keys()), key="main_role_select"
     )
-    selected_player = player_options[selected_player_label]
+    current_role = available_role_labels[selected_role_label_main]
 
-  with col2:
-    default_price = (
-        selected_player["list_price"] if selected_player["list_price"] else 1
+  # Mostriamo un messaggio informativo se il ruolo selezionato è completo per alcune squadre ma non tutte, o un avviso generale
+  if current_role in completed_roles:
+    st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
+
+  query_base = supabase.table("players").select("team_nfl")
+  if current_role != "ALL":
+    query_base = query_base.eq("role", current_role)
+
+  all_role_players = query_base.execute().data
+  available_nfl_teams = (
+      sorted(list(set([p["team_nfl"] for p in all_role_players if p["team_nfl"]])))
+      if all_role_players
+      else []
+  )
+
+  with col_t:
+    nfl_filter = st.selectbox(
+        "2. Filtra per Squadra Serie A (Opzionale)",
+        ["Tutte le squadre"] + available_nfl_teams,
     )
-    purchase_price = st.number_input(
-        "4. Costo", min_value=1, max_value=500, value=int(default_price)
-    )
 
-  with col3:
-    team_names = teams_df["name"].tolist() if not teams_df.empty else []
-    target_team = st.selectbox("5. Squadra Acquirente", team_names)
+  final_query = supabase.table("players").select(
+      "id, name, role, team_nfl, list_price"
+  )
+  if current_role != "ALL":
+    final_query = final_query.eq("role", current_role)
+  if nfl_filter != "Tutte le squadre":
+    final_query = final_query.eq("team_nfl", nfl_filter)
 
-  if st.button("Conferma Acquisto", type="primary"):
-    team_row = teams_df[teams_df["name"] == target_team]
-    if team_row.empty:
-      st.error("Seleziona una squadra valida.")
-    else:
-      team_id = team_row.iloc[0]["id"]
-      current_budget = team_row.iloc[0]["remaining_budget"]
-      p_role = selected_player["role"]
+  players_data = final_query.order("name").execute().data
+  available_players = [p for p in players_data if p["id"] not in bought_player_ids]
 
-      team_role_count = 0
-      if rosters_data:
-        for r in rosters_data:
-          if r["teams"] and r["teams"]["name"] == target_team and r["players"] and r["players"]["role"] == p_role:
-            team_role_count += 1
+  if not available_players:
+    st.warning("Nessun giocatore disponibile trovato con questi filtri.")
+  else:
+    player_options = {
+        f"{p['name']} [{p['role']}] ({p['team_nfl']} - Listino:"
+        f" {p['list_price']})": p
+        for p in available_players
+    }
 
-      max_limit = ROLE_LIMITS.get(p_role, 25)
+    col1, col2, col3 = st.columns([3, 1, 2])
 
-      if team_role_count >= max_limit:
-        st.error(f"❌ Limite raggiunto! La squadra **{target_team}** ha già completato i posti per il ruolo {p_role} ({team_role_count}/{max_limit}).")
-      elif purchase_price > current_budget:
-        st.error(
-            f"❌ La squadra {target_team} non ha abbastanza crediti! (Budget"
-            f" residuo: {current_budget})"
-        )
+    with col1:
+      selected_player_label = st.selectbox(
+          "3. Seleziona Giocatore", list(player_options.keys())
+      )
+      selected_player = player_options[selected_player_label]
+
+    with col2:
+      default_price = (
+          selected_player["list_price"] if selected_player["list_price"] else 1
+      )
+      purchase_price = st.number_input(
+          "4. Costo", min_value=1, max_value=500, value=int(default_price)
+      )
+
+    with col3:
+      # Filtriamo le squadre che NON hanno ancora completato la rosa totale o il singolo ruolo
+      active_teams = []
+      for _, t in teams_df.iterrows():
+        t_name = t["name"]
+        p_role = selected_player["role"]
+        if team_total_bought[t_name] < TOTAL_SLOTS_PER_TEAM and team_role_totals[t_name][p_role] < ROLE_LIMITS[p_role]:
+          active_teams.append(t_name)
+
+      target_team = st.selectbox("5. Squadra Acquirente", active_teams if active_teams else teams_df["name"].tolist())
+
+    if st.button("Conferma Acquisto", type="primary"):
+      team_row = teams_df[teams_df["name"] == target_team]
+      if team_row.empty:
+        st.error("Seleziona una squadra valida.")
       else:
-        supabase.table("rosters").insert({
-            "team_id": team_id,
-            "player_id": selected_player["id"],
-            "purchase_price": purchase_price,
-        }).execute()
+        team_id = team_row.iloc[0]["id"]
+        current_budget = team_row.iloc[0]["remaining_budget"]
+        p_role = selected_player["role"]
 
-        new_budget = current_budget - purchase_price
-        supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq(
-            "id", team_id
-        ).execute()
+        team_role_count = team_role_totals[target_team][p_role]
+        max_limit = ROLE_LIMITS.get(p_role, TOTAL_SLOTS_PER_TEAM)
 
-        st.success(
-            f"✅ Acquistato **{selected_player['name']}** [{p_role}] a"
-            f" **{purchase_price}** crediti per **{target_team}**!"
-        )
-        st.rerun()
+        if team_role_count >= max_limit:
+          st.error(f"❌ Limite raggiunto! La squadra **{target_team}** ha già completato i posti per il ruolo {p_role} ({team_role_count}/{max_limit}).")
+        elif team_total_bought[target_team] >= TOTAL_SLOTS_PER_TEAM:
+          st.error(f"❌ La squadra **{target_team}** ha completato la rosa (25/25).")
+        elif purchase_price > current_budget:
+          st.error(
+              f"❌ La squadra {target_team} non ha abbastanza crediti! (Budget"
+              f" residuo: {current_budget})"
+          )
+        else:
+          supabase.table("rosters").insert({
+              "team_id": team_id,
+              "player_id": selected_player["id"],
+              "purchase_price": purchase_price,
+          }).execute()
+
+          new_budget = current_budget - purchase_price
+          supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq(
+              "id", team_id
+          ).execute()
+
+          st.success(
+              f"✅ Acquistato **{selected_player['name']}** [{p_role}] a"
+              f" **{purchase_price}** crediti per **{target_team}**!"
+          )
+          st.rerun()
 
 # 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre
 st.divider()
 st.subheader("📊 Panoramica Squadre & Disponibilità")
 
 if not teams_df.empty:
-  team_role_counts = {}
-  bought_totals = {}
-  spent_totals = {}
-  
-  if rosters_data:
-    for r in rosters_data:
-      if r["teams"] and r["players"]:
-        t_name = r["teams"]["name"]
-        role = r["players"]["role"]
-        price = r.get("purchase_price", 0)
-        
-        bought_totals[t_name] = bought_totals.get(t_name, 0) + 1
-        spent_totals[t_name] = spent_totals.get(t_name, 0) + price
-        
-        if t_name not in team_role_counts:
-          team_role_counts[t_name] = {"P": 0, "D": 0, "C": 0, "A": 0}
-        team_role_counts[t_name][role] = team_role_counts[t_name].get(role, 0) + 1
-
   teams_summary = []
   for _, t in teams_df.iterrows():
     t_name = t["name"]
     rem_budget = t["remaining_budget"]
-    bought = bought_totals.get(t_name, 0)
-    spent = spent_totals.get(t_name, 0)
+    bought = team_total_bought[t_name]
+    spent = sum([r.get("purchase_price", 0) for r in rosters_data if r.get("teams") and r["teams"]["name"] == t_name])
     avg_spent_per_player = round(spent / bought, 1) if bought > 0 else 0.0
     
-    slots_left = max(0, 25 - bought)
+    slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
     avg_price = round(rem_budget / slots_left, 1) if slots_left > 0 else 0
     
     teams_summary.append({
@@ -226,7 +256,7 @@ if not teams_df.empty:
         "slots_left": slots_left,
         "avg_price": avg_price,
         "avg_spent": avg_spent_per_player,
-        "role_counts": team_role_counts.get(t_name, {"P": 0, "D": 0, "C": 0, "A": 0})
+        "role_counts": team_role_totals.get(t_name, {"P": 0, "D": 0, "C": 0, "A": 0})
     })
 
   teams_summary.sort(key=lambda x: (-x["avg_price"], -x["data"]["remaining_budget"], x["data"]["name"]))
