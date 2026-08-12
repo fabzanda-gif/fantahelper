@@ -8,7 +8,7 @@ supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
 st.title("⚽ RCD Escanol - Live Auction Assistant")
 
-# 1. Recupero delle squadre partecipanti dal DB
+# 1. Recupero delle squadre e dei roster dal DB
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -17,29 +17,23 @@ teams_data = (
 )
 teams_df = pd.DataFrame(teams_data)
 
-# Sidebar: Situazione Crediti e Strumenti Admin
-st.sidebar.header("📊 Situazione Crediti")
-if not teams_df.empty:
-  for _, row in teams_df.iterrows():
-    st.sidebar.metric(
-        label=f"{row['name']}",
-        value=f"{row['remaining_budget']} / {row['initial_budget']}",
-    )
+rosters_data = (
+    supabase.table("rosters")
+    .select("purchase_price, teams(name), players(name, role, team_nfl, list_price)")
+    .execute()
+    .data
+)
 
-st.sidebar.divider()
+# Sidebar: Strumenti Admin (Reset)
 st.sidebar.subheader("🛠️ Strumenti Admin")
-# Pulsante per resettare l'asta (svuota i roster e ripristina i crediti)
 if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
-    # Cancella tutti i record da rosters (usiamo un filtro fittizio che prende tutto)
-    supabase.table("rosters").delete().gt("purchase_price", -1).execute()
-    
-    # Ripristina il budget iniziale per tutte le squadre
-    for _, row in teams_df.iterrows():
-        supabase.table("teams").update({"remaining_budget": int(row['initial_budget'])}).eq("id", row['id']).execute()
-        
-    st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
-    st.rerun()
-
+  supabase.table("rosters").delete().gt("purchase_price", -1).execute()
+  for _, row in teams_df.iterrows():
+    supabase.table("teams").update(
+        {"remaining_budget": int(row["initial_budget"])}
+    ).eq("id", row["id"]).execute()
+  st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
+  st.rerun()
 
 # 2. Sezione Interattiva: Selezione Ruolo -> Squadra Serie A (Opzionale) -> Giocatore -> Prezzo -> Squadra
 st.subheader("🎯 Assegnazione Guidata Giocatore")
@@ -59,10 +53,9 @@ with col_r:
   )
   current_role = role_mapping[selected_role_label]
 
-# Recupero preliminare per estrarre le squadre di Serie A disponibili (filtrato per ruolo se non è ALL)
 query_base = supabase.table("players").select("team_nfl")
 if current_role != "ALL":
-    query_base = query_base.eq("role", current_role)
+  query_base = query_base.eq("role", current_role)
 
 all_role_players = query_base.execute().data
 available_nfl_teams = (
@@ -72,14 +65,14 @@ available_nfl_teams = (
 )
 
 with col_t:
-  # Filtro opzionale per squadra di Serie A
   nfl_filter = st.selectbox(
       "2. Filtra per Squadra Serie A (Opzionale)",
       ["Tutte le squadre"] + available_nfl_teams,
   )
 
-# Costruiamo la query finale
-final_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
+final_query = supabase.table("players").select(
+    "id, name, role, team_nfl, list_price"
+)
 if current_role != "ALL":
   final_query = final_query.eq("role", current_role)
 if nfl_filter != "Tutte le squadre":
@@ -90,9 +83,9 @@ players_data = final_query.order("name").execute().data
 if not players_data:
   st.warning("Nessun giocatore trovato con questi filtri.")
 else:
-  # Aggiunto il ruolo in parentesi quadra nella label del giocatore per maggiore chiarezza
   player_options = {
-      f"{p['name']} [{p['role']}] ({p['team_nfl']} - Listino: {p['list_price']})": p
+      f"{p['name']} [{p['role']}] ({p['team_nfl']} - Listino:"
+      f" {p['list_price']})": p
       for p in players_data
   }
 
@@ -106,9 +99,7 @@ else:
 
   with col2:
     default_price = (
-        selected_player["list_price"]
-        if selected_player["list_price"]
-        else 1
+        selected_player["list_price"] if selected_player["list_price"] else 1
     )
     purchase_price = st.number_input(
         "4. Costo", min_value=1, max_value=500, value=int(default_price)
@@ -132,14 +123,12 @@ else:
             f" residuo: {current_budget})"
         )
       else:
-        # Inserisce l'acquisto
         supabase.table("rosters").insert({
             "team_id": team_id,
             "player_id": selected_player["id"],
             "purchase_price": purchase_price,
         }).execute()
 
-        # Aggiorna il budget della squadra
         new_budget = current_budget - purchase_price
         supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq(
             "id", team_id
@@ -151,19 +140,53 @@ else:
         )
         st.rerun()
 
-# 3. Tabella delle Rose Acquistate
+# 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre
 st.divider()
-st.subheader("📋 Rose e Giocatori Assegnati")
+st.subheader("📊 Panoramica Squadre & Disponibilità")
 
-rosters_data = (
-    supabase.table("rosters")
-    .select(
-        "purchase_price, teams(name), players(name, role, team_nfl,"
-        " list_price)"
-    )
-    .execute()
-    .data
-)
+if not teams_df.empty:
+  # Calcoliamo quanti giocatori ha comprato ciascuna squadra
+  bought_counts = {}
+  if rosters_data:
+    for r in rosters_data:
+      if r["teams"]:
+        t_name = r["teams"]["name"]
+        bought_counts[t_name] = bought_counts.get(t_name, 0) + 1
+
+  # Dividiamo le 12 squadre in righe da 4 colonne per una visualizzazione pulita in orizzontale
+  teams_per_row = 4
+  teams_list = teams_df.to_dict(orient="records")
+
+  for i in range(0, len(teams_list), teams_per_row):
+    cols = st.columns(teams_per_row)
+    for j, col in enumerate(cols):
+      if i + j < len(teams_list):
+        t = teams_list[i + j]
+        t_name = t["name"]
+        rem_budget = t["remaining_budget"]
+        init_budget = t["initial_budget"]
+        bought = bought_counts.get(t_name, 0)
+        # Rosa standard ipotizzata a 25 elementi
+        slots_left = max(0, 25 - bought)
+        avg_price = (
+            round(rem_budget / slots_left, 1) if slots_left > 0 else 0
+        )
+
+        with col:
+          st.markdown(f"**{t_name}**")
+          st.metric(
+              label="Budget",
+              value=f"{rem_budget} cr",
+              delta=f"{rem_budget - init_budget} cr",
+          )
+          st.text(f"Comprati: {bought}/25 | Mancano: {slots_left}")
+          st.text(f"Media max/giocatore: {avg_price} cr")
+          # Semplice barra di progresso per visualizzare il budget residuo
+          st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
+          st.markdown("---")
+
+# 4. Tabella delle Rose Acquistate Dettagliata
+st.subheader("📋 Rose e Giocatori Assegnati")
 
 if rosters_data:
   formatted_rosters = []
