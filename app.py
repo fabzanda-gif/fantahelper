@@ -39,8 +39,6 @@ if rosters_data:
     if r.get("players") and r["players"].get("id"):
       bought_player_ids.add(r["players"]["id"])
 
-# --- SIDEBAR: TOP 5 E STRUMENTI ADMIN ---
-st.sidebar.subheader("🔥 Top 5 Liberi")
 role_mapping = {
     "Tutti i ruoli": "ALL",
     "Portieri (P)": "P",
@@ -48,20 +46,55 @@ role_mapping = {
     "Centrocampisti (C)": "C",
     "Attaccanti (A)": "A",
 }
-selected_role_label_sidebar = st.sidebar.selectbox(
-    "Reparto", list(role_mapping.keys()), key="sidebar_role_select"
-)
-current_role_sidebar = role_mapping[selected_role_label_sidebar]
 
-# Query Top 5 nella Sidebar
+# --- CORPO CENTRALE: COMMAND BAR / ASSEGNAZIONE ---
+st.subheader("🎯 Assegnazione Guidata Giocatore")
+
+col_r, col_t = st.columns(2)
+
+with col_r:
+  selected_role_label_main = st.selectbox(
+      "1. Seleziona Ruolo", list(role_mapping.keys()), key="main_role_select"
+  )
+  current_role = role_mapping[selected_role_label_main]
+
+query_base = supabase.table("players").select("team_nfl")
+if current_role != "ALL":
+  query_base = query_base.eq("role", current_role)
+
+all_role_players = query_base.execute().data
+available_nfl_teams = (
+    sorted(list(set([p["team_nfl"] for p in all_role_players if p["team_nfl"]])))
+    if all_role_players
+    else []
+)
+
+with col_t:
+  nfl_filter = st.selectbox(
+      "2. Filtra per Squadra Serie A (Opzionale)",
+      ["Tutte le squadre"] + available_nfl_teams,
+  )
+
+final_query = supabase.table("players").select(
+    "id, name, role, team_nfl, list_price"
+)
+if current_role != "ALL":
+  final_query = final_query.eq("role", current_role)
+if nfl_filter != "Tutte le squadre":
+  final_query = final_query.eq("team_nfl", nfl_filter)
+
+players_data = final_query.order("name").execute().data
+available_players = [p for p in players_data if p["id"] not in bought_player_ids]
+
+# --- SIDEBAR: TOP 5 LIBERI (Sincronizzati con il ruolo principale) ---
+st.sidebar.subheader("🔥 Top 5 Liberi")
 top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
-if current_role_sidebar != "ALL":
-  top5_query = top5_query.eq("role", current_role_sidebar)
+if current_role != "ALL":
+  top5_query = top5_query.eq("role", current_role)
 
 top5_data = top5_query.order("list_price", desc=True).execute().data
 top5_available = [p for p in top5_data if p["id"] not in bought_player_ids][:5]
 
-# Renderizziamo i Top 5 dentro una card stilizzata nella sidebar
 with st.sidebar.container(border=True):
   if top5_available:
     for idx, p in enumerate(top5_available, 1):
@@ -83,44 +116,6 @@ if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
   st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
   st.rerun()
 
-# --- CORPO CENTRALE: COMMAND BAR / ASSEGNAZIONE ---
-st.subheader("🎯 Assegnazione Guidata Giocatore")
-
-col_r, col_t = st.columns(2)
-
-with col_r:
-  selected_role_label_main = st.selectbox(
-      "1. Seleziona Ruolo", list(role_mapping.keys()), key="main_role_select"
-  )
-  current_role_main = role_mapping[selected_role_label_main]
-
-query_base = supabase.table("players").select("team_nfl")
-if current_role_main != "ALL":
-  query_base = query_base.eq("role", current_role_main)
-
-all_role_players = query_base.execute().data
-available_nfl_teams = (
-    sorted(list(set([p["team_nfl"] for p in all_role_players if p["team_nfl"]])))
-    if all_role_players
-    else []
-)
-
-with col_t:
-  nfl_filter = st.selectbox(
-      "2. Filtra per Squadra Serie A (Opzionale)",
-      ["Tutte le squadre"] + available_nfl_teams,
-  )
-
-final_query = supabase.table("players").select(
-    "id, name, role, team_nfl, list_price"
-)
-if current_role_main != "ALL":
-  final_query = final_query.eq("role", current_role_main)
-if nfl_filter != "Tutte le squadre":
-  final_query = final_query.eq("team_nfl", nfl_filter)
-
-players_data = final_query.order("name").execute().data
-available_players = [p for p in players_data if p["id"] not in bought_player_ids]
 
 if not available_players:
   st.warning("Nessun giocatore disponibile trovato con questi filtri.")
