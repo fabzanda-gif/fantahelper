@@ -1,3 +1,4 @@
+import random
 import pandas as pd
 import streamlit as st
 from supabase import create_client
@@ -16,7 +17,6 @@ ROLE_LIMITS = {
     "A": 6
 }
 TOTAL_SLOTS_PER_TEAM = 25
-TOTAL_TEAMS = 12
 
 # 1. Recupero delle squadre e dei roster dal DB
 teams_data = (
@@ -61,10 +61,8 @@ for role, max_limit in ROLE_LIMITS.items():
   if all_teams_completed_role:
     completed_roles.append(role)
 
-# Verifichiamo se l'asta è completamente conclusa (tutte le squadre a 25 giocatori)
 auction_is_finished = all(bought >= TOTAL_SLOTS_PER_TEAM for bought in team_total_bought.values())
 
-# Costruiamo il mapping dei ruoli filtrando quelli completati
 role_mapping_full = {
     "Tutti i ruoli": "ALL",
     "Portieri (P)": "P",
@@ -73,15 +71,13 @@ role_mapping_full = {
     "Attaccanti (A)": "A",
 }
 
-# Rimuoviamo dal dropdown i ruoli completati (tranne "Tutti i ruoli")
 available_role_labels = {}
 for label, code in role_mapping_full.items():
   if code == "ALL" or code not in completed_roles:
     available_role_labels[label] = code
 
-# --- SIDEBAR: TOP 5 LIBERI ---
+# --- SIDEBAR ---
 st.sidebar.subheader("🔥 Top 5 Liberi")
-# Usiamo un selettore separato o sincronizzato per la sidebar
 sidebar_role_options = {l: c for l, c in available_role_labels.items() if c != "ALL"}
 sidebar_role_labels_list = ["Tutti i ruoli"] + list(sidebar_role_options.keys()) if sidebar_role_options else ["Tutti i ruoli"]
 
@@ -103,7 +99,57 @@ with st.sidebar.container(border=True):
     st.info("Nessun giocatore disponibile.")
 
 st.sidebar.divider()
-st.sidebar.subheader("🛠️ Strumenti Admin")
+st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
+
+# Pulsante per riempire randomicamente le rose
+if st.sidebar.button("🎲 Autocompila rose (Mockup)"):
+  # Recuperiamo tutti i giocatori non ancora acquistati
+  all_players_res = supabase.table("players").select("id, role, list_price").execute().data
+  free_players = [p for p in all_players_res if p["id"] not in bought_player_ids]
+  random.shuffle(free_players)
+
+  # Prepariamo un dizionario aggiornato dei conteggi in memoria
+  sim_bought = team_total_bought.copy()
+  sim_roles = {t: team_role_totals[t].copy() for t in team_role_totals}
+  sim_budgets = {t["name"]: t["remaining_budget"] for t in teams_data}
+  team_id_map = {t["name"]: t["id"] for t in teams_data}
+
+  inserts = []
+  budget_updates = {t["name"]: 0 for t in teams_data}
+
+  for player in free_players:
+    p_role = player["role"]
+    p_price = player["list_price"] if player["list_price"] else 1
+
+    # Troviamo le squadre che hanno bisogno di questo ruolo e hanno budget
+    valid_teams = []
+    for t_name in sim_bought:
+      if sim_bought[t_name] < TOTAL_SLOTS_PER_TEAM and sim_roles[t_name][p_role] < ROLE_LIMITS[p_role] and sim_budgets[t_name] >= p_price:
+        valid_teams.append(t_name)
+
+    if valid_teams:
+      chosen_team = random.choice(valid_teams)
+      inserts.append({
+          "team_id": team_id_map[chosen_team],
+          "player_id": player["id"],
+          "purchase_price": p_price
+      })
+      sim_bought[chosen_team] += 1
+      sim_roles[chosen_team][p_role] += 1
+      sim_budgets[chosen_team] -= p_price
+
+  if inserts:
+    # Inseriamo a blocchi su Supabase
+    supabase.table("rosters").insert(inserts).execute()
+    # Aggiorniamo i budget delle squadre
+    for t_name, new_budget in sim_budgets.items():
+      supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq("id", team_id_map[t_name]).execute()
+    
+    st.sidebar.success("Rose autocompilate con successo!")
+    st.rerun()
+  else:
+    st.sidebar.warning("Nessun inserimento possibile (limiti raggiunti o budget esauriti).")
+
 if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
   supabase.table("rosters").delete().gt("purchase_price", -1).execute()
   for _, row in teams_df.iterrows():
@@ -127,7 +173,6 @@ else:
     )
     current_role = available_role_labels[selected_role_label_main]
 
-  # Mostriamo un messaggio informativo se il ruolo selezionato è completo per alcune squadre ma non tutte, o un avviso generale
   if current_role in completed_roles:
     st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
 
@@ -185,7 +230,6 @@ else:
       )
 
     with col3:
-      # Filtriamo le squadre che NON hanno ancora completato la rosa totale o il singolo ruolo
       active_teams = []
       for _, t in teams_df.iterrows():
         t_name = t["name"]
