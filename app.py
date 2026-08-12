@@ -17,7 +17,7 @@ teams_data = (
 )
 teams_df = pd.DataFrame(teams_data)
 
-# Sidebar: Situazione Crediti
+# Sidebar: Situazione Crediti e Strumenti Admin
 st.sidebar.header("📊 Situazione Crediti")
 if not teams_df.empty:
   for _, row in teams_df.iterrows():
@@ -26,6 +26,21 @@ if not teams_df.empty:
         value=f"{row['remaining_budget']} / {row['initial_budget']}",
     )
 
+st.sidebar.divider()
+st.sidebar.subheader("🛠️ Strumenti Admin")
+# Pulsante per resettare l'asta (svuota i roster e ripristina i crediti)
+if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
+    # Cancella tutti i record da rosters (usiamo un filtro fittizio che prende tutto)
+    supabase.table("rosters").delete().gt("purchase_price", -1).execute()
+    
+    # Ripristina il budget iniziale per tutte le squadre
+    for _, row in teams_df.iterrows():
+        supabase.table("teams").update({"remaining_budget": int(row['initial_budget'])}).eq("id", row['id']).execute()
+        
+    st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
+    st.rerun()
+
+
 # 2. Sezione Interattiva: Selezione Ruolo -> Squadra Serie A (Opzionale) -> Giocatore -> Prezzo -> Squadra
 st.subheader("🎯 Assegnazione Guidata Giocatore")
 
@@ -33,6 +48,7 @@ col_r, col_t = st.columns(2)
 
 with col_r:
   role_mapping = {
+      "Tutti i ruoli": "ALL",
       "Portieri (P)": "P",
       "Difensori (D)": "D",
       "Centrocampisti (C)": "C",
@@ -43,8 +59,11 @@ with col_r:
   )
   current_role = role_mapping[selected_role_label]
 
-# Recupero preliminare per estrarre le squadre di Serie A disponibili per quel ruolo
-query_base = supabase.table("players").select("team_nfl").eq("role", current_role)
+# Recupero preliminare per estrarre le squadre di Serie A disponibili (filtrato per ruolo se non è ALL)
+query_base = supabase.table("players").select("team_nfl")
+if current_role != "ALL":
+    query_base = query_base.eq("role", current_role)
+
 all_role_players = query_base.execute().data
 available_nfl_teams = (
     sorted(list(set([p["team_nfl"] for p in all_role_players if p["team_nfl"]])))
@@ -59,8 +78,10 @@ with col_t:
       ["Tutte le squadre"] + available_nfl_teams,
   )
 
-# Costruiamo la query filtrando per ruolo e opzionalmente per squadra di Serie A
-final_query = supabase.table("players").select("id, name, team_nfl, list_price").eq("role", current_role)
+# Costruiamo la query finale
+final_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
+if current_role != "ALL":
+  final_query = final_query.eq("role", current_role)
 if nfl_filter != "Tutte le squadre":
   final_query = final_query.eq("team_nfl", nfl_filter)
 
@@ -69,8 +90,9 @@ players_data = final_query.order("name").execute().data
 if not players_data:
   st.warning("Nessun giocatore trovato con questi filtri.")
 else:
+  # Aggiunto il ruolo in parentesi quadra nella label del giocatore per maggiore chiarezza
   player_options = {
-      f"{p['name']} ({p['team_nfl']} - Listino: {p['list_price']})": p
+      f"{p['name']} [{p['role']}] ({p['team_nfl']} - Listino: {p['list_price']})": p
       for p in players_data
   }
 
@@ -110,14 +132,16 @@ else:
             f" residuo: {current_budget})"
         )
       else:
+        # Inserisce l'acquisto
         supabase.table("rosters").insert({
             "team_id": team_id,
             "player_id": selected_player["id"],
             "purchase_price": purchase_price,
         }).execute()
 
+        # Aggiorna il budget della squadra
         new_budget = current_budget - purchase_price
-        supabase.table("teams").update({"remaining_budget": new_budget}).eq(
+        supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq(
             "id", team_id
         ).execute()
 
