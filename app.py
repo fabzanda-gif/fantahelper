@@ -27,10 +27,17 @@ teams_df = pd.DataFrame(teams_data)
 
 rosters_data = (
     supabase.table("rosters")
-    .select("purchase_price, teams(name), players(name, role, team_nfl, list_price)")
+    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price)")
     .execute()
     .data
 )
+
+# Estraiamo gli ID di tutti i giocatori già acquistati per filtrarli dal dropdown
+bought_player_ids = set()
+if rosters_data:
+  for r in rosters_data:
+    if r.get("players") and r["players"].get("id"):
+      bought_player_ids.add(r["players"]["id"])
 
 # Sidebar: Strumenti Admin (Reset)
 st.sidebar.subheader("🛠️ Strumenti Admin")
@@ -88,13 +95,16 @@ if nfl_filter != "Tutte le squadre":
 
 players_data = final_query.order("name").execute().data
 
-if not players_data:
-  st.warning("Nessun giocatore trovato con questi filtri.")
+# Filtriamo via i giocatori già acquistati
+available_players = [p for p in players_data if p["id"] not in bought_player_ids]
+
+if not available_players:
+  st.warning("Nessun giocatore disponibile trovato con questi filtri.")
 else:
   player_options = {
       f"{p['name']} [{p['role']}] ({p['team_nfl']} - Listino:"
       f" {p['list_price']})": p
-      for p in players_data
+      for p in available_players
   }
 
   col1, col2, col3 = st.columns([3, 1, 2])
@@ -126,7 +136,6 @@ else:
       current_budget = team_row.iloc[0]["remaining_budget"]
       p_role = selected_player["role"]
 
-      # Controllo limite ruoli per la squadra selezionata
       team_role_count = 0
       if rosters_data:
         for r in rosters_data:
@@ -160,7 +169,7 @@ else:
         )
         st.rerun()
 
-# 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre (Ordinata)
+# 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre
 st.divider()
 st.subheader("📊 Panoramica Squadre & Disponibilità")
 
@@ -172,7 +181,6 @@ if not teams_df.empty:
         t_name = r["teams"]["name"]
         bought_counts[t_name] = bought_counts.get(t_name, 0) + 1
 
-  # Calcoliamo i parametri di ordinamento per ciascuna squadra
   teams_summary = []
   for _, t in teams_df.iterrows():
     t_name = t["name"]
@@ -187,7 +195,6 @@ if not teams_df.empty:
         "avg_price": avg_price
     })
 
-  # Ordinamento richiesto: disponibilità media DESC, disponibilità totale (budget) DESC, nome ASC
   teams_summary.sort(key=lambda x: (-x["avg_price"], -x["data"]["remaining_budget"], x["data"]["name"]))
 
   teams_per_row = 4
