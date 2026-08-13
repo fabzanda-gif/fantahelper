@@ -6,8 +6,8 @@ from supabase import create_client
 # CONNESSIONE AL DATABASE SUPABASE
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
-st.title("⚽ RCD Escanol - Live Auction Assistant")
+st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
+st.title("⚽ RCD Escanyol - Live Auction Assistant")
 
 # LIMITI MASSIMI PER RUOLO E TOTALE PER SQUADRA
 ROLE_LIMITS = {
@@ -139,9 +139,9 @@ with st.sidebar.container(border=True):
 st.sidebar.divider()
 st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
 
-# Seleziona la squadra da analizzare (Default: RCD Escanol)
+# Seleziona la squadra da analizzare (Default: RCD Escanyol)
 team_names = teams_df["name"].tolist()
-default_team = "RCD Escanol" if "RCD Escanol" in team_names else (team_names[0] if team_names else None)
+default_team = "RCD Escanyol" if "RCD Escanyol" in team_names else (team_names[0] if team_names else None)
 default_idx = team_names.index(default_team) if default_team else 0
 
 selected_team_analysis = st.sidebar.selectbox(
@@ -541,9 +541,9 @@ if rosters_data:
   
   df_rosters = pd.DataFrame(formatted_rosters)
   
-  # Filtro per squadra nella tabella finale con preselezione su "RCD Escanol"
+  # Filtro per squadra nella tabella finale con preselezione su "RCD Escanyol"
   all_teams_filter = ["Tutte"] + team_names
-  default_table_idx = all_teams_filter.index("RCD Escanol") if "RCD Escanol" in all_teams_filter else 0
+  default_table_idx = all_teams_filter.index("RCD Escanyol") if "RCD Escanyol" in all_teams_filter else 0
   
   filtro_tabella = st.selectbox("Filtra per Squadra", all_teams_filter, index=default_table_idx, key="table_team_filter")
   if filtro_tabella != "Tutte":
