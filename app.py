@@ -76,17 +76,31 @@ for label, code in role_mapping_full.items():
   if code == "ALL" or code not in completed_roles:
     available_role_labels[label] = code
 
-# --- SIDEBAR ---
+
+# --- CORPO CENTRALE (Prima definizione per catturare il ruolo attivo) ---
+st.subheader("🎯 Assegnazione Guidata Giocatore")
+
+if auction_is_finished:
+  st.success("🎉 **ASTA CONCLUSA!** Tutte le squadre hanno completato le proprie rose.")
+  current_role = "ALL"
+else:
+  col_r, col_t = st.columns(2)
+
+  with col_r:
+    selected_role_label_main = st.selectbox(
+        "1. Seleziona Ruolo", list(available_role_labels.keys()), key="main_role_select"
+    )
+    current_role = available_role_labels[selected_role_label_main]
+
+  if current_role in completed_roles:
+    st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
+
+
+# --- SIDEBAR: TOP 5 E STRUMENTI ADMIN (Sincronizzati con `current_role`) ---
 st.sidebar.subheader("🔥 Top 5 Liberi")
-sidebar_role_options = {l: c for l, c in available_role_labels.items() if c != "ALL"}
-sidebar_role_labels_list = ["Tutti i ruoli"] + list(sidebar_role_options.keys()) if sidebar_role_options else ["Tutti i ruoli"]
-
-selected_sidebar_label = st.sidebar.selectbox("Reparto", sidebar_role_labels_list, key="sidebar_role_select")
-current_sidebar_role = "ALL" if selected_sidebar_label == "Tutti i ruoli" else sidebar_role_options[selected_sidebar_label]
-
 top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
-if current_sidebar_role != "ALL":
-  top5_query = top5_query.eq("role", current_sidebar_role)
+if current_role != "ALL":
+  top5_query = top5_query.eq("role", current_role)
 
 top5_data = top5_query.order("list_price", desc=True).execute().data
 top5_available = [p for p in top5_data if p["id"] not in bought_player_ids][:5]
@@ -103,25 +117,20 @@ st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
 
 # Pulsante per riempire randomicamente le rose
 if st.sidebar.button("🎲 Autocompila rose (Mockup)"):
-  # Recuperiamo tutti i giocatori non ancora acquistati
   all_players_res = supabase.table("players").select("id, role, list_price").execute().data
   free_players = [p for p in all_players_res if p["id"] not in bought_player_ids]
   random.shuffle(free_players)
 
-  # Prepariamo un dizionario aggiornato dei conteggi in memoria
   sim_bought = team_total_bought.copy()
   sim_roles = {t: team_role_totals[t].copy() for t in team_role_totals}
   sim_budgets = {t["name"]: t["remaining_budget"] for t in teams_data}
   team_id_map = {t["name"]: t["id"] for t in teams_data}
 
   inserts = []
-  budget_updates = {t["name"]: 0 for t in teams_data}
-
   for player in free_players:
     p_role = player["role"]
     p_price = player["list_price"] if player["list_price"] else 1
 
-    # Troviamo le squadre che hanno bisogno di questo ruolo e hanno budget
     valid_teams = []
     for t_name in sim_bought:
       if sim_bought[t_name] < TOTAL_SLOTS_PER_TEAM and sim_roles[t_name][p_role] < ROLE_LIMITS[p_role] and sim_budgets[t_name] >= p_price:
@@ -139,9 +148,7 @@ if st.sidebar.button("🎲 Autocompila rose (Mockup)"):
       sim_budgets[chosen_team] -= p_price
 
   if inserts:
-    # Inseriamo a blocchi su Supabase
     supabase.table("rosters").insert(inserts).execute()
-    # Aggiorniamo i budget delle squadre
     for t_name, new_budget in sim_budgets.items():
       supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq("id", team_id_map[t_name]).execute()
     
@@ -159,23 +166,9 @@ if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
   st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
   st.rerun()
 
-# --- CORPO CENTRALE ---
-st.subheader("🎯 Assegnazione Guidata Giocatore")
 
-if auction_is_finished:
-  st.success("🎉 **ASTA CONCLUSA!** Tutte le squadre hanno completato le proprie rose.")
-else:
-  col_r, col_t = st.columns(2)
-
-  with col_r:
-    selected_role_label_main = st.selectbox(
-        "1. Seleziona Ruolo", list(available_role_labels.keys()), key="main_role_select"
-    )
-    current_role = available_role_labels[selected_role_label_main]
-
-  if current_role in completed_roles:
-    st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
-
+# --- CONTINUAZIONE CORPO CENTRALE ---
+if not auction_is_finished:
   query_base = supabase.table("players").select("team_nfl")
   if current_role != "ALL":
     query_base = query_base.eq("role", current_role)
