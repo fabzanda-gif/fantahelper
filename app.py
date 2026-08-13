@@ -3,14 +3,13 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-# CONNESSIONE AL DATABASE SUPABASE
+# Connessione a Supabase
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-# CONFIGURAZIONE DELLA PAGINA E DEL LAYOUT
 st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
 st.title("⚽ RCD Escanol - Live Auction Assistant")
 
-# LIMITI MASSIMI PER RUOLO E TOTALE PER SQUADRA
+# Limiti massimi per ruolo e totale per squadra
 ROLE_LIMITS = {
     "P": 3,
     "D": 8,
@@ -19,17 +18,23 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# FUNZIONE PER IL CALCOLO DELLO SCORE GLOBALE (DA 0 A 10) DEL GIOCATORE
-def calculate_player_score(p):
-    score = min(10, (p.get("list_price", 1) / 50) * 5)
-    if p.get("status_titolarita") == "Titolare": score += 2
-    elif p.get("status_titolarita") == "Riserva": score -= 2
-    if p.get("rigorista"): score += 1.5
-    if p.get("propensione_cartellini") == "A rischio malus": score -= 1
-    if p.get("primo_anno_serie_a"): score -= 0.5
-    return round(max(0, min(10, score)), 1)
+# FUNZIONE RICALIBRATA PER IL RATING (DA 0 A 10) DEL GIOCATORE
+def calculate_player_rating(p):
+    rating = 6.0 
+    listino = p.get("list_price", 1)
+    if listino >= 30: rating += 2.5
+    elif listino >= 20: rating += 1.5
+    elif listino >= 10: rating += 0.5
+    
+    if p.get("status_titolarita") == "Titolare": rating += 1.0
+    elif p.get("status_titolarita") == "Riserva": rating -= 2.0
+    
+    if p.get("rigorista"): rating += 1.0
+    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.8
+    if p.get("primo_anno_serie_a"): rating -= 0.5
+    return round(max(0, min(10, rating)), 1)
 
-# 1. RECUPERO DELLE SQUADRE E DEI ROSTER DAL DB (INCLUSI TUTTI GLI INSIGHTS)
+# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights)
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -45,7 +50,7 @@ rosters_data = (
     .data
 )
 
-# ESTRAZIONE DEGLI ID E CONTEGGIO STATO ATTUALE DELLE SQUADRE
+# Estraiamo gli ID di tutti i giocatori già acquistati per filtrarli
 bought_player_ids = set()
 team_role_totals = {t["name"]: {"P": 0, "D": 0, "C": 0, "A": 0} for t in teams_data}
 team_total_bought = {t["name"]: 0 for t in teams_data}
@@ -63,7 +68,7 @@ if rosters_data:
         team_role_totals[t_name][p_role] += 1
         team_total_bought[t_name] += 1
 
-# VERIFICA RUOLI COMPLETI PER TUTTE LE SQUADRE
+# Verifichiamo quali ruoli sono completi per TUTTE le squadre
 completed_roles = []
 for role, max_limit in ROLE_LIMITS.items():
   all_teams_completed_role = True
@@ -89,7 +94,7 @@ for label, code in role_mapping_full.items():
   if code == "ALL" or code not in completed_roles:
     available_role_labels[label] = code
 
-# --- CORPO CENTRALE (SELEZIONE RUOLO ATTIVO) ---
+# --- CORPO CENTRALE (Selezione Ruolo Attivo) ---
 st.subheader("🎯 Assegnazione Guidata Giocatore")
 
 if auction_is_finished:
@@ -107,7 +112,7 @@ else:
   if current_role in completed_roles:
     st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
 
-# --- SIDEBAR: TOP 5 LIBERI ---
+# --- SIDEBAR: TOP 5 E STRUMENTI ADMIN ---
 st.sidebar.subheader("🔥 Top 5 Liberi")
 top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
 if current_role != "ALL":
@@ -124,10 +129,9 @@ with st.sidebar.container(border=True):
     st.info("Nessun giocatore disponibile.")
 
 st.sidebar.divider()
-
-# --- SIDEBAR: ANALISI ASTA, CONSIGLI E VOTO IN DECIMI (INDIPENDENTE) ---
 st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
 
+# Seleziona la squadra da analizzare (Default: RCD Escanol)
 team_names = teams_df["name"].tolist()
 default_team = "RCD Escanol" if "RCD Escanol" in team_names else (team_names[0] if team_names else None)
 default_idx = team_names.index(default_team) if default_team else 0
@@ -145,18 +149,18 @@ if selected_team_analysis:
     budget = teams_df[teams_df["name"] == selected_team_analysis]["remaining_budget"].values[0]
     slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
     
-    # CALCOLO VOTO IN DECIMI DELLA ROSA SELEZIONATA IN SIDEBAR
+    # Valutazione Rating in Sidebar
     if t_players:
-        avg_score = sum(calculate_player_score(p) for p in t_players) / len(t_players)
-        st.sidebar.metric("Voto Rosa", f"{avg_score:.1f} / 10.0")
+        avg_score = sum(calculate_player_rating(p) for p in t_players) / len(t_players)
+        st.sidebar.metric("Rating Rosa", f"{avg_score:.1f} / 10.0")
         if avg_score >= 7.5: st.sidebar.success("Rosa da Scudetto!")
         elif avg_score >= 6.0: st.sidebar.info("Rosa competitiva.")
         else: st.sidebar.warning("Rosa da rinforzare.")
     else:
-        st.sidebar.metric("Voto Rosa", "N/D")
-        st.sidebar.info("Assegna giocatori per calcolare il voto.")
+        st.sidebar.metric("Rating Rosa", "N/D")
+        st.sidebar.info("Assegna giocatori per calcolare il rating.")
     
-    # CALCOLI PER I CONSIGLI STRATEGICI
+    # Calcoli per i consigli
     p_count = sum(1 for p in t_players if p["role"] == "P")
     d_count = sum(1 for p in t_players if p["role"] == "D")
     c_count = sum(1 for p in t_players if p["role"] == "C")
@@ -171,9 +175,9 @@ if selected_team_analysis:
     if slots_left > 0:
         avg_spendable = budget / slots_left
         if avg_spendable < 5:
-            consigli.append(f"• **Budget critico:** hai {avg_spendable:.1f} cr/slot.")
+            consigli.append(f"• **Budget critico:** hai {avg_spendable:.1f} cr per slot.")
         else:
-            consigli.append(f"• **Budget ottimo:** hai {avg_spendable:.1f} cr/slot.")
+            consigli.append(f"• **Budget ottimo:** hai {avg_spendable:.1f} cr per slot.")
             
     if consigli:
         st.sidebar.markdown("**Consigli strategici:**")
@@ -185,10 +189,14 @@ if selected_team_analysis:
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
 
-# AUTOCOMPILA INTERMEDIO (RISPETTA I SLOT E RUOLI GIÀ OCCUPATI)
-if st.sidebar.button("🎲 Autocompila rose (Intermedio / Intelligente)"):
+# MOCKUP PER RUOLO O INTERO
+ruolo_mockup = st.sidebar.selectbox("Completa ruolo (Mockup)", ["Tutti"] + list(ROLE_LIMITS.keys()))
+
+if st.sidebar.button("🎲 Autocompila rose (Intermedio)"):
   all_players_res = supabase.table("players").select("id, role, list_price").execute().data
   free_players = [p for p in all_players_res if p["id"] not in bought_player_ids]
+  if ruolo_mockup != "Tutti":
+      free_players = [p for p in free_players if p["role"] == ruolo_mockup]
   random.shuffle(free_players)
 
   sim_bought = team_total_bought.copy()
@@ -254,8 +262,7 @@ if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
   st.sidebar.success("Tutte le rose sono state svuotate e i budget resettati!")
   st.rerun()
 
-
-# --- CONTINUAZIONE CORPO CENTRALE (ASSEGNAZIONE MANUALE) ---
+# --- CONTINUAZIONE CORPO CENTRALE ---
 if not auction_is_finished:
   query_base = supabase.table("players").select("team_nfl")
   if current_role != "ALL":
@@ -356,7 +363,7 @@ if not auction_is_finished:
           )
           st.rerun()
 
-# 3. TABELLA ORIZZONTALE / PANORAMICA SQUADRE & ALERT STRATEGICI CON VOTO
+# 3. PANORAMICA SQUADRE & ALERT STRATEGICI
 st.divider()
 st.subheader("📊 Panoramica Squadre & Alert Strategici")
 
@@ -375,15 +382,11 @@ if not teams_df.empty:
     
     t_players = team_players_map.get(t_name, [])
     
-    # CALCOLO VOTO SQUADRA
-    team_avg_score = sum(calculate_player_score(p) for p in t_players) / len(t_players) if t_players else 0.0
-    
-    # CONTEGGIO TOP PLAYER (Listino >= 25 o Slot 1° Slot)
+    team_avg_score = sum(calculate_player_rating(p) for p in t_players) / len(t_players) if t_players else 0.0
     top_players_count = sum(1 for p in t_players if p.get("slot_fantacalcio") == "1° Slot" or (p.get("list_price") or 0) >= 25)
 
     alerts = []
     
-    # 1. CONTROLLO CONCENTRAZIONE CLUB SERIE A (ESCLUDENDO I PORTIERI)
     nfl_counts = {}
     club_players_map = {}
     for p in t_players:
@@ -400,7 +403,6 @@ if not teams_df.empty:
             "help": f"Giocatori di movimento del club {club}:\n- " + "\n- ".join(club_players_map[club])
         })
 
-    # 2. CONTROLLO BALLOTTAGGI / SCOMMESSE
     ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
     if bought >= 5 and len(ballotaggio_players) >= (bought * 0.4):
       alerts.append({
@@ -408,7 +410,6 @@ if not teams_df.empty:
           "help": "Giocatori in ballottaggio:\n- " + "\n- ".join(ballotaggio_players)
       })
 
-    # 3. CONTROLLO CARTELLINI A RISCHIO
     cartellini_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("propensione_cartellini") == "A rischio malus"]
     if len(cartellini_players) >= 3:
       alerts.append({
@@ -416,7 +417,6 @@ if not teams_df.empty:
           "help": "Giocatori a rischio malus:\n- " + "\n- ".join(cartellini_players)
       })
 
-    # 4. CONTROLLO GIOCATORI AL PRIMO ANNO IN SERIE A
     rookie_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("primo_anno_serie_a")]
     if len(rookie_players) >= 3:
       alerts.append({
@@ -424,20 +424,15 @@ if not teams_df.empty:
           "help": "Giocatori al primo anno in Serie A:\n- " + "\n- ".join(rookie_players)
       })
 
-    # GENERAZIONE FRASE COERENTE E INFORMATIVA (SOSTITUISCE IL VECCHIO "ROSA BILANCIATA")
     if bought == 0:
         status_msg = "📭 Rosa ancora vuota."
     else:
-        # Valutiamo quanti rischi attivi ci sono
         risk_count = len(alerts)
-        if risk_count == 0:
-            risk_desc = "pochi rischi"
-        elif risk_count == 1:
-            risk_desc = "1 rischio potenziale"
-        else:
-            risk_desc = f"{risk_count} criticità da monitorare"
+        if risk_count == 0: risk_desc = "pochi rischi"
+        elif risk_count == 1: risk_desc = "1 rischio potenziale"
+        else: risk_desc = f"{risk_count} criticità da monitorare"
             
-        status_msg = f"✨ Voto: **{team_avg_score:.1f}** ({top_players_count} Top) — {risk_desc}."
+        status_msg = f"✨ Rating: **{team_avg_score:.1f}** ({top_players_count} Top) — {risk_desc}."
 
     teams_summary.append({
         "data": t,
@@ -484,7 +479,6 @@ if not teams_df.empty:
           st.text(f"Media max/giocatore: {avg_price} cr")
           st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
           
-          # MOSTRATO IL NUOVO MESSAGGIO RIASSUNTIVO AL POSTO DELLA VECCHIA DICITURA CONTRADDITTORIA
           st.markdown(f"*{status_msg}*")
 
           if alerts:
@@ -493,8 +487,8 @@ if not teams_df.empty:
             
           st.markdown("---")
 
-# 4. TABELLA DELLE ROSE ACQUISTATE DETTAGLIATA (CON INSIGHTS E VOTO)
-st.subheader("📋 Rose e Giocatori Assegnati (con Insights & Voto)")
+# 4. TABELLA DELLE ROSE ACQUISTATE DETTAGLIATA (CON FILTRO SQUADRA)
+st.subheader("📋 Rose e Giocatori Assegnati (con Insights & Rating)")
 
 if rosters_data:
   formatted_rosters = []
@@ -502,13 +496,13 @@ if rosters_data:
     if r["teams"] and r["players"]:
       p = r["players"]
       listino = p.get("list_price") or 1
-      player_score = calculate_player_score(p)
+      player_score = calculate_player_rating(p)
       
       formatted_rosters.append({
           "Squadra": r["teams"]["name"],
           "Giocatore": p["name"],
           "Ruolo": p["role"],
-          "Voto": player_score,
+          "Rating": player_score,
           "Club Serie A": p["team_nfl"],
           "Listino": listino,
           "Pagato": r["purchase_price"],
@@ -520,7 +514,15 @@ if rosters_data:
           "Cartellini": p.get("propensione_cartellini", "Normale"),
           "1° Anno A": "Sì" if p.get("primo_anno_serie_a") else "No"
       })
+  
   df_rosters = pd.DataFrame(formatted_rosters)
+  
+  # Filtro per squadra nella tabella finale
+  all_teams_filter = ["Tutte"] + team_names
+  filtro_tabella = st.selectbox("Filtra per Squadra", all_teams_filter, key="table_team_filter")
+  if filtro_tabella != "Tutte":
+      df_rosters = df_rosters[df_rosters["Squadra"] == filtro_tabella]
+      
   st.dataframe(df_rosters, use_container_width=True)
 else:
   st.info("Nessun giocatore ancora acquistato in questa sessione d'asta.")
