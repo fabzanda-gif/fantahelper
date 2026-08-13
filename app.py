@@ -2,6 +2,15 @@ import random
 import pandas as pd
 import streamlit as st
 from supabase import create_client
+import streamlit.components.v1 as components
+
+def play_sound(sound_url):
+    sound_html = f"""
+        <audio autoplay>
+            <source src="{sound_url}" type="audio/mp3">
+        </audio>
+    """
+    components.html(sound_html, height=0, width=0)
 
 # CONNESSIONE AL DATABASE SUPABASE
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
@@ -422,20 +431,25 @@ with tab1:
               p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
               
               if target_team == "Escanyol":
-                  if p_rtg >= 8.5:
-                      st.balloons()
-                      st.snow()
-                      st.success(f"🔥 MASSIVE COLPO! Hai preso **{selected_player['name']}** (Rating {p_rtg})! FESTA GRANDE IN CASA ESCANYOL! 🍾🎆")
-                  elif p_rtg >= 7.5:
-                      st.balloons()
-                      st.success(f"🎉 Ottimo innesto! Acquistato **{selected_player['name']}** con rating {p_rtg}. Gran bel colpo per l'Escanyol! 🌟")
-                  else:
-                      st.info(f"✅ Operazione conclusa: preso **{selected_player['name']}** a {purchase_price} crediti.")
-              else:
-                  st.success(
-                      f"✅ Acquistato **{selected_player['name']}** [{p_role}] a **{purchase_price}** crediti per **{target_team}**!"
-                  )
-              st.rerun()
+    if p_rtg >= 8.5:
+        st.balloons()
+        st.snow()
+        # Qui parte la musica di John Cena per i Top Player!
+        play_sound("https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3")
+        st.success(f"🔥 MASSIVE COLPO! Hai preso **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺🎺🎺")
+    elif p_rtg >= 7.5:
+        st.balloons()
+        play_sound("https://www.myinstants.com/media/sounds/ta-da.mp3")
+        st.success(f"🎉 Ottimo innesto! Acquistato **{selected_player['name']}** con rating {p_rtg}. Gran bel colpo per l'Escanyol! 🌟")
+    else:
+        play_sound("https://www.myinstants.com/media/sounds/plop.mp3")
+        st.info(f"✅ Operazione conclusa: preso **{selected_player['name']}** a {purchase_price} crediti.")
+else:
+    st.success(
+        f"✅ Acquistato **{selected_player['name']}** [{p_role}] a **{purchase_price}** crediti per **{target_team}**!"
+    )
+
+st.rerun()
 
     # 3. PANORAMICA SQUADRE & ALERT STRATEGICI
     st.divider()
