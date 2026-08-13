@@ -6,7 +6,7 @@ from supabase import create_client
 # CONNESSIONE AL DATABASE SUPABASE
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
+st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
 st.title("⚽ RCD Escanol - Live Auction Assistant")
 
 # LIMITI MASSIMI PER RUOLO E TOTALE PER SQUADRA
@@ -141,13 +141,8 @@ with tab1:
       if current_role in completed_roles:
         st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
 
-    # --- SIDEBAR: TOP 5 LORO (BASATO SU RATING E BUDGET DISPONIBILE PER ESCANYOL) ---
-    st.sidebar.subheader("🔥 Top 5 Liberi (Ranking & Affordabili)")
-
-    escanyol_budget = 0
-    escanyol_row = teams_df[teams_df["name"] == "Escanyol"]
-    if not escanyol_row.empty:
-        escanyol_budget = escanyol_row.iloc[0]["remaining_budget"]
+    # --- SIDEBAR: TOP 5 LORO (BASATO SU RATING) ---
+    st.sidebar.subheader("🔥 Top 5 Liberi (Ranking)")
 
     top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price, status_titolarita, rigorista, propensione_cartellini, primo_anno_serie_a")
     if current_role != "ALL":
@@ -155,17 +150,17 @@ with tab1:
 
     top5_data = top5_query.execute().data
 
-    affordable_free_players = [
+    free_players = [
         p for p in top5_data 
-        if p["id"] not in bought_player_ids and (p.get("list_price") or 1) <= escanyol_budget
+        if p["id"] not in bought_player_ids
     ]
 
-    affordable_free_players.sort(
+    free_players.sort(
         key=lambda x: calculate_player_rating(x, st.session_state.preferred_players), 
         reverse=True
     )
 
-    top5_available = affordable_free_players[:5]
+    top5_available = free_players[:5]
 
     with st.sidebar.container(border=True):
       if top5_available:
@@ -174,7 +169,7 @@ with tab1:
           star_indicator = " ⭐" if p["id"] in st.session_state.preferred_players else ""
           st.markdown(f"**{idx}. {p['name']}**{star_indicator} `[{p['role']}]` ({p['team_nfl']}) — ⭐️ **{p_rtg}** | 💎 **{p['list_price']} cr**")
       else:
-        st.info("Nessun giocatore disponibile nel tuo budget.")
+        st.info("Nessun giocatore disponibile.")
 
     st.sidebar.divider()
     st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
@@ -223,34 +218,34 @@ with tab1:
             avg_spendable = budget / slots_left
             st.sidebar.caption(f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** ({slots_left} slot liberi)")
 
-        sidebar_alerts = []
-        
+        # --- SEZIONE EMOJI & ALERT SPECIFICI CON VALUTAZIONE (THUMBS UP/DOWN) ---
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**📊 Cruscotto Rischi Rosa:**")
+
+        # 1. Calcolo Blocco Squadra Serie A
         nfl_counts = {}
         for p in t_players:
           if p.get("role") != "P":
             club = p.get("team_nfl")
             if club: nfl_counts[club] = nfl_counts.get(club, 0) + 1
-        for club, count in nfl_counts.items():
-          if count >= 4: sidebar_alerts.append(f"🚨 **Rischio Blocco:** {count} giocatori su {club}")
+        max_block_count = max(nfl_counts.values()) if nfl_counts else 0
+        block_status = "👍 Ottimale" if max_block_count < 4 else "👎 Rischio Blocco"
+        st.sidebar.write(f"🚨 **Blocco Squadra:** {max_block_count} max | {block_status}")
 
+        # 2. Calcolo Ballottaggi
         ballotaggio_count = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
-        if bought_count >= 5 and ballotaggio_count >= (bought_count * 0.4):
-          sidebar_alerts.append(f"⚠️ **Troppi Ballottaggi:** {ballotaggio_count} giocatori")
+        ballot_status = "👍 Ottimale" if ballotaggio_count < 3 else ("🟡 Moderato" if ballotaggio_count < 6 else "👎 Troppi")
+        st.sidebar.write(f"⚠️ **Ballottaggi:** {ballotaggio_count} giocatori | {ballot_status}")
 
+        # 3. Calcolo Cartellini A Rischio
         cartellini_count = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
-        if cartellini_count >= 3:
-          sidebar_alerts.append(f"🟨 **Rischio Malus:** {cartellini_count} a rischio cartellino")
+        cart_status = "👍 Pulita" if cartellini_count < 2 else ("🟡 Attenzione" if cartellini_count < 4 else "👎 Troppi Malus")
+        st.sidebar.write(f"🟨 **A rischio malus:** {cartellini_count} | {cart_status}")
 
+        # 4. Calcolo Rookie Primo Anno
         rookie_count = sum(1 for p in t_players if p.get("primo_anno_serie_a"))
-        if rookie_count >= 3:
-          sidebar_alerts.append(f"👶 **Rischio Rookie:** {rookie_count} al primo anno in A")
-
-        if sidebar_alerts:
-            st.sidebar.markdown("**Alert Squadra:**")
-            for alert in sidebar_alerts:
-                st.sidebar.markdown(alert)
-        else:
-            st.sidebar.caption("✅ Nessun alert di rilievo per questa rosa.")
+        rookie_status = "👍 Esperti" if rookie_count < 2 else ("🟡 Equilibrato" if rookie_count < 4 else "👎 Troppi Rookie")
+        st.sidebar.write(f"👶 **Primo anno in A:** {rookie_count} | {rookie_status}")
 
     st.sidebar.divider()
     st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
@@ -389,7 +384,7 @@ with tab1:
             if team_total_bought[t_name] < TOTAL_SLOTS_PER_TEAM and team_role_totals[t_name][p_role] < ROLE_LIMITS[p_role]:
               active_teams.append(t_name)
 
-          target_team = st.selectbox("5. Squadra Acquirente", active_teams if active_teams else teams_df["name"].tolist())
+          target_team = st.selectbox("5. Squadra Acquirente", active_teams if active_teams else teams_df["name"].tolist(), index=active_teams.index("Escanyol") if "Escanyol" in active_teams else 0)
 
         if st.button("Conferma Acquisto", type="primary"):
           team_row = teams_df[teams_df["name"] == target_team]
@@ -423,9 +418,23 @@ with tab1:
                   "id", team_id
               ).execute()
 
-              st.success(
-                  f"✅ Acquistato **{selected_player['name']}** [{p_role}] a **{purchase_price}** crediti per **{target_team}**!"
-              )
+              # --- FESTEGGIAMENTI PERSONALIZZATI PER ACQUISTO (SPECIALMENTE PER ESCANYOL) ---
+              p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
+              
+              if target_team == "Escanyol":
+                  if p_rtg >= 8.5:
+                      st.balloons()
+                      st.snow()
+                      st.success(f"🔥 MASSIVE COLPO! Hai preso **{selected_player['name']}** (Rating {p_rtg})! FESTA GRANDE IN CASA ESCANYOL! 🍾🎆")
+                  elif p_rtg >= 7.5:
+                      st.balloons()
+                      st.success(f"🎉 Ottimo innesto! Acquistato **{selected_player['name']}** con rating {p_rtg}. Gran bel colpo per l'Escanyol! 🌟")
+                  else:
+                      st.info(f"✅ Operazione conclusa: preso **{selected_player['name']}** a {purchase_price} crediti.")
+              else:
+                  st.success(
+                      f"✅ Acquistato **{selected_player['name']}** [{p_role}] a **{purchase_price}** crediti per **{target_team}**!"
+                  )
               st.rerun()
 
     # 3. PANORAMICA SQUADRE & ALERT STRATEGICI
@@ -562,7 +571,6 @@ with tab2:
     st.markdown("In questa sezione puoi visionare tutte le rose completate e l'**Analisi Voto Asta** basata su ranking, risparmio/overpaying sui listini e criticità complessive.")
 
     if rosters_data:
-        # --- TABELLA DETTAGLIATA GIOCATORI CON PREFERITI ---
         formatted_rosters = []
         for r in rosters_data:
           if r["teams"] and r["players"]:
@@ -634,20 +642,15 @@ with tab2:
                 })
                 continue
             
-            # 1. Rating medio rosa
             avg_rtg = all_teams_ratings.get(t_name, 0.0)
             
-            # 2. Differenza crediti (Listino totale vs Spesa totale)
             total_listino = sum((p.get("list_price") or 1) for p in t_players)
             total_speso = sum(r.get("purchase_price", 0) for r in t_purchases)
-            risparmio_crediti = total_listino - total_speso  # Positivo se ha risparmiato/preso sottocosto
+            risparmio_crediti = total_listino - total_speso 
             
-            # Normalizziamo il risparmio in un bonus/malus da sommare/sottrarre (es. ogni 10 crediti di risparmio danno ~0.2 punti, max +/- 2.0)
             risparmio_bonus = max(-2.0, min(2.0, risparmio_crediti / 15.0))
             
-            # 3. Conteggio criticità totali della rosa
             critiche_count = 0
-            # Controllo blocco squadra
             nfl_c = {}
             for p in t_players:
                 if p.get("role") != "P" and p.get("team_nfl"):
@@ -655,19 +658,15 @@ with tab2:
             for _, c_cnt in nfl_c.items():
                 if c_cnt >= 4: critiche_count += 1
             
-            # Controllo ballottaggi
             ballot_cnt = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
             if len(t_players) >= 5 and ballot_cnt >= (len(t_players) * 0.4): critiche_count += 1
             
-            # Controllo cartellini
             cart_cnt = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
             if cart_cnt >= 3: critiche_count += 1
             
-            # Controllo rookies
             rook_cnt = sum(1 for p in t_players if p.get("primo_anno_serie_a"))
             if rook_cnt >= 3: critiche_count += 1
 
-            # Calcolo Voto Finale Asta (Base Rating + Bonus Economico - 0.4 per ogni criticità)
             voto_asta = (avg_rtg * 0.7) + (5.0 * 0.3) + risparmio_bonus - (critiche_count * 0.4)
             voto_asta = round(max(0.0, min(10.0, voto_asta)), 1)
             
@@ -681,7 +680,7 @@ with tab2:
             
         df_grades = pd.DataFrame(auction_grades)
         df_grades = df_grades.sort_values(by="Voto Asta", ascending=False).reset_index(drop=True)
-        df_grades.index += 1 # Partiamo da posizione 1
+        df_grades.index += 1
         
         st.dataframe(df_grades, use_container_width=True)
 
