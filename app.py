@@ -6,8 +6,8 @@ from supabase import create_client
 # Connessione a Supabase
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
-st.title("⚽ RCD Escanyol - Live Auction Assistant")
+st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
+st.title("⚽ RCD Escanol - Live Auction Assistant")
 
 # Limiti massimi per ruolo e totale per squadra
 ROLE_LIMITS = {
@@ -18,7 +18,7 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights)
+# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights e primo anno)
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -29,7 +29,7 @@ teams_df = pd.DataFrame(teams_data)
 
 rosters_data = (
     supabase.table("rosters")
-    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio)")
+    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio, primo_anno_serie_a)")
     .execute()
     .data
 )
@@ -185,7 +185,7 @@ if not auction_is_finished:
     )
 
   final_query = supabase.table("players").select(
-      "id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio"
+      "id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio, primo_anno_serie_a"
   )
   if current_role != "ALL":
     final_query = final_query.eq("role", current_role)
@@ -300,7 +300,7 @@ if not teams_df.empty:
     nfl_counts = {}
     club_players_map = {}
     for p in t_players:
-      if p.get("role") != "P":  # <-- Escludiamo i portieri dal calcolo del blocco
+      if p.get("role") != "P":
         club = p.get("team_nfl")
         if club:
           nfl_counts[club] = nfl_counts.get(club, 0) + 1
@@ -313,7 +313,7 @@ if not teams_df.empty:
             "help": f"Giocatori di movimento del club {club}:\n- " + "\n- ".join(club_players_map[club])
         })
 
-    # 2. Controllo ballottaggi / scommesse (con dettaglio nomi)
+    # 2. Controllo ballottaggi / scommesse
     ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
     if bought >= 5 and len(ballotaggio_players) >= (bought * 0.4):
       alerts.append({
@@ -321,12 +321,20 @@ if not teams_df.empty:
           "help": "Giocatori in ballottaggio:\n- " + "\n- ".join(ballotaggio_players)
       })
 
-    # 3. Controllo cartellini a rischio (con dettaglio nomi)
+    # 3. Controllo cartellini a rischio
     cartellini_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("propensione_cartellini") == "A rischio malus"]
     if len(cartellini_players) >= 3:
       alerts.append({
           "text": f"🟨 **Rischio Malus:** {len(cartellini_players)} a rischio cartellino",
           "help": "Giocatori a rischio malus:\n- " + "\n- ".join(cartellini_players)
+      })
+
+    # 4. Controllo esubero giocatori al primo anno in Serie A (soglia >= 3)
+    rookie_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("primo_anno_serie_a")]
+    if len(rookie_players) >= 3:
+      alerts.append({
+          "text": f"👶 **Rischio Rookie:** {len(rookie_players)} al primo anno in A",
+          "help": "Giocatori al primo anno in Serie A:\n- " + "\n- ".join(rookie_players)
       })
 
     teams_summary.append({
@@ -402,7 +410,8 @@ if rosters_data:
           "Titolarità": p.get("status_titolarita", "Titolare"),
           "Rigorista": "Sì" if p.get("rigorista") else "No",
           "Fisico": p.get("affidabilita_fisica", "Integro"),
-          "Cartellini": p.get("propensione_cartellini", "Normale")
+          "Cartellini": p.get("propensione_cartellini", "Normale"),
+          "1° Anno A": "Sì" if p.get("primo_anno_serie_a") else "No"
       })
   df_rosters = pd.DataFrame(formatted_rosters)
   st.dataframe(df_rosters, use_container_width=True)
