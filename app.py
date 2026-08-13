@@ -6,8 +6,8 @@ from supabase import create_client
 # Connessione a Supabase
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
-st.title("⚽ RCD Escanol - Live Auction Assistant")
+st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
+st.title("⚽ RCD Escanyol - Live Auction Assistant")
 
 # Limiti massimi per ruolo e totale per squadra
 ROLE_LIMITS = {
@@ -296,24 +296,25 @@ if not teams_df.empty:
     t_players = team_players_map.get(t_name, [])
     alerts = []
     
-    # 1. Controllo concentrazione club Serie A (con dettaglio nomi per tooltip)
+    # 1. Controllo concentrazione club Serie A (ESCLUDENDO I PORTIERI)
     nfl_counts = {}
     club_players_map = {}
     for p in t_players:
-      club = p.get("team_nfl")
-      if club:
-        nfl_counts[club] = nfl_counts.get(club, 0) + 1
-        club_players_map.setdefault(club, []).append(p.get("name"))
+      if p.get("role") != "P":  # <-- Escludiamo i portieri dal calcolo del blocco
+        club = p.get("team_nfl")
+        if club:
+          nfl_counts[club] = nfl_counts.get(club, 0) + 1
+          club_players_map.setdefault(club, []).append(f"{p.get('name')} [{p.get('role')}]")
     
     for club, count in nfl_counts.items():
       if count >= 4:
         alerts.append({
-            "text": f"🚨 **Rischio Blocco:** {count} elementi su {club}",
-            "help": f"Giocatori del club {club}:\n- " + "\n- ".join(club_players_map[club])
+            "text": f"🚨 **Rischio Blocco:** {count} giocatori di movimento su {club}",
+            "help": f"Giocatori di movimento del club {club}:\n- " + "\n- ".join(club_players_map[club])
         })
 
     # 2. Controllo ballottaggi / scommesse (con dettaglio nomi)
-    ballotaggio_players = [p.get("name") for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
+    ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
     if bought >= 5 and len(ballotaggio_players) >= (bought * 0.4):
       alerts.append({
           "text": f"⚠️ **Troppi Ballottaggi:** {len(ballotaggio_players)} giocatori",
@@ -321,7 +322,7 @@ if not teams_df.empty:
       })
 
     # 3. Controllo cartellini a rischio (con dettaglio nomi)
-    cartellini_players = [p.get("name") for p in t_players if p.get("propensione_cartellini") == "A rischio malus"]
+    cartellini_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("propensione_cartellini") == "A rischio malus"]
     if len(cartellini_players) >= 3:
       alerts.append({
           "text": f"🟨 **Rischio Malus:** {len(cartellini_players)} a rischio cartellino",
