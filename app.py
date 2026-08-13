@@ -72,6 +72,18 @@ if rosters_data:
         team_role_totals[t_name][p_role] += 1
         team_total_bought[t_name] += 1
 
+# CALCOLO CLASSIFICA RATING GENERALE PER TUTTE LE SQUADRE
+all_teams_ratings = {}
+for t_name, p_list in team_players_map.items():
+    if p_list:
+        all_teams_ratings[t_name] = sum(calculate_player_rating(p) for p in p_list) / len(p_list)
+    else:
+        all_teams_ratings[t_name] = 0.0
+
+sorted_ratings = sorted(all_teams_ratings.items(), key=lambda x: x[1], reverse=True)
+rating_rank_map = {name: idx + 1 for idx, (name, _) in enumerate(sorted_ratings)}
+total_teams_count = len(teams_df)
+
 # VERIFICA RUOLI COMPLETI PER TUTTE LE SQUADRE
 completed_roles = []
 for role, max_limit in ROLE_LIMITS.items():
@@ -155,16 +167,20 @@ if selected_team_analysis:
     
     if not team_rank_row.empty:
         credit_rank = team_rank_row.index[0] + 1
-        total_teams_count = len(teams_df)
         budget = team_rank_row.iloc[0]["remaining_budget"]
     else:
-        credit_rank, total_teams_count, budget = 0, len(teams_df), 0
+        credit_rank, budget = 0, 0
 
     slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
     
+    # Valutazione Rating e Posizione in Sidebar
     if t_players:
         avg_score = sum(calculate_player_rating(p) for p in t_players) / len(t_players)
-        st.sidebar.metric("Rating Rosa", f"{avg_score:.1f} / 10.0")
+        rating_position = rating_rank_map.get(selected_team_analysis, "-")
+        
+        # Mostriamo il Rating con accanto la posizione (es. 7.6 / 10.0  (1/12))
+        st.sidebar.metric("Rating Rosa", f"{avg_score:.1f} / 10.0", delta=f"Posizione: {rating_position}/{total_teams_count}", delta_color="off")
+        
         if avg_score >= 8.0: st.sidebar.success("Rosa da Scudetto!")
         elif avg_score >= 6.5: st.sidebar.info("Rosa competitiva.")
         else: st.sidebar.warning("Rosa da rinforzare.")
@@ -401,7 +417,7 @@ if not teams_df.empty:
     
     t_players = team_players_map.get(t_name, [])
     
-    team_avg_score = sum(calculate_player_rating(p) for p in t_players) / len(t_players) if t_players else 0.0
+    team_avg_score = all_teams_ratings.get(t_name, 0.0)
     top_players_count = sum(1 for p in t_players if p.get("slot_fantacalcio") == "1° Slot" or (p.get("list_price") or 0) >= 25)
 
     alerts = []
@@ -486,11 +502,9 @@ if not teams_df.empty:
         role_string = f"**P** {rc.get('P', 0)}/{ROLE_LIMITS['P']} | **D** {rc.get('D', 0)}/{ROLE_LIMITS['D']} | **C** {rc.get('C', 0)}/{ROLE_LIMITS['C']} | **A** {rc.get('A', 0)}/{ROLE_LIMITS['A']}"
 
         with col:
-          # Rating vicino al nome della squadra in alto
-          team_display_title = f"**{t_name}** — ⭐️ {team_avg_score:.1f}" if bought > 0 else f"**{t_name}**"
+          team_display_title = f"**{t_name}** — ⭐️ {all_teams_ratings.get(t_name, 0.0):.1f}" if bought > 0 else f"**{t_name}**"
           st.markdown(team_display_title)
           
-          # Se la squadra ha completato la rosa (25/25), nascondiamo le metriche dell'asta non più rilevanti
           if bought < TOTAL_SLOTS_PER_TEAM:
               delta_text = f"{avg_spent} cr/giocatore" if bought > 0 else "N/A"
               st.metric(
@@ -543,7 +557,6 @@ if rosters_data:
   
   df_rosters = pd.DataFrame(formatted_rosters)
   
-  # Filtro per squadra nella tabella finale con preselezione su "RCD Escanyol"
   all_teams_filter = ["Tutte"] + team_names
   default_table_idx = all_teams_filter.index("RCD Escanyol") if "RCD Escanyol" in all_teams_filter else 0
   
