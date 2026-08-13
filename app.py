@@ -430,7 +430,7 @@ with tab1:
               # --- FESTEGGIAMENTI PERSONALIZZATI PER ACQUISTO (SPECIALMENTE PER ESCANYOL) ---
               p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
               
-              if target_team == "Escanyol":
+             if target_team == "Escanyol":
     if p_rtg >= 8.5:
         st.balloons()
         st.snow()
