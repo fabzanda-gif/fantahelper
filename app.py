@@ -126,12 +126,9 @@ with st.sidebar.container(border=True):
 st.sidebar.divider()
 
 # --- SIDEBAR: ANALISI ASTA, CONSIGLI E VOTO IN DECIMI (INDIPENDENTE) ---
-# SIDEBAR ANALISI ASTA E VALUTAZIONE
 st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
 
-# RECUPERO LISTA SQUADRE E IMPOSTAZIONE DEFAULT SICURO
 team_names = teams_df["name"].tolist()
-# Forza il default a 'RCD Escanol' se esiste, altrimenti usa il primo della lista
 default_team = "RCD Escanol" if "RCD Escanol" in team_names else (team_names[0] if team_names else None)
 default_idx = team_names.index(default_team) if default_team else 0
 
@@ -148,7 +145,7 @@ if selected_team_analysis:
     budget = teams_df[teams_df["name"] == selected_team_analysis]["remaining_budget"].values[0]
     slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
     
-    # CALCOLO VOTO IN DECIMI DELLA ROSA SELEZIONATA
+    # CALCOLO VOTO IN DECIMI DELLA ROSA SELEZIONATA IN SIDEBAR
     if t_players:
         avg_score = sum(calculate_player_score(p) for p in t_players) / len(t_players)
         st.sidebar.metric("Voto Rosa", f"{avg_score:.1f} / 10.0")
@@ -183,7 +180,7 @@ if selected_team_analysis:
         for consiglio in consigli:
             st.sidebar.write(consiglio)
     else:
-        st.sidebar.success("Rosa completa e ben bilanciata!")
+        st.sidebar.success("Rosa completa!")
 
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
@@ -359,7 +356,7 @@ if not auction_is_finished:
           )
           st.rerun()
 
-# 3. TABELLA ORIZZONTALE / PANORAMICA SQUADRE & ALERT STRATEGICI
+# 3. TABELLA ORIZZONTALE / PANORAMICA SQUADRE & ALERT STRATEGICI CON VOTO
 st.divider()
 st.subheader("📊 Panoramica Squadre & Alert Strategici")
 
@@ -377,6 +374,13 @@ if not teams_df.empty:
     avg_price = round(rem_budget / slots_left, 1) if slots_left > 0 else 0
     
     t_players = team_players_map.get(t_name, [])
+    
+    # CALCOLO VOTO SQUADRA
+    team_avg_score = sum(calculate_player_score(p) for p in t_players) / len(t_players) if t_players else 0.0
+    
+    # CONTEGGIO TOP PLAYER (Listino >= 25 o Slot 1° Slot)
+    top_players_count = sum(1 for p in t_players if p.get("slot_fantacalcio") == "1° Slot" or (p.get("list_price") or 0) >= 25)
+
     alerts = []
     
     # 1. CONTROLLO CONCENTRAZIONE CLUB SERIE A (ESCLUDENDO I PORTIERI)
@@ -420,6 +424,21 @@ if not teams_df.empty:
           "help": "Giocatori al primo anno in Serie A:\n- " + "\n- ".join(rookie_players)
       })
 
+    # GENERAZIONE FRASE COERENTE E INFORMATIVA (SOSTITUISCE IL VECCHIO "ROSA BILANCIATA")
+    if bought == 0:
+        status_msg = "📭 Rosa ancora vuota."
+    else:
+        # Valutiamo quanti rischi attivi ci sono
+        risk_count = len(alerts)
+        if risk_count == 0:
+            risk_desc = "pochi rischi"
+        elif risk_count == 1:
+            risk_desc = "1 rischio potenziale"
+        else:
+            risk_desc = f"{risk_count} criticità da monitorare"
+            
+        status_msg = f"✨ Voto: **{team_avg_score:.1f}** ({top_players_count} Top) — {risk_desc}."
+
     teams_summary.append({
         "data": t,
         "bought": bought,
@@ -427,7 +446,8 @@ if not teams_df.empty:
         "avg_price": avg_price,
         "avg_spent": avg_spent_per_player,
         "role_counts": team_role_totals.get(t_name, {"P": 0, "D": 0, "C": 0, "A": 0}),
-        "alerts": alerts
+        "alerts": alerts,
+        "status_msg": status_msg
     })
 
   teams_summary.sort(key=lambda x: (-x["avg_price"], -x["data"]["remaining_budget"], x["data"]["name"]))
@@ -447,6 +467,7 @@ if not teams_df.empty:
         bought = item["bought"]
         rc = item["role_counts"]
         alerts = item["alerts"]
+        status_msg = item["status_msg"]
 
         role_string = f"**P** {rc.get('P', 0)}/{ROLE_LIMITS['P']} | **D** {rc.get('D', 0)}/{ROLE_LIMITS['D']} | **C** {rc.get('C', 0)}/{ROLE_LIMITS['C']} | **A** {rc.get('A', 0)}/{ROLE_LIMITS['A']}"
 
@@ -463,11 +484,12 @@ if not teams_df.empty:
           st.text(f"Media max/giocatore: {avg_price} cr")
           st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
           
+          # MOSTRATO IL NUOVO MESSAGGIO RIASSUNTIVO AL POSTO DELLA VECCHIA DICITURA CONTRADDITTORIA
+          st.markdown(f"*{status_msg}*")
+
           if alerts:
             for alert in alerts:
               st.markdown(alert["text"], help=alert["help"])
-          else:
-            st.caption("✅ Rosa bilanciata")
             
           st.markdown("---")
 
