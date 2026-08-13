@@ -18,25 +18,21 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# NUOVA FUNZIONE RATING PIÙ GENEROSA (RAGGIUNGIBILE IL 10 CON I TOP)
+# FUNZIONE RICALIBRATA PER IL RATING (DA 0 A 10) DEL GIOCATORE
 def calculate_player_rating(p):
-    # Partiamo da una base di 6.5
     rating = 6.5 
     listino = p.get("list_price", 1)
     
-    # Valore di listino molto premiante per i top player
     if listino >= 30: rating += 3.5
     elif listino >= 20: rating += 2.5
     elif listino >= 10: rating += 1.0
     elif listino >= 5: rating += 0.5
     
-    # Titolarità e Ruoli chiave
     if p.get("status_titolarita") == "Titolare": rating += 1.5
     elif p.get("status_titolarita") == "Riserva": rating -= 1.5
     
     if p.get("rigorista"): rating += 1.5
     
-    # Malus attenuati per non rovinare i top
     if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
     if p.get("primo_anno_serie_a"): rating -= 0.2
     
@@ -139,7 +135,6 @@ with st.sidebar.container(border=True):
 st.sidebar.divider()
 st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
 
-# Seleziona la squadra da analizzare (Default: RCD Escanyol)
 team_names = teams_df["name"].tolist()
 default_team = "RCD Escanyol" if "RCD Escanyol" in team_names else (team_names[0] if team_names else None)
 default_idx = team_names.index(default_team) if default_team else 0
@@ -491,18 +486,25 @@ if not teams_df.empty:
         role_string = f"**P** {rc.get('P', 0)}/{ROLE_LIMITS['P']} | **D** {rc.get('D', 0)}/{ROLE_LIMITS['D']} | **C** {rc.get('C', 0)}/{ROLE_LIMITS['C']} | **A** {rc.get('A', 0)}/{ROLE_LIMITS['A']}"
 
         with col:
-          st.markdown(f"**{t_name}**")
-          delta_text = f"{avg_spent} cr/giocatore" if bought > 0 else "N/A"
-          st.metric(
-              label="Budget",
-              value=f"{rem_budget} cr",
-              delta=delta_text,
-              delta_color="off"
-          )
-          st.markdown(role_string)
-          st.text(f"Media max/giocatore: {avg_price} cr")
-          st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
+          # Rating vicino al nome della squadra in alto
+          team_display_title = f"**{t_name}** — ⭐️ {team_avg_score:.1f}" if bought > 0 else f"**{t_name}**"
+          st.markdown(team_display_title)
           
+          # Se la squadra ha completato la rosa (25/25), nascondiamo le metriche dell'asta non più rilevanti
+          if bought < TOTAL_SLOTS_PER_TEAM:
+              delta_text = f"{avg_spent} cr/giocatore" if bought > 0 else "N/A"
+              st.metric(
+                  label="Budget",
+                  value=f"{rem_budget} cr",
+                  delta=delta_text,
+                  delta_color="off"
+              )
+              st.markdown(role_string)
+              st.text(f"Media max/giocatore: {avg_price} cr")
+              st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
+          else:
+              st.success(f"✅ Rosa Completata ({TOTAL_SLOTS_PER_TEAM}/{TOTAL_SLOTS_PER_TEAM})")
+
           st.markdown(f"*{status_msg}*")
 
           if alerts:
@@ -530,7 +532,7 @@ if rosters_data:
           "Club Serie A": p["team_nfl"],
           "Listino": listino,
           "Pagato": r["purchase_price"],
-          "Differenza": r["purchase_price"] - listino,  # Rinominato da 'rilancio' a 'differenza'
+          "Differenza": r["purchase_price"] - listino,
           "Slot": p.get("slot_fantacalcio", "Scommessa"),
           "Titolarità": p.get("status_titolarita", "Titolare"),
           "Rigorista": "Sì" if p.get("rigorista") else "No",
