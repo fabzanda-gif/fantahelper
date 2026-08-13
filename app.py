@@ -18,7 +18,7 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# 1. Recupero delle squadre e dei roster dal DB
+# 1. Recupero delle squadre e dei roster dal DB (inclusi i nuovi insights sui cartellini)
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -29,7 +29,7 @@ teams_df = pd.DataFrame(teams_data)
 
 rosters_data = (
     supabase.table("rosters")
-    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price)")
+    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini)")
     .execute()
     .data
 )
@@ -76,8 +76,7 @@ for label, code in role_mapping_full.items():
   if code == "ALL" or code not in completed_roles:
     available_role_labels[label] = code
 
-
-# --- CORPO CENTRALE (Prima definizione per catturare il ruolo attivo) ---
+# --- CORPO CENTRALE (Selezione Ruolo Attivo) ---
 st.subheader("🎯 Assegnazione Guidata Giocatore")
 
 if auction_is_finished:
@@ -95,8 +94,7 @@ else:
   if current_role in completed_roles:
     st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
 
-
-# --- SIDEBAR: TOP 5 E STRUMENTI ADMIN (Sincronizzati con `current_role`) ---
+# --- SIDEBAR: TOP 5 E STRUMENTI ADMIN ---
 st.sidebar.subheader("🔥 Top 5 Liberi")
 top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
 if current_role != "ALL":
@@ -187,7 +185,7 @@ if not auction_is_finished:
     )
 
   final_query = supabase.table("players").select(
-      "id, name, role, team_nfl, list_price"
+      "id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini"
   )
   if current_role != "ALL":
     final_query = final_query.eq("role", current_role)
@@ -271,12 +269,20 @@ if not auction_is_finished:
           )
           st.rerun()
 
-# 3. Tabella Orizzontale / Dashboard della Situazione Crediti delle Squadre
+# 3. Tabella Orizzontale / Dashboard della Situazione Crediti e Strategia delle Squadre
 st.divider()
-st.subheader("📊 Panoramica Squadre & Disponibilità")
+st.subheader("📊 Panoramica Squadre & Alert Strategici")
 
 if not teams_df.empty:
   teams_summary = []
+  
+  team_players_map = {t["name"]: [] for t in teams_data}
+  if rosters_data:
+    for r in rosters_data:
+      if r.get("teams") and r.get("players"):
+        t_name = r["teams"]["name"]
+        team_players_map[t_name].append(r["players"])
+
   for _, t in teams_df.iterrows():
     t_name = t["name"]
     rem_budget = t["remaining_budget"]
@@ -287,13 +293,38 @@ if not teams_df.empty:
     slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
     avg_price = round(rem_budget / slots_left, 1) if slots_left > 0 else 0
     
+    t_players = team_players_map.get(t_name, [])
+    alerts = []
+    
+    # 1. Controllo concentrazione club Serie A
+    nfl_counts = {}
+    for p in t_players:
+      club = p.get("team_nfl")
+      if club:
+        nfl_counts[club] = nfl_counts.get(club, 0) + 1
+    
+    over_concentrated_clubs = [club for club, count in nfl_counts.items() if count >= 4]
+    if over_concentrated_clubs:
+      alerts.append(f"🚨 **Rischio Blocco:** {len(t_players)} elementi concentrati su {', '.join(over_concentrated_clubs)}")
+
+    # 2. Controllo ballottaggi / scommesse
+    ballotaggio_count = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
+    if bought >= 5 and ballotaggio_count >= (bought * 0.4):
+      alerts.append(f"⚠️ **Troppi Ballottaggi:** {ballotaggio_count} giocatori a rischio voto.")
+
+    # 3. Controllo cartellini a rischio
+    cartellini_rischio = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
+    if cartellini_rischio >= 3:
+      alerts.append(f"🟨 **Rischio Malus:** {cartellini_rischio} giocatori inclini a cartellini.")
+
     teams_summary.append({
         "data": t,
         "bought": bought,
         "slots_left": slots_left,
         "avg_price": avg_price,
         "avg_spent": avg_spent_per_player,
-        "role_counts": team_role_totals.get(t_name, {"P": 0, "D": 0, "C": 0, "A": 0})
+        "role_counts": team_role_totals.get(t_name, {"P": 0, "D": 0, "C": 0, "A": 0}),
+        "alerts": alerts
     })
 
   teams_summary.sort(key=lambda x: (-x["avg_price"], -x["data"]["remaining_budget"], x["data"]["name"]))
@@ -312,6 +343,7 @@ if not teams_df.empty:
         avg_spent = item["avg_spent"]
         bought = item["bought"]
         rc = item["role_counts"]
+        alerts = item["alerts"]
 
         role_string = f"**P** {rc.get('P', 0)}/{ROLE_LIMITS['P']} | **D** {rc.get('D', 0)}/{ROLE_LIMITS['D']} | **C** {rc.get('C', 0)}/{ROLE_LIMITS['C']} | **A** {rc.get('A', 0)}/{ROLE_LIMITS['A']}"
 
@@ -327,23 +359,37 @@ if not teams_df.empty:
           st.markdown(role_string)
           st.text(f"Media max/giocatore: {avg_price} cr")
           st.progress(max(0.0, min(1.0, rem_budget / init_budget)))
+          
+          if alerts:
+            for alert in alerts:
+              st.markdown(alert)
+          else:
+            st.caption("✅ Rosa bilanciata")
+            
           st.markdown("---")
 
-# 4. Tabella delle Rose Acquistate Dettagliata
-st.subheader("📋 Rose e Giocatori Assegnati")
+# 4. Tabella delle Rose Acquistate Dettagliata (con Insights completi)
+st.subheader("📋 Rose e Giocatori Assegnati (con Insights)")
 
 if rosters_data:
   formatted_rosters = []
   for r in rosters_data:
     if r["teams"] and r["players"]:
+      p = r["players"]
+      listino = p.get("list_price") or 1
+      
       formatted_rosters.append({
           "Squadra": r["teams"]["name"],
-          "Giocatore": r["players"]["name"],
-          "Ruolo": r["players"]["role"],
-          "Club Serie A": r["players"]["team_nfl"],
-          "Prezzo Listino": r["players"]["list_price"],
+          "Giocatore": p["name"],
+          "Ruolo": p["role"],
+          "Club Serie A": p["team_nfl"],
+          "Listino": listino,
           "Pagato": r["purchase_price"],
-          "Rilancio": r["purchase_price"] - r["players"]["list_price"],
+          "Rilancio": r["purchase_price"] - listino,
+          "Titolarità": p.get("status_titolarita", "Titolare"),
+          "Rigorista": "Sì" if p.get("rigorista") else "No",
+          "Fisico": p.get("affidabilita_fisica", "Integro"),
+          "Cartellini": p.get("propensione_cartellini", "Normale")
       })
   df_rosters = pd.DataFrame(formatted_rosters)
   st.dataframe(df_rosters, use_container_width=True)
