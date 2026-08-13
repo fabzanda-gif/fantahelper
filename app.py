@@ -18,8 +18,8 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# FUNZIONE RICALIBRATA PER IL RATING (DA 0 A 10) DEL GIOCATORE
-def calculate_player_rating(p):
+# FUNZIONE RICALIBRATA PER IL RATING (DA 0 A 10) DEL GIOCATORE CON BONUS PREFERITI
+def calculate_player_rating(p, preferred_players_set=None):
     rating = 6.5 
     listino = p.get("list_price", 1)
     
@@ -35,6 +35,10 @@ def calculate_player_rating(p):
     
     if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
     if p.get("primo_anno_serie_a"): rating -= 0.2
+    
+    # BONUS PER GIOCATORI PREFERITI (Aggiunge +0.8 al rating)
+    if preferred_players_set and p.get("id") in preferred_players_set:
+        rating += 0.8
     
     return round(max(0, min(10, rating)), 1)
 
@@ -53,6 +57,10 @@ rosters_data = (
     .execute()
     .data
 )
+
+# GESTIONE PREFERITI (SESSION STATE)
+if "preferred_players" not in st.session_state:
+    st.session_state.preferred_players = set()
 
 # ESTRAZIONE DEGLI ID E CONTEGGIO STATO ATTUALE DELLE SQUADRE
 bought_player_ids = set()
@@ -76,7 +84,7 @@ if rosters_data:
 all_teams_ratings = {}
 for t_name, p_list in team_players_map.items():
     if p_list:
-        all_teams_ratings[t_name] = sum(calculate_player_rating(p) for p in p_list) / len(p_list)
+        all_teams_ratings[t_name] = sum(calculate_player_rating(p, st.session_state.preferred_players) for p in p_list) / len(p_list)
     else:
         all_teams_ratings[t_name] = 0.0
 
@@ -128,27 +136,50 @@ else:
   if current_role in completed_roles:
     st.info(f"ℹ️ Il ruolo **{current_role}** è completo per tutte le squadre.")
 
-# --- SIDEBAR: TOP 5 E STRUMENTI ADMIN ---
-st.sidebar.subheader("🔥 Top 5 Liberi")
-top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price")
+# --- SIDEBAR: TOP 5 LORO (BASATO SU RATING E BUDGET DISPONIBILE PER ESCANYOL) ---
+st.sidebar.subheader("🔥 Top 5 Liberi (Ranking & Affordabili)")
+
+# Recuperiamo il budget residuo di Escanyol
+escanyol_budget = 0
+escanyol_row = teams_df[teams_df["name"] == "Escanyol"]
+if not escanyol_row.empty:
+    escanyol_budget = escanyol_row.iloc[0]["remaining_budget"]
+
+top5_query = supabase.table("players").select("id, name, role, team_nfl, list_price, status_titolarita, rigorista, propensione_cartellini, primo_anno_serie_a")
 if current_role != "ALL":
   top5_query = top5_query.eq("role", current_role)
 
-top5_data = top5_query.order("list_price", desc=True).execute().data
-top5_available = [p for p in top5_data if p["id"] not in bought_player_ids][:5]
+top5_data = top5_query.execute().data
+
+# Filtriamo i giocatori liberi E acquistabili con i crediti attuali di Escanyol (list_price <= escanyol_budget)
+# Gestione di sicurezza: se list_price è nullo o 0, lo consideriamo 1
+affordable_free_players = [
+    p for p in top5_data 
+    if p["id"] not in bought_player_ids and (p.get("list_price") or 1) <= escanyol_budget
+]
+
+# Ordiniamo in base al rating calcolato (dal migliore al peggiore)
+affordable_free_players.sort(
+    key=lambda x: calculate_player_rating(x, st.session_state.preferred_players), 
+    reverse=True
+)
+
+top5_available = affordable_free_players[:5]
 
 with st.sidebar.container(border=True):
   if top5_available:
     for idx, p in enumerate(top5_available, 1):
-      st.markdown(f"**{idx}. {p['name']}** `[{p['role']}]` ({p['team_nfl']}) — 💎 **{p['list_price']} cr**")
+      p_rtg = calculate_player_rating(p, st.session_state.preferred_players)
+      star_indicator = " ⭐" if p["id"] in st.session_state.preferred_players else ""
+      st.markdown(f"**{idx}. {p['name']}**{star_indicator} `[{p['role']}]` ({p['team_nfl']}) — ⭐️ **{p_rtg}** | 💎 **{p['list_price']} cr**")
   else:
-    st.info("Nessun giocatore disponibile.")
+    st.info("Nessun giocatore disponibile nel tuo budget.")
 
 st.sidebar.divider()
 st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
 
 team_names = teams_df["name"].tolist()
-default_team = "RCD Escanyol" if "RCD Escanyol" in team_names else (team_names[0] if team_names else None)
+default_team = "Escanyol" if "Escanyol" in team_names else (team_names[0] if team_names else None)
 default_idx = team_names.index(default_team) if default_team else 0
 
 selected_team_analysis = st.sidebar.selectbox(
@@ -167,18 +198,17 @@ if selected_team_analysis:
     
     if not team_rank_row.empty:
         credit_rank = team_rank_row.index[0] + 1
+        total_teams_count = len(teams_df)
         budget = team_rank_row.iloc[0]["remaining_budget"]
     else:
-        credit_rank, budget = 0, 0
+        credit_rank, total_teams_count, budget = 0, len(teams_df), 0
 
     slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
     
-    # Valutazione Rating e Posizione in Sidebar
     if t_players:
-        avg_score = sum(calculate_player_rating(p) for p in t_players) / len(t_players)
+        avg_score = sum(calculate_player_rating(p, st.session_state.preferred_players) for p in t_players) / len(t_players)
         rating_position = rating_rank_map.get(selected_team_analysis, "-")
         
-        # Mostriamo il Rating con accanto la posizione (es. 7.6 / 10.0  (1/12))
         st.sidebar.metric("Rating Rosa", f"{avg_score:.1f} / 10.0", delta=f"Posizione: {rating_position}/{total_teams_count}", delta_color="off")
         
         if avg_score >= 8.0: st.sidebar.success("Rosa da Scudetto!")
@@ -527,7 +557,7 @@ if not teams_df.empty:
             
           st.markdown("---")
 
-# 4. TABELLA DELLE ROSE ACQUISTATE DETTAGLIATA (CON FILTRO SQUADRA E PRESELEZIONE RCD ESCANYOL)
+# 4. TABELLA DELLE ROSE ACQUISTATE DETTAGLIATA (CON COLONNA PREFERITO, FILTRO SQUADRA E PRESELEZIONE ESCANYOL)
 st.subheader("📋 Rose e Giocatori Assegnati (con Insights & Rating)")
 
 if rosters_data:
@@ -536,9 +566,11 @@ if rosters_data:
     if r["teams"] and r["players"]:
       p = r["players"]
       listino = p.get("list_price") or 1
-      player_score = calculate_player_rating(p)
+      player_score = calculate_player_rating(p, st.session_state.preferred_players)
+      is_preferred = p["id"] in st.session_state.preferred_players
       
       formatted_rosters.append({
+          "⭐ Preferito": is_preferred,
           "Squadra": r["teams"]["name"],
           "Giocatore": p["name"],
           "Ruolo": p["role"],
@@ -552,18 +584,37 @@ if rosters_data:
           "Rigorista": "Sì" if p.get("rigorista") else "No",
           "Fisico": p.get("affidabilita_fisica", "Integro"),
           "Cartellini": p.get("propensione_cartellini", "Normale"),
-          "1° Anno A": "Sì" if p.get("primo_anno_serie_a") else "No"
+          "1° Anno A": "Sì" if p.get("primo_anno_serie_a") else "No",
+          "_player_id": p["id"] # Utile per la gestione
       })
   
-  df_rosters = pd.DataFrame(formatted_rosters)
+  df_rosters_raw = pd.DataFrame(formatted_rosters)
   
+  # Filtro per squadra nella tabella finale con preselezione su "Escanyol"
   all_teams_filter = ["Tutte"] + team_names
-  default_table_idx = all_teams_filter.index("RCD Escanyol") if "RCD Escanyol" in all_teams_filter else 0
+  default_table_idx = all_teams_filter.index("Escanyol") if "Escanyol" in all_teams_filter else 0
   
   filtro_tabella = st.selectbox("Filtra per Squadra", all_teams_filter, index=default_table_idx, key="table_team_filter")
+  
+  df_display = df_rosters_raw.copy()
   if filtro_tabella != "Tutte":
-      df_rosters = df_rosters[df_rosters["Squadra"] == filtro_tabella]
+      df_display = df_display[df_display["Squadra"] == filtro_tabella]
       
-  st.dataframe(df_rosters, use_container_width=True)
+  # Usiamo data_editor per consentire di spuntare i preferiti direttamente dalla tabella
+  col_cfg = {
+      "_player_id": None, # Nascondiamo l'id tecnico
+      "⭐ Preferito": st.column_config.CheckboxColumn("⭐ Preferito", help="Metti la spunta per dare un bonus di rating al giocatore", default=False)
+  }
+  
+  edited_df = st.data_editor(df_display, column_config=col_cfg, use_container_width=True, hide_index=True)
+  
+  # Aggiorniamo i preferiti in base alle modifiche fatte nella tabella
+  for _, row in edited_df.iterrows():
+      p_id = row["_player_id"]
+      if row["⭐ Preferito"]:
+          st.session_state.preferred_players.add(p_id)
+      else:
+          st.session_state.preferred_prices = st.session_state.preferred_players.discard(p_id)
+
 else:
   st.info("Nessun giocatore ancora acquistato in questa sessione d'asta.")
