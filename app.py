@@ -18,20 +18,28 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# FUNZIONE RICALIBRATA PER IL RATING (DA 0 A 10) DEL GIOCATORE
+# NUOVA FUNZIONE RATING PIÙ GENEROSA (RAGGIUNGIBILE IL 10 CON I TOP)
 def calculate_player_rating(p):
-    rating = 6.0 
+    # Partiamo da una base di 6.5
+    rating = 6.5 
     listino = p.get("list_price", 1)
-    if listino >= 30: rating += 2.5
-    elif listino >= 20: rating += 1.5
-    elif listino >= 10: rating += 0.5
     
-    if p.get("status_titolarita") == "Titolare": rating += 1.0
-    elif p.get("status_titolarita") == "Riserva": rating -= 2.0
+    # Valore di listino molto premiante per i top player
+    if listino >= 30: rating += 3.5
+    elif listino >= 20: rating += 2.5
+    elif listino >= 10: rating += 1.0
+    elif listino >= 5: rating += 0.5
     
-    if p.get("rigorista"): rating += 1.0
-    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.8
-    if p.get("primo_anno_serie_a"): rating -= 0.5
+    # Titolarità e Ruoli chiave
+    if p.get("status_titolarita") == "Titolare": rating += 1.5
+    elif p.get("status_titolarita") == "Riserva": rating -= 1.5
+    
+    if p.get("rigorista"): rating += 1.5
+    
+    # Malus attenuati per non rovinare i top
+    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
+    if p.get("primo_anno_serie_a"): rating -= 0.2
+    
     return round(max(0, min(10, rating)), 1)
 
 # 1. RECUPERO DELLE SQUADRE E DEI ROSTER DAL DB (INCLUSI TUTTI GLI INSIGHTS)
@@ -147,7 +155,6 @@ if selected_team_analysis:
     t_players = team_players_map.get(selected_team_analysis, [])
     bought_count = len(t_players)
     
-    # Recupero budget squadra selezionata e calcolo classifica crediti tra tutte le squadre
     team_budgets_sorted = teams_df.sort_values(by="remaining_budget", ascending=False).reset_index(drop=True)
     team_rank_row = team_budgets_sorted[team_budgets_sorted["name"] == selected_team_analysis]
     
@@ -160,27 +167,23 @@ if selected_team_analysis:
 
     slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
     
-    # Valutazione Rating in Sidebar
     if t_players:
         avg_score = sum(calculate_player_rating(p) for p in t_players) / len(t_players)
         st.sidebar.metric("Rating Rosa", f"{avg_score:.1f} / 10.0")
-        if avg_score >= 7.5: st.sidebar.success("Rosa da Scudetto!")
-        elif avg_score >= 6.0: st.sidebar.info("Rosa competitiva.")
+        if avg_score >= 8.0: st.sidebar.success("Rosa da Scudetto!")
+        elif avg_score >= 6.5: st.sidebar.info("Rosa competitiva.")
         else: st.sidebar.warning("Rosa da rinforzare.")
     else:
         st.sidebar.metric("Rating Rosa", "N/D")
         st.sidebar.info("Assegna giocatori per calcolare il rating.")
     
-    # Posizione Crediti & Info Spesa
     st.sidebar.markdown(f"💰 **Posizione Crediti:** {credit_rank}° su {total_teams_count} ({budget} cr residui)")
     if slots_left > 0:
         avg_spendable = budget / slots_left
         st.sidebar.caption(f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** ({slots_left} slot liberi)")
 
-    # Generazione Alert specifici per la squadra selezionata nella Sidebar
     sidebar_alerts = []
     
-    # 1. Controllo Blocco Squadra Serie A
     nfl_counts = {}
     for p in t_players:
       if p.get("role") != "P":
@@ -189,17 +192,14 @@ if selected_team_analysis:
     for club, count in nfl_counts.items():
       if count >= 4: sidebar_alerts.append(f"🚨 **Rischio Blocco:** {count} giocatori su {club}")
 
-    # 2. Controllo Ballottaggi
     ballotaggio_count = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
     if bought_count >= 5 and ballotaggio_count >= (bought_count * 0.4):
       sidebar_alerts.append(f"⚠️ **Troppi Ballottaggi:** {ballotaggio_count} giocatori")
 
-    # 3. Controllo Cartellini
     cartellini_count = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
     if cartellini_count >= 3:
       sidebar_alerts.append(f"🟨 **Rischio Malus:** {cartellini_count} a rischio cartellino")
 
-    # 4. Controllo Rookie
     rookie_count = sum(1 for p in t_players if p.get("primo_anno_serie_a"))
     if rookie_count >= 3:
       sidebar_alerts.append(f"👶 **Rischio Rookie:** {rookie_count} al primo anno in A")
@@ -214,7 +214,6 @@ if selected_team_analysis:
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
 
-# MOCKUP PER RUOLO O INTERO
 ruolo_mockup = st.sidebar.selectbox("Completa ruolo (Mockup)", ["Tutti"] + list(ROLE_LIMITS.keys()))
 
 if st.sidebar.button("🎲 Autocompila rose (Intermedio)"):
@@ -512,7 +511,7 @@ if not teams_df.empty:
             
           st.markdown("---")
 
-# 4. TABELLA DELLE ROSE ACQUISTATE DETTAGLIATA (CON FILTRO SQUADRA)
+# 4. TABELLA DELLE ROSE ACQUISTATE DETTAGLIATA (CON FILTRO SQUADRA E PRESELEZIONE RCD ESCANYOL)
 st.subheader("📋 Rose e Giocatori Assegnati (con Insights & Rating)")
 
 if rosters_data:
@@ -531,7 +530,7 @@ if rosters_data:
           "Club Serie A": p["team_nfl"],
           "Listino": listino,
           "Pagato": r["purchase_price"],
-          "Rilancio": r["purchase_price"] - listino,
+          "Differenza": r["purchase_price"] - listino,  # Rinominato da 'rilancio' a 'differenza'
           "Slot": p.get("slot_fantacalcio", "Scommessa"),
           "Titolarità": p.get("status_titolarita", "Titolare"),
           "Rigorista": "Sì" if p.get("rigorista") else "No",
@@ -542,9 +541,11 @@ if rosters_data:
   
   df_rosters = pd.DataFrame(formatted_rosters)
   
-  # Filtro per squadra nella tabella finale
+  # Filtro per squadra nella tabella finale con preselezione su "RCD Escanol"
   all_teams_filter = ["Tutte"] + team_names
-  filtro_tabella = st.selectbox("Filtra per Squadra", all_teams_filter, key="table_team_filter")
+  default_table_idx = all_teams_filter.index("RCD Escanol") if "RCD Escanol" in all_teams_filter else 0
+  
+  filtro_tabella = st.selectbox("Filtra per Squadra", all_teams_filter, index=default_table_idx, key="table_team_filter")
   if filtro_tabella != "Tutte":
       df_rosters = df_rosters[df_rosters["Squadra"] == filtro_tabella]
       
