@@ -18,7 +18,7 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights e primo anno)
+# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights)
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -113,8 +113,8 @@ with st.sidebar.container(border=True):
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
 
-# Pulsante per riempire randomicamente le rose
-if st.sidebar.button("🎲 Autocompila rose (Mockup)"):
+# Pulsante per riempire randomicamente le rose esaurendo i budget e completando i 25 slot
+if st.sidebar.button("🎲 Autocompila rose (Mockup Intelligente)"):
   all_players_res = supabase.table("players").select("id, role, list_price").execute().data
   free_players = [p for p in all_players_res if p["id"] not in bought_player_ids]
   random.shuffle(free_players)
@@ -123,37 +123,63 @@ if st.sidebar.button("🎲 Autocompila rose (Mockup)"):
   sim_roles = {t: team_role_totals[t].copy() for t in team_role_totals}
   sim_budgets = {t["name"]: t["remaining_budget"] for t in teams_data}
   team_id_map = {t["name"]: t["id"] for t in teams_data}
+  team_initial_budgets = {t["name"]: t["initial_budget"] for t in teams_data}
 
   inserts = []
   for player in free_players:
     p_role = player["role"]
-    p_price = player["list_price"] if player["list_price"] else 1
+    base_price = player["list_price"] if player["list_price"] and player["list_price"] > 0 else 1
 
+    # Troviamo le squadre che hanno bisogno di questo ruolo e hanno slot liberi
     valid_teams = []
     for t_name in sim_bought:
-      if sim_bought[t_name] < TOTAL_SLOTS_PER_TEAM and sim_roles[t_name][p_role] < ROLE_LIMITS[p_role] and sim_budgets[t_name] >= p_price:
+      if sim_bought[t_name] < TOTAL_SLOTS_PER_TEAM and sim_roles[t_name][p_role] < ROLE_LIMITS[p_role]:
         valid_teams.append(t_name)
 
     if valid_teams:
-      chosen_team = random.choice(valid_teams)
+      # Scegliamo la squadra con il budget proporzionalmente più alto rispetto agli slot mancanti
+      # Questo garantisce che chi ha più crediti compri i giocatori a un prezzo adeguato per esaurire il budget
+      def score_team(t):
+        slots_left = TOTAL_SLOTS_PER_TEAM - sim_bought[t]
+        if slots_left <= 0:
+          return -1
+        return sim_budgets[t] / slots_left
+
+      valid_teams.sort(key=score_team, reverse=True)
+      chosen_team = valid_teams[0]
+
+      slots_left = TOTAL_SLOTS_PER_TEAM - sim_bought[chosen_team]
+      current_bud = sim_budgets[chosen_team]
+
+      if slots_left == 1:
+        # L'ultimo slot si pappa tutto il budget residuo (così lo azzeriamo perfettamente)
+        purchase_price = max(1, int(current_bud))
+      else:
+        # Calcoliamo un prezzo proporzionale basato sul listino ma calibrato sul budget residuo della squadra
+        avg_allowed = current_bud / slots_left
+        # Mescoliamo il listino del giocatore con la media del budget disponibile per rendere l'asta realistica
+        purchase_price = max(1, int((base_price + avg_allowed) / 2))
+        if purchase_price > current_bud - (slots_left - 1): # Lasciamo almeno 1 credito per i successivi slot
+          purchase_price = max(1, int(current_bud - (slots_left - 1)))
+
       inserts.append({
           "team_id": team_id_map[chosen_team],
           "player_id": player["id"],
-          "purchase_price": p_price
+          "purchase_price": purchase_price
       })
       sim_bought[chosen_team] += 1
       sim_roles[chosen_team][p_role] += 1
-      sim_budgets[chosen_team] -= p_price
+      sim_budgets[chosen_team] -= purchase_price
 
   if inserts:
     supabase.table("rosters").insert(inserts).execute()
     for t_name, new_budget in sim_budgets.items():
-      supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq("id", team_id_map[t_name]).execute()
+      supabase.table("teams").update({"remaining_budget": max(0, int(new_budget))}).eq("id", team_id_map[t_name]).execute()
     
-    st.sidebar.success("Rose autocompilate con successo!")
+    st.sidebar.success("Rose autocompilate con successo e budget prosciugati!")
     st.rerun()
   else:
-    st.sidebar.warning("Nessun inserimento possibile (limiti raggiunti o budget esauriti).")
+    st.sidebar.warning("Nessun inserimento possibile o limiti già raggiunti.")
 
 if st.sidebar.button("🗑️ Svuota tutte le rose (Reset)", type="primary"):
   supabase.table("rosters").delete().gt("purchase_price", -1).execute()
