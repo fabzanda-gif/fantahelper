@@ -430,26 +430,59 @@ with tab1:
               # --- FESTEGGIAMENTI PERSONALIZZATI PER ACQUISTO (SPECIALMENTE PER ESCANYOL) ---
               p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
               
-             if target_team == "Escanyol":
-    if p_rtg >= 8.5:
-        st.balloons()
-        st.snow()
-        # Qui parte la musica di John Cena per i Top Player!
-        play_sound("https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3")
-        st.success(f"🔥 MASSIVE COLPO! Hai preso **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺🎺🎺")
-    elif p_rtg >= 7.5:
-        st.balloons()
-        play_sound("https://www.myinstants.com/media/sounds/ta-da.mp3")
-        st.success(f"🎉 Ottimo innesto! Acquistato **{selected_player['name']}** con rating {p_rtg}. Gran bel colpo per l'Escanyol! 🌟")
-    else:
-        play_sound("https://www.myinstants.com/media/sounds/plop.mp3")
-        st.info(f"✅ Operazione conclusa: preso **{selected_player['name']}** a {purchase_price} crediti.")
-else:
-    st.success(
-        f"✅ Acquistato **{selected_player['name']}** [{p_role}] a **{purchase_price}** crediti per **{target_team}**!"
-    )
+             if st.button("Conferma Acquisto", type="primary"):
+            team_row = teams_df[teams_df["name"] == target_team]
+            if team_row.empty:
+                st.error("Seleziona una squadra valida.")
+            else:
+                team_id = team_row.iloc[0]["id"]
+                current_budget = team_row.iloc[0]["remaining_budget"]
+                p_role = selected_player["role"]
 
-st.rerun()
+                team_role_count = team_role_totals[target_team][p_role]
+                max_limit = ROLE_LIMITS.get(p_role, TOTAL_SLOTS_PER_TEAM)
+
+                if team_role_count >= max_limit:
+                    st.error(f"❌ Limite raggiunto! La squadra **{target_team}** ha già completato i posti per il ruolo {p_role} ({team_role_count}/{max_limit}).")
+                elif team_total_bought[target_team] >= TOTAL_SLOTS_PER_TEAM:
+                    st.error(f"❌ La squadra **{target_team}** ha completato la rosa (25/25).")
+                elif purchase_price > current_budget:
+                    st.error(
+                        f"❌ La squadra {target_team} non ha abbastanza crediti! (Budget residuo: {current_budget})"
+                    )
+                else:
+                    supabase.table("rosters").insert({
+                        "team_id": team_id,
+                        "player_id": selected_player["id"],
+                        "purchase_price": purchase_price,
+                    }).execute()
+
+                    new_budget = current_budget - purchase_price
+                    supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq(
+                        "id", team_id
+                    ).execute()
+
+                    # --- FESTEGGIAMENTI E AUDIO DEDICATO PER L'ESCANYOL ---
+                    p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
+                    
+                    if target_team == "Escanyol":
+                        if p_rtg >= 8.5:
+                            st.balloons()
+                            st.snow()
+                            play_sound("https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3")
+                            st.success(f"🔥 MASSIVE COLPO! Hai preso **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺🎺🎺")
+                        elif p_rtg >= 7.5:
+                            st.balloons()
+                            play_sound("https://www.myinstants.com/media/sounds/ta-da.mp3")
+                            st.success(f"🎉 Ottimo innesto! Acquistato **{selected_player['name']}** con rating {p_rtg}. Gran bel colpo per l'Escanyol! 🌟")
+                        else:
+                            play_sound("https://www.myinstants.com/media/sounds/plop.mp3")
+                            st.info(f"✅ Operazione conclusa: preso **{selected_player['name']}** a {purchase_price} crediti.")
+                    else:
+                        st.success(
+                            f"✅ Acquistato **{selected_player['name']}** [{p_role}] a **{purchase_price}** crediti per **{target_team}**!"
+                        )
+                    st.rerun()
 
     # 3. PANORAMICA SQUADRE & ALERT STRATEGICI
     st.divider()
