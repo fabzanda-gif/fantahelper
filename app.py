@@ -126,15 +126,19 @@ with st.sidebar.container(border=True):
 st.sidebar.divider()
 
 # --- SIDEBAR: ANALISI ASTA, CONSIGLI E VOTO IN DECIMI (INDIPENDENTE) ---
+# SIDEBAR ANALISI ASTA E VALUTAZIONE
 st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
 
+# RECUPERO LISTA SQUADRE E IMPOSTAZIONE DEFAULT SICURO
 team_names = teams_df["name"].tolist()
-default_team_idx = team_names.index("RCD Escanol") if "RCD Escanol" in team_names else 0
+# Forza il default a 'RCD Escanol' se esiste, altrimenti usa il primo della lista
+default_team = "RCD Escanol" if "RCD Escanol" in team_names else (team_names[0] if team_names else None)
+default_idx = team_names.index(default_team) if default_team else 0
 
 selected_team_analysis = st.sidebar.selectbox(
     "Analizza squadra", 
     team_names, 
-    index=default_team_idx, 
+    index=default_idx, 
     key="sidebar_team_analysis"
 )
 
