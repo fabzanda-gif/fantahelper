@@ -18,7 +18,7 @@ ROLE_LIMITS = {
 }
 TOTAL_SLOTS_PER_TEAM = 25
 
-# 1. Recupero delle squadre e dei roster dal DB (inclusi i nuovi insights sui cartellini)
+# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights)
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -29,7 +29,7 @@ teams_df = pd.DataFrame(teams_data)
 
 rosters_data = (
     supabase.table("rosters")
-    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini)")
+    .select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio)")
     .execute()
     .data
 )
@@ -185,7 +185,7 @@ if not auction_is_finished:
     )
 
   final_query = supabase.table("players").select(
-      "id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini"
+      "id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio"
   )
   if current_role != "ALL":
     final_query = final_query.eq("role", current_role)
@@ -296,26 +296,37 @@ if not teams_df.empty:
     t_players = team_players_map.get(t_name, [])
     alerts = []
     
-    # 1. Controllo concentrazione club Serie A
+    # 1. Controllo concentrazione club Serie A (con dettaglio nomi per tooltip)
     nfl_counts = {}
+    club_players_map = {}
     for p in t_players:
       club = p.get("team_nfl")
       if club:
         nfl_counts[club] = nfl_counts.get(club, 0) + 1
+        club_players_map.setdefault(club, []).append(p.get("name"))
     
-    over_concentrated_clubs = [club for club, count in nfl_counts.items() if count >= 4]
-    if over_concentrated_clubs:
-      alerts.append(f"🚨 **Rischio Blocco:** {len(t_players)} elementi concentrati su {', '.join(over_concentrated_clubs)}")
+    for club, count in nfl_counts.items():
+      if count >= 4:
+        alerts.append({
+            "text": f"🚨 **Rischio Blocco:** {count} elementi su {club}",
+            "help": f"Giocatori del club {club}:\n- " + "\n- ".join(club_players_map[club])
+        })
 
-    # 2. Controllo ballottaggi / scommesse
-    ballotaggio_count = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
-    if bought >= 5 and ballotaggio_count >= (bought * 0.4):
-      alerts.append(f"⚠️ **Troppi Ballottaggi:** {ballotaggio_count} giocatori a rischio voto.")
+    # 2. Controllo ballottaggi / scommesse (con dettaglio nomi)
+    ballotaggio_players = [p.get("name") for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
+    if bought >= 5 and len(ballotaggio_players) >= (bought * 0.4):
+      alerts.append({
+          "text": f"⚠️ **Troppi Ballottaggi:** {len(ballotaggio_players)} giocatori",
+          "help": "Giocatori in ballottaggio:\n- " + "\n- ".join(ballotaggio_players)
+      })
 
-    # 3. Controllo cartellini a rischio
-    cartellini_rischio = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
-    if cartellini_rischio >= 3:
-      alerts.append(f"🟨 **Rischio Malus:** {cartellini_rischio} giocatori inclini a cartellini.")
+    # 3. Controllo cartellini a rischio (con dettaglio nomi)
+    cartellini_players = [p.get("name") for p in t_players if p.get("propensione_cartellini") == "A rischio malus"]
+    if len(cartellini_players) >= 3:
+      alerts.append({
+          "text": f"🟨 **Rischio Malus:** {len(cartellini_players)} a rischio cartellino",
+          "help": "Giocatori a rischio malus:\n- " + "\n- ".join(cartellini_players)
+      })
 
     teams_summary.append({
         "data": t,
@@ -362,7 +373,7 @@ if not teams_df.empty:
           
           if alerts:
             for alert in alerts:
-              st.markdown(alert)
+              st.markdown(alert["text"], help=alert["help"])
           else:
             st.caption("✅ Rosa bilanciata")
             
@@ -386,6 +397,7 @@ if rosters_data:
           "Listino": listino,
           "Pagato": r["purchase_price"],
           "Rilancio": r["purchase_price"] - listino,
+          "Slot": p.get("slot_fantacalcio", "Scommessa"),
           "Titolarità": p.get("status_titolarita", "Titolare"),
           "Rigorista": "Sì" if p.get("rigorista") else "No",
           "Fisico": p.get("affidabilita_fisica", "Integro"),
