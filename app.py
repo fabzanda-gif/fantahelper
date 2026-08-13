@@ -428,7 +428,7 @@ if not teams_df.empty:
             "help": f"Giocatori di movimento del club {club}:\n- " + "\n- ".join(club_players_map[club])
         })
 
-    ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita"] == "Ballottaggio"]
+    ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
     if bought >= 5 and len(ballotaggio_players) >= (bought * 0.4):
       alerts.append({
           "text": f"⚠️ **Troppi Ballottaggi:** {len(ballotaggio_players)} giocatori",
