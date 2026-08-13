@@ -109,7 +109,47 @@ with st.sidebar.container(border=True):
       st.markdown(f"**{idx}. {p['name']}** `[{p['role']}]` ({p['team_nfl']}) — 💎 **{p['list_price']} cr**")
   else:
     st.info("Nessun giocatore disponibile.")
+st.sidebar.divider()
+st.sidebar.subheader("🔮 Analisi Asta & Consigli")
 
+# Seleziona la squadra da analizzare (per ora prendiamo la prima o lasciamo scegliere)
+selected_team_analysis = st.sidebar.selectbox("Analizza squadra", teams_df["name"].tolist())
+
+if selected_team_analysis:
+    t_players = team_players_map.get(selected_team_analysis, [])
+    bought_count = len(t_players)
+    budget = teams_df[teams_df["name"] == selected_team_analysis]["remaining_budget"].values[0]
+    slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
+    
+    # Calcoli per i consigli
+    p_count = sum(1 for p in t_players if p["role"] == "P")
+    d_count = sum(1 for p in t_players if p["role"] == "D")
+    c_count = sum(1 for p in t_players if p["role"] == "C")
+    a_count = sum(1 for p in t_players if p["role"] == "A")
+    
+    consigli = []
+    
+    # 1. Analisi Ruoli
+    if p_count < 3: consigli.append(f"• Ti mancano {3-p_count} portieri.")
+    if d_count < 8: consigli.append(f"• Cerca {8-d_count} difensori titolari.")
+    if c_count < 8: consigli.append(f"• Ti servono {8-c_count} centrocampisti.")
+    if a_count < 6: consigli.append(f"• Completa l'attacco con {6-a_count} giocatori.")
+    
+    # 2. Analisi Budget/Prezzo
+    if slots_left > 0:
+        avg_spendable = budget / slots_left
+        if avg_spendable < 5:
+            consigli.append(f"• **Budget critico:** hai solo {avg_price:.1f} cr per slot. Punta su titolari low-cost.")
+        else:
+            consigli.append(f"• **Budget ottimo:** hai {avg_spendable:.1f} cr per slot. Vai su un top player.")
+            
+    # 3. Output a schermo
+    if consigli:
+        st.sidebar.markdown("**Consigli strategici:**")
+        for consiglio in consigli:
+            st.sidebar.write(consiglio)
+    else:
+        st.sidebar.success("Rosa completa e ben bilanciata!")
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
 
