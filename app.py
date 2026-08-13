@@ -3,13 +3,13 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-# Connessione a Supabase
+# CONNESSIONE AL DATABASE SUPABASE
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
 st.title("⚽ RCD Escanol - Live Auction Assistant")
 
-# Limiti massimi per ruolo e totale per squadra
+# LIMITI MASSIMI PER RUOLO E TOTALE PER SQUADRA
 ROLE_LIMITS = {
     "P": 3,
     "D": 8,
@@ -34,7 +34,7 @@ def calculate_player_rating(p):
     if p.get("primo_anno_serie_a"): rating -= 0.5
     return round(max(0, min(10, rating)), 1)
 
-# 1. Recupero delle squadre e dei roster dal DB (inclusi tutti gli insights)
+# 1. RECUPERO DELLE SQUADRE E DEI ROSTER DAL DB (INCLUSI TUTTI GLI INSIGHTS)
 teams_data = (
     supabase.table("teams")
     .select("id, name, remaining_budget, initial_budget")
@@ -50,7 +50,7 @@ rosters_data = (
     .data
 )
 
-# Estraiamo gli ID di tutti i giocatori già acquistati per filtrarli
+# ESTRAZIONE DEGLI ID E CONTEGGIO STATO ATTUALE DELLE SQUADRE
 bought_player_ids = set()
 team_role_totals = {t["name"]: {"P": 0, "D": 0, "C": 0, "A": 0} for t in teams_data}
 team_total_bought = {t["name"]: 0 for t in teams_data}
@@ -68,7 +68,7 @@ if rosters_data:
         team_role_totals[t_name][p_role] += 1
         team_total_bought[t_name] += 1
 
-# Verifichiamo quali ruoli sono completi per TUTTE le squadre
+# VERIFICA RUOLI COMPLETI PER TUTTE LE SQUADRE
 completed_roles = []
 for role, max_limit in ROLE_LIMITS.items():
   all_teams_completed_role = True
@@ -146,7 +146,18 @@ selected_team_analysis = st.sidebar.selectbox(
 if selected_team_analysis:
     t_players = team_players_map.get(selected_team_analysis, [])
     bought_count = len(t_players)
-    budget = teams_df[teams_df["name"] == selected_team_analysis]["remaining_budget"].values[0]
+    
+    # Recupero budget squadra selezionata e calcolo classifica crediti tra tutte le squadre
+    team_budgets_sorted = teams_df.sort_values(by="remaining_budget", ascending=False).reset_index(drop=True)
+    team_rank_row = team_budgets_sorted[team_budgets_sorted["name"] == selected_team_analysis]
+    
+    if not team_rank_row.empty:
+        credit_rank = team_rank_row.index[0] + 1
+        total_teams_count = len(teams_df)
+        budget = team_rank_row.iloc[0]["remaining_budget"]
+    else:
+        credit_rank, total_teams_count, budget = 0, len(teams_df), 0
+
     slots_left = TOTAL_SLOTS_PER_TEAM - bought_count
     
     # Valutazione Rating in Sidebar
@@ -160,31 +171,45 @@ if selected_team_analysis:
         st.sidebar.metric("Rating Rosa", "N/D")
         st.sidebar.info("Assegna giocatori per calcolare il rating.")
     
-    # Calcoli per i consigli
-    p_count = sum(1 for p in t_players if p["role"] == "P")
-    d_count = sum(1 for p in t_players if p["role"] == "D")
-    c_count = sum(1 for p in t_players if p["role"] == "C")
-    a_count = sum(1 for p in t_players if p["role"] == "A")
-    
-    consigli = []
-    if p_count < 3: consigli.append(f"• Ti mancano {3-p_count} portieri.")
-    if d_count < 8: consigli.append(f"• Cerca {8-d_count} difensori titolari.")
-    if c_count < 8: consigli.append(f"• Ti servono {8-c_count} centrocampisti.")
-    if a_count < 6: consigli.append(f"• Completa l'attacco con {6-a_count} giocatori.")
-    
+    # Posizione Crediti & Info Spesa
+    st.sidebar.markdown(f"💰 **Posizione Crediti:** {credit_rank}° su {total_teams_count} ({budget} cr residui)")
     if slots_left > 0:
         avg_spendable = budget / slots_left
-        if avg_spendable < 5:
-            consigli.append(f"• **Budget critico:** hai {avg_spendable:.1f} cr per slot.")
-        else:
-            consigli.append(f"• **Budget ottimo:** hai {avg_spendable:.1f} cr per slot.")
-            
-    if consigli:
-        st.sidebar.markdown("**Consigli strategici:**")
-        for consiglio in consigli:
-            st.sidebar.write(consiglio)
+        st.sidebar.caption(f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** ({slots_left} slot liberi)")
+
+    # Generazione Alert specifici per la squadra selezionata nella Sidebar
+    sidebar_alerts = []
+    
+    # 1. Controllo Blocco Squadra Serie A
+    nfl_counts = {}
+    for p in t_players:
+      if p.get("role") != "P":
+        club = p.get("team_nfl")
+        if club: nfl_counts[club] = nfl_counts.get(club, 0) + 1
+    for club, count in nfl_counts.items():
+      if count >= 4: sidebar_alerts.append(f"🚨 **Rischio Blocco:** {count} giocatori su {club}")
+
+    # 2. Controllo Ballottaggi
+    ballotaggio_count = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
+    if bought_count >= 5 and ballotaggio_count >= (bought_count * 0.4):
+      sidebar_alerts.append(f"⚠️ **Troppi Ballottaggi:** {ballotaggio_count} giocatori")
+
+    # 3. Controllo Cartellini
+    cartellini_count = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
+    if cartellini_count >= 3:
+      sidebar_alerts.append(f"🟨 **Rischio Malus:** {cartellini_count} a rischio cartellino")
+
+    # 4. Controllo Rookie
+    rookie_count = sum(1 for p in t_players if p.get("primo_anno_serie_a"))
+    if rookie_count >= 3:
+      sidebar_alerts.append(f"👶 **Rischio Rookie:** {rookie_count} al primo anno in A")
+
+    if sidebar_alerts:
+        st.sidebar.markdown("**Alert Squadra:**")
+        for alert in sidebar_alerts:
+            st.sidebar.markdown(alert)
     else:
-        st.sidebar.success("Rosa completa!")
+        st.sidebar.caption("✅ Nessun alert di rilievo per questa rosa.")
 
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
@@ -403,7 +428,7 @@ if not teams_df.empty:
             "help": f"Giocatori di movimento del club {club}:\n- " + "\n- ".join(club_players_map[club])
         })
 
-    ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita") == "Ballottaggio"]
+    ballotaggio_players = [f"{p.get('name')} [{p.get('role')}]" for p in t_players if p.get("status_titolarita"] == "Ballottaggio"]
     if bought >= 5 and len(ballotaggio_players) >= (bought * 0.4):
       alerts.append({
           "text": f"⚠️ **Troppi Ballottaggi:** {len(ballotaggio_players)} giocatori",
