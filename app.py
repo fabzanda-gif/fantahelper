@@ -1,16 +1,8 @@
 import random
 import pandas as pd
 import streamlit as st
-from supabase import create_client
 import streamlit.components.v1 as components
-
-def play_sound(sound_url):
-    sound_html = f"""
-        <audio autoplay>
-            <source src="{sound_url}" type="audio/mp3">
-        </audio>
-    """
-    components.html(sound_html, height=0, width=0)
+from supabase import create_client
 
 # CONNESSIONE AL DATABASE SUPABASE
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
@@ -26,6 +18,15 @@ ROLE_LIMITS = {
     "A": 6
 }
 TOTAL_SLOTS_PER_TEAM = 25
+
+# FUNZIONE PER GLI EFFETTI AUDIO
+def play_sound(sound_url):
+    sound_html = f"""
+        <audio autoplay>
+            <source src="{sound_url}" type="audio/mp3">
+        </audio>
+    """
+    components.html(sound_html, height=0, width=0)
 
 # FUNZIONE RICALIBRATA PER IL RATING (DA 0 A 10) DEL GIOCATORE CON BONUS PREFERITI
 def calculate_player_rating(p, preferred_players_set=None):
@@ -132,7 +133,6 @@ for label, code in role_mapping_full.items():
 tab1, tab2 = st.tabs(["🎯 Live Asta", "📋 Tutte le Rose & Pagelle Asta"])
 
 with tab1:
-    # --- CORPO CENTRALE (Selezione Ruolo Attivo) ---
     st.subheader("🎯 Assegnazione Guidata Giocatore")
 
     if auction_is_finished:
@@ -231,7 +231,6 @@ with tab1:
         st.sidebar.markdown("---")
         st.sidebar.markdown("**📊 Cruscotto Rischi Rosa:**")
 
-        # 1. Calcolo Blocco Squadra Serie A
         nfl_counts = {}
         for p in t_players:
           if p.get("role") != "P":
@@ -241,17 +240,14 @@ with tab1:
         block_status = "👍 Ottimale" if max_block_count < 4 else "👎 Rischio Blocco"
         st.sidebar.write(f"🚨 **Blocco Squadra:** {max_block_count} max | {block_status}")
 
-        # 2. Calcolo Ballottaggi
         ballotaggio_count = sum(1 for p in t_players if p.get("status_titolarita") == "Ballottaggio")
         ballot_status = "👍 Ottimale" if ballotaggio_count < 3 else ("🟡 Moderato" if ballotaggio_count < 6 else "👎 Troppi")
         st.sidebar.write(f"⚠️ **Ballottaggi:** {ballotaggio_count} giocatori | {ballot_status}")
 
-        # 3. Calcolo Cartellini A Rischio
         cartellini_count = sum(1 for p in t_players if p.get("propensione_cartellini") == "A rischio malus")
         cart_status = "👍 Pulita" if cartellini_count < 2 else ("🟡 Attenzione" if cartellini_count < 4 else "👎 Troppi Malus")
         st.sidebar.write(f"🟨 **A rischio malus:** {cartellini_count} | {cart_status}")
 
-        # 4. Calcolo Rookie Primo Anno
         rookie_count = sum(1 for p in t_players if p.get("primo_anno_serie_a"))
         rookie_status = "👍 Esperti" if rookie_count < 2 else ("🟡 Equilibrato" if rookie_count < 4 else "👎 Troppi Rookie")
         st.sidebar.write(f"👶 **Primo anno in A:** {rookie_count} | {rookie_status}")
@@ -396,41 +392,6 @@ with tab1:
           target_team = st.selectbox("5. Squadra Acquirente", active_teams if active_teams else teams_df["name"].tolist(), index=active_teams.index("Escanyol") if "Escanyol" in active_teams else 0)
 
         if st.button("Conferma Acquisto", type="primary"):
-          team_row = teams_df[teams_df["name"] == target_team]
-          if team_row.empty:
-            st.error("Seleziona una squadra valida.")
-          else:
-            team_id = team_row.iloc[0]["id"]
-            current_budget = team_row.iloc[0]["remaining_budget"]
-            p_role = selected_player["role"]
-
-            team_role_count = team_role_totals[target_team][p_role]
-            max_limit = ROLE_LIMITS.get(p_role, TOTAL_SLOTS_PER_TEAM)
-
-            if team_role_count >= max_limit:
-              st.error(f"❌ Limite raggiunto! La squadra **{target_team}** ha già completato i posti per il ruolo {p_role} ({team_role_count}/{max_limit}).")
-            elif team_total_bought[target_team] >= TOTAL_SLOTS_PER_TEAM:
-              st.error(f"❌ La squadra **{target_team}** ha completato la rosa (25/25).")
-            elif purchase_price > current_budget:
-              st.error(
-                  f"❌ La squadra {target_team} non ha abbastanza crediti! (Budget residuo: {current_budget})"
-              )
-            else:
-              supabase.table("rosters").insert({
-                  "team_id": team_id,
-                  "player_id": selected_player["id"],
-                  "purchase_price": purchase_price,
-              }).execute()
-
-              new_budget = current_budget - purchase_price
-              supabase.table("teams").update({"remaining_budget": int(new_budget)}).eq(
-                  "id", team_id
-              ).execute()
-
-              # --- FESTEGGIAMENTI PERSONALIZZATI PER ACQUISTO (SPECIALMENTE PER ESCANYOL) ---
-              p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
-              
-             if st.button("Conferma Acquisto", type="primary"):
             team_row = teams_df[teams_df["name"] == target_team]
             if team_row.empty:
                 st.error("Seleziona una squadra valida.")
