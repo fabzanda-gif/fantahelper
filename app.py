@@ -85,7 +85,7 @@ def play_sound(sound_url):
     components.html(sound_html, height=0, width=0)
 
 def calculate_player_rating_detailed(p, preferred_players_set=None):
-    """Calcola il rating restituendo anche i dettagli dei contributi per la Tab 3"""
+    """Calcola il rating basato sulle statistiche reali delle 38 giornate, gestendo correttamente i rookie e senza file di match mancanti."""
     role = p.get("role", "D")
     p_name_clean = normalize_string(p.get("name", ""))
     
@@ -93,6 +93,7 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
     has_real_stats = False
     goals, assists, matches, avg_vote = 0, 0, 0, 0.0
     
+    # 1. Cerchiamo se il giocatore ha statistiche reali nelle 38 giornate
     if not REAL_STATS_DF.empty and p_name_clean:
         match = REAL_STATS_DF[REAL_STATS_DF['clean_name'].str.contains(p_name_clean, na=False)]
         if not match.empty:
@@ -102,7 +103,8 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
             assists = row.get('assists', 0)
             matches = row.get('matches', 0)
             
-            if matches > 3:
+            # Se ha giocato con continuità nella passata stagione
+            if matches > 3 and avg_vote > 0:
                 base_rating = avg_vote
                 if role in ["A", "C"]:
                     base_rating += (goals * 0.12) + (assists * 0.08)
@@ -110,16 +112,19 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
                     base_rating += (goals * 0.15) + (assists * 0.10)
                 has_real_stats = True
 
+    # 2. Se NON ha statistiche reali (es. Rookie, nuovo dall'estero, giovani), partiamo da una base prudente basata sul listino
     if not has_real_stats:
         listino = p.get("list_price", 1)
         if listino is None: listino = 1
-        if role == "A": base_rating = 5.5 + (listino * 0.08)
-        elif role == "C": base_rating = 5.0 + (listino * 0.06)
-        elif role == "P": base_rating = 5.0 + (listino * 0.05)
-        else: base_rating = 4.5 + (listino * 0.05)
+        # I rookie o giocatori senza storico partono più bassi per evitare voti sballati
+        if role == "A": base_rating = 5.0 + (listino * 0.05)
+        elif role == "C": base_rating = 4.8 + (listino * 0.04)
+        elif role == "P": base_rating = 5.0 + (listino * 0.04)
+        else: base_rating = 4.5 + (listino * 0.04)
     
     rating = base_rating
     
+    # Titolarità
     titolarita = p.get("status_titolarita")
     titolarita_mod = 0.0
     if titolarita == "Titolare": titolarita_mod = 0.4
@@ -127,23 +132,20 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
     elif titolarita == "Riserva": titolarita_mod = -1.5
     rating += titolarita_mod
 
-    team_mod = 0.0
-    team_serie_a = p.get("team_nfl")
-    if team_serie_a in TEAM_MODIFIERS:
-        mods = TEAM_MODIFIERS[team_serie_a]
-        if role in ["A", "C"]: team_mod = mods["att"]
-        elif role in ["D", "P"]: team_mod = mods["def"]
-        rating += team_mod
-
+    # Bonus e Malus
     has_malus = False
-    rigorista_mod = 1.2 if p.get("rigorista") else 0.0
-    if p.get("rigorista"): rating += 0.8
+    rigorista_mod = 0.8 if p.get("rigorista") else 0.0
+    rating += rigorista_mod
     
     cartellini_mod = -0.3 if p.get("propensione_cartellini") == "A rischio malus" else 0.0
-    if cartellini_mod < 0: has_malus = True; rating += cartellini_mod
+    if cartellini_mod < 0: 
+        has_malus = True
+        rating += cartellini_mod
         
     rookie_mod = -0.3 if p.get("primo_anno_serie_a") else 0.0
-    if rookie_mod < 0: has_malus = True; rating += rookie_mod
+    if rookie_mod < 0: 
+        has_malus = True
+        rating += rookie_mod
 
     if titolarita in ["Ballottaggio", "Riserva"]:
         has_malus = True
@@ -152,14 +154,16 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
     rating += pref_mod
         
     final_rating = round(max(1.0, min(10.0, rating)), 1)
-    if has_malus and final_rating >= 10.0:
+    
+    # Blocco rigido: se c'è un malus attivo o è un rookie, non può mai toccare il 10.0 (max 9.0)
+    if (has_malus or p.get("primo_anno_serie_a")) and final_rating >= 10.0:
         final_rating = 9.0
         
     details = {
         "base_or_fantamedia": round(base_rating, 2),
         "titolarita_mod": titolarita_mod,
-        "team_mod": team_mod,
-        "bonus_rigorista": 0.8 if p.get("rigorista") else 0.0,
+        "team_mod": 0.0,
+        "bonus_rigorista": rigorista_mod,
         "malus_cartellini": cartellini_mod,
         "malus_rookie": rookie_mod,
         "preferito_mod": pref_mod,
