@@ -303,19 +303,26 @@ with tab1:
                         supabase.table("rosters").insert({"team_id": team_id, "player_id": selected_player["id"], "purchase_price": purchase_price}).execute()
                         supabase.table("teams").update({"remaining_budget": int(current_budget - purchase_price)}).eq("id", team_id).execute()
 
-                        # --- ATTIVAZIONE FESTA E JOHN CENA PER ESCANYOL ---
+                        # --- ATTIVAZIONE FESTA E JOHN CENA IMMEDIATA ---
                         p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
-                        if target_team == "Escanyol":
-                            if p_rtg >= 8.0:
-                                st.session_state.show_celebration = f"🔥 MASSIVE COLPO! **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺"
-                                st.session_state.audio_url = "https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3"
-                            elif p_rtg >= 7.0:
-                                st.session_state.show_celebration = f"🎉 Gran colpo! **{selected_player['name']}** (Rating {p_rtg}) per l'Escanyol!"
-                                st.session_state.audio_url = "https://www.myinstants.com/media/sounds/ta-da.mp3"
-                            else:
-                                st.session_state.show_celebration = None
-                        st.rerun()
-
+                        
+                        if target_team == "Escanyol" and p_rtg >= 8.0:
+                            st.balloons()
+                            st.snow()
+                            play_sound("https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3")
+                            st.success(f"🔥 MASSIVE COLPO! **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺")
+                            if st.button("🎉 Clicca qui per continuare l'asta"):
+                                st.rerun()
+                        elif target_team == "Escanyol" and p_rtg >= 7.0:
+                            st.balloons()
+                            play_sound("https://www.myinstants.com/media/sounds/ta-da.mp3")
+                            st.success(f"🎉 Gran colpo! **{selected_player['name']}** (Rating {p_rtg}) per l'Escanyol!")
+                            if st.button("🎉 Clicca qui per continuare l'asta"):
+                                st.rerun()
+                        else:
+                            st.success(f"✅ Acquistato **{selected_player['name']}** per **{target_team}** a {purchase_price} crediti!")
+                            if st.button("Continua"):
+                                st.rerun()
     # --- PANORAMICA SQUADRE ---
     st.divider()
     st.subheader("📊 Panoramica Squadre & Alert Strategici")
