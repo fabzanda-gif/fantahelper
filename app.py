@@ -43,7 +43,7 @@ def calculate_player_rating(p, preferred_players_set=None):
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
 teams_df = pd.DataFrame(teams_data)
-rosters_data = supabase.table("rosters").select("purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio, primo_anno_serie_a)").execute().data
+rosters_data = supabase.table("rosters").select("id, purchase_price, teams(name), players(id, name, role, team_nfl, list_price, status_titolarita, rigorista, affidabilita_fisica, propensione_cartellini, slot_fantacalcio, primo_anno_serie_a)").execute().data
 
 bought_player_ids = set()
 team_role_totals = {t["name"]: {"P": 0, "D": 0, "C": 0, "A": 0} for t in teams_data}
@@ -303,7 +303,7 @@ with tab1:
                         supabase.table("rosters").insert({"team_id": team_id, "player_id": selected_player["id"], "purchase_price": purchase_price}).execute()
                         supabase.table("teams").update({"remaining_budget": int(current_budget - purchase_price)}).eq("id", team_id).execute()
 
-                        # --- ATTIVAZIONE FESTA E JOHN CENA ---
+                        # --- ATTIVAZIONE FESTA E JOHN CENA PER ESCANYOL ---
                         p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
                         if target_team == "Escanyol":
                             if p_rtg >= 8.0:
@@ -380,6 +380,8 @@ with tab1:
 
 with tab2:
     st.subheader("📋 Tutte le Rose & Pagelle Post-Asta")
+    st.info("🛠️ [MOCKUP] Qui sotto puoi anche eliminare i giocatori dalle rose per fare prove. Questa funzione di rimozione andrà rimossa il giorno dell'asta.")
+
     if rosters_data:
         formatted_rosters = []
         for r in rosters_data:
@@ -388,6 +390,7 @@ with tab2:
                 listino = p.get("list_price") or 1
                 player_score = calculate_player_rating(p, st.session_state.preferred_players)
                 formatted_rosters.append({
+                    "🗑️ Elimina": False, # Funzione mockup rimozione
                     "⭐ Preferito": p["id"] in st.session_state.preferred_players,
                     "Squadra": r["teams"]["name"],
                     "Giocatore": p["name"],
@@ -397,6 +400,7 @@ with tab2:
                     "Listino": listino,
                     "Pagato": r["purchase_price"],
                     "Differenza": r["purchase_price"] - listino,
+                    "_roster_id": r["id"],
                     "_player_id": p["id"]
                 })
         
@@ -408,11 +412,44 @@ with tab2:
         df_display = df_rosters_raw.copy()
         if filtro_tabella != "Tutte": df_display = df_display[df_display["Squadra"] == filtro_tabella]
         
-        edited_df = st.data_editor(df_display, column_config={"_player_id": None, "⭐ Preferito": st.column_config.CheckboxColumn("⭐ Preferito", default=False)}, use_container_width=True, hide_index=True)
+        edited_df = st.data_editor(
+            df_display, 
+            column_config={
+                "_roster_id": None,
+                "_player_id": None,
+                "🗑️ Elimina": st.column_config.CheckboxColumn("🗑️ Elimina (Mockup)", default=False),
+                "⭐ Preferito": st.column_config.CheckboxColumn("⭐ Preferito", default=False)
+            }, 
+            use_container_width=True, 
+            hide_index=True
+        )
         
+        # Gestione Salvataggio Preferiti ed eventuale rimozione Mockup
+        rosters_to_delete = []
         for _, row in edited_df.iterrows():
             if row["⭐ Preferito"]: st.session_state.preferred_players.add(row["_player_id"])
             else: st.session_state.preferred_players.discard(row["_player_id"])
+            
+            if row["🗑️ Elimina"]:
+                rosters_to_delete.append(row["_roster_id"])
+
+        if rosters_to_delete:
+            if st.button("Conferma eliminazione selezionati (Mockup)", type="primary"):
+                for r_id in rosters_to_delete:
+                    # Recuperiamo l'acquisto per ripristinare il budget
+                    del_item = next((item for item in rosters_data if item["id"] == r_id), None)
+                    if del_item and del_item.get("teams"):
+                        t_name = del_item["teams"]["name"]
+                        price = del_item["purchase_price"]
+                        t_row = teams_df[teams_df["name"] == t_name]
+                        if not t_row.empty:
+                            t_id = t_row.iloc[0]["id"]
+                            curr_b = t_row.iloc[0]["remaining_budget"]
+                            supabase.table("teams").update({"remaining_budget": int(curr_b + price)}).eq("id", t_id).execute()
+                    
+                    supabase.table("rosters").delete().eq("id", r_id).execute()
+                st.success("Giocatori eliminati e budget ripristinati con successo!")
+                st.rerun()
 
         st.divider()
         st.subheader("🏆 Classifica e Voto Asta per Squadra")
