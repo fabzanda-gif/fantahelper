@@ -51,6 +51,15 @@ def load_real_player_stats():
 
 REAL_STATS_DF = load_real_player_stats()
 
+# Mappa tra il nome della squadra nel CSV (es. season-2526.csv) e il codice in Supabase
+TEAM_MAP = {
+    "Napoli": "NAP", "Juventus": "JUV", "Milan": "MIL", "Inter": "INT",
+    "Roma": "ROM", "Lazio": "LAZ", "Atalanta": "ATA", "Fiorentina": "FIO",
+    "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
+    "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
+    "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS"
+}
+
 @st.cache_data
 def get_team_modifiers():
     try:
@@ -83,7 +92,14 @@ def get_team_modifiers():
                 modifiers[team] = {"att": round(att_mod, 2), "def": round(def_mod, 2)}
             else:
                 modifiers[team] = {"att": 0.0, "def": 0.0}
-        return modifiers
+        
+        # Conversione dei nomi completi in codici abbreviati (es. 'NAP') per Supabase
+        final_modifiers = {}
+        for team_name, mods in modifiers.items():
+            code = TEAM_MAP.get(team_name, team_name.upper()[:3])
+            final_modifiers[code] = mods
+            
+        return final_modifiers
     except Exception as e:
         return {}
 
@@ -94,7 +110,7 @@ def play_sound(sound_url):
     components.html(sound_html, height=0, width=0)
 
 def calculate_player_rating_detailed(p, preferred_players_set=None):
-    """Calcola il rating basato sulle statistiche reali delle 38 giornate, gestendo correttamente i rookie e senza file di match mancanti."""
+    """Calcola il rating integrando statistiche reali, modificatori squadra e malus."""
     role = p.get("role", "D")
     p_name_clean = normalize_string(p.get("name", ""))
     
@@ -112,7 +128,6 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
             assists = row.get('assists', 0)
             matches = row.get('matches', 0)
             
-            # Se ha giocato con continuità nella passata stagione
             if matches > 3 and avg_vote > 0:
                 base_rating = avg_vote
                 if role in ["A", "C"]:
@@ -121,11 +136,9 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
                     base_rating += (goals * 0.15) + (assists * 0.10)
                 has_real_stats = True
 
-    # 2. Se NON ha statistiche reali (es. Rookie, nuovo dall'estero, giovani), partiamo da una base prudente basata sul listino
+    # 2. Base prudente se non ha statistiche
     if not has_real_stats:
-        listino = p.get("list_price", 1)
-        if listino is None: listino = 1
-        # I rookie o giocatori senza storico partono più bassi per evitare voti sballati
+        listino = p.get("list_price", 1) or 1
         if role == "A": base_rating = 5.0 + (listino * 0.05)
         elif role == "C": base_rating = 4.8 + (listino * 0.04)
         elif role == "P": base_rating = 5.0 + (listino * 0.04)
@@ -135,11 +148,16 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
     
     # Titolarità
     titolarita = p.get("status_titolarita")
-    titolarita_mod = 0.0
-    if titolarita == "Titolare": titolarita_mod = 0.4
-    elif titolarita == "Ballottaggio": titolarita_mod = -0.3
-    elif titolarita == "Riserva": titolarita_mod = -1.5
+    titolarita_mod = 0.4 if titolarita == "Titolare" else (-0.3 if titolarita == "Ballottaggio" else (-1.5 if titolarita == "Riserva" else 0.0))
     rating += titolarita_mod
+
+    # --- INTEGRAZIONE MODIFICATORE SQUADRA ---
+    team_mod = 0.0
+    team_code = p.get("team_nfl") # Es. 'NAP', 'JUV' ecc.
+    if team_code in TEAM_MODIFIERS:
+        mods = TEAM_MODIFIERS[team_code]
+        team_mod = mods["att"] if role in ["A", "C"] else mods["def"]
+        rating += team_mod
 
     # Bonus e Malus
     has_malus = False
@@ -147,31 +165,26 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
     rating += rigorista_mod
     
     cartellini_mod = -0.3 if p.get("propensione_cartellini") == "A rischio malus" else 0.0
-    if cartellini_mod < 0: 
-        has_malus = True
-        rating += cartellini_mod
+    if cartellini_mod < 0: has_malus = True; rating += cartellini_mod
         
     rookie_mod = -0.3 if p.get("primo_anno_serie_a") else 0.0
-    if rookie_mod < 0: 
-        has_malus = True
-        rating += rookie_mod
+    if rookie_mod < 0: has_malus = True; rating += rookie_mod
 
-    if titolarita in ["Ballottaggio", "Riserva"]:
-        has_malus = True
+    if titolarita in ["Ballottaggio", "Riserva"]: has_malus = True
     
     pref_mod = 0.5 if (preferred_players_set and p.get("id") in preferred_players_set) else 0.0
     rating += pref_mod
         
     final_rating = round(max(1.0, min(10.0, rating)), 1)
     
-    # Blocco rigido: se c'è un malus attivo o è un rookie, non può mai toccare il 10.0 (max 9.0)
+    # Blocco rigido malus
     if (has_malus or p.get("primo_anno_serie_a")) and final_rating >= 10.0:
         final_rating = 9.0
         
-    details = {
+    return {
         "base_or_fantamedia": round(base_rating, 2),
         "titolarita_mod": titolarita_mod,
-        "team_mod": 0.0,
+        "team_mod": team_mod, # Ora valorizzato!
         "bonus_rigorista": rigorista_mod,
         "malus_cartellini": cartellini_mod,
         "malus_rookie": rookie_mod,
@@ -181,10 +194,6 @@ def calculate_player_rating_detailed(p, preferred_players_set=None):
         "matches": int(matches),
         "final_rating": final_rating
     }
-    return details
-
-def calculate_player_rating(p, preferred_players_set=None):
-    return calculate_player_rating_detailed(p, preferred_players_set)["final_rating"]
 
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
