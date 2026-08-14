@@ -1,4 +1,6 @@
 import random
+import unicodedata
+import re
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -20,61 +22,38 @@ if "show_celebration" not in st.session_state: st.session_state.show_celebration
 if "audio_url" not in st.session_state: st.session_state.audio_url = None
 if "preferred_players" not in st.session_state: st.session_state.preferred_players = set()
 
-# --- FUNZIONI ---
-def play_sound(sound_url):
-    sound_html = f"""<audio autoplay><source src="{sound_url}" type="audio/mp3"></audio>"""
-    components.html(sound_html, height=0, width=0)
+# --- FUNZIONI DI NORMALIZZAZIONE E DATI ESTERNI ---
+def normalize_string(s):
+    if not isinstance(s, str):
+        return ""
+    nfkd_form = unicodedata.normalize('NFKD', s)
+    only_ascii = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+    return re.sub(r'[^a-zA-Z0-9\s]', '', only_ascii).lower().strip()
 
-def calculate_player_rating(p, preferred_players_set=None):
-    # Assegniamo una base di partenza leggermente diversa per ruolo
-    role = p.get("role", "D")
-    if role == "A":
-        rating = 6.0  # Gli attaccanti partono avvantaggiati
-    elif role == "C":
-        rating = 5.5
-    elif role == "P":
-        rating = 5.0
-    else:
-        rating = 4.2  # I difensori partono più bassi per evitare l'effetto monopolio
-    
-    listino = p.get("list_price", 1)
-    if listino is None: listino = 1
-    
-    # Impatto del prezzo scalato in base al ruolo
-    if role == "A":
-        rating += (listino * 0.12)  # Per gli attaccanti il listino pesa di più
-    elif role == "C":
-        rating += (listino * 0.10)
-    else:
-        rating += (listino * 0.08)  # Per i difensori il listino pesa meno
-    
-    # Status titolarità
-    titolarita = p.get("status_titolarita")
-    if titolarita == "Titolare": rating += 0.8
-    elif titolarita == "Ballottaggio": rating -= 0.4
-    elif titolarita == "Riserva": rating -= 2.0
-    
-    # Bonus pesanti per chi porta bonus (rigoristi)
-    if p.get("rigorista"): 
-        rating += 1.5  # Essere rigorista sposta tantissimo al fantacalcio
-        
-    # Malus
-    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
-    if p.get("primo_anno_serie_a"): rating -= 0.3
-    
-    # Preferiti utente
-    if preferred_players_set and p.get("id") in preferred_players_set:
-        rating += 0.5
-        
-    # Impediamo che tocchino tutti 10.0: il tetto massimo è raggiungibile solo da pochissimi top assoluti
-    return round(max(1.0, min(10.0, rating)), 1)
+@st.cache_data
+def load_player_advanced_stats():
+    try:
+        df = pd.read_csv('database.csv')
+        aggregated = df.groupby('Player').agg(
+            Total_Goals=('Goals', 'sum'),
+            Total_Assists=('Assists', 'sum'),
+            Total_Minutes=('Minutes', 'sum'),
+            Avg_xG=('Expected Goals (xG)', 'mean'),
+            Avg_xAG=('Expected Assists (xAG)', 'mean'),
+            Total_Yellow=('Yellow Cards', 'sum'),
+            Total_Red=('Red Cards', 'sum')
+        ).reset_index()
+        aggregated['clean_name'] = aggregated['Player'].apply(normalize_string)
+        return aggregated
+    except Exception as e:
+        return pd.DataFrame()
 
-    # --- CALCOLO MODIFICATORI SQUADRA DAL CSV ---
+ADVANCED_STATS_DF = load_player_advanced_stats()
+
 @st.cache_data
 def get_team_modifiers():
     try:
         df_matches = pd.read_csv('season-2526.csv')
-        
         home = df_matches.groupby('HomeTeam').agg(
             GF=('FTHG', 'sum'), GA=('FTAG', 'sum'), M=('FTHG', 'count')
         ).reset_index().rename(columns={'HomeTeam': 'Team'})
@@ -88,9 +67,8 @@ def get_team_modifiers():
         ts['TotalGF'] = ts['GF_x'] + ts['GF_y']
         ts['TotalGA'] = ts['GA_x'] + ts['GA_y']
         
-        # Medie campionato di riferimento
-        avg_gf_league = ts['TotalGF'].sum() / ts['Matches'].sum()
-        avg_ga_league = ts['TotalGA'].sum() / ts['Matches'].sum()
+        avg_gf_league = ts['TotalGF'].sum() / ts['Matches'].sum() if ts['Matches'].sum() > 0 else 1.0
+        avg_ga_league = ts['TotalGA'].sum() / ts['Matches'].sum() if ts['Matches'].sum() > 0 else 1.0
         
         modifiers = {}
         for _, row in ts.iterrows():
@@ -99,12 +77,8 @@ def get_team_modifiers():
             if matches > 0:
                 team_gf_per_match = row['TotalGF'] / matches
                 team_ga_per_match = row['TotalGA'] / matches
-                
-                # Modificatore attacco (basato sui gol fatti rispetto alla media)
                 att_mod = (team_gf_per_match - avg_gf_league) * 0.8
-                # Modificatore difesa (basato sui gol subiti in meno rispetto alla media)
                 def_mod = (avg_ga_league - team_ga_per_match) * 0.9
-                
                 modifiers[team] = {"att": round(att_mod, 2), "def": round(def_mod, 2)}
             else:
                 modifiers[team] = {"att": 0.0, "def": 0.0}
@@ -113,7 +87,66 @@ def get_team_modifiers():
         return {}
 
 TEAM_MODIFIERS = get_team_modifiers()
+
+def play_sound(sound_url):
+    sound_html = f"""<audio autoplay><source src="{sound_url}" type="audio/mp3"></audio>"""
+    components.html(sound_html, height=0, width=0)
+
+def calculate_player_rating(p, preferred_players_set=None):
+    role = p.get("role", "D")
+    if role == "A":
+        rating = 5.5
+    elif role == "C":
+        rating = 5.0
+    elif role == "P":
+        rating = 5.0
+    else:
+        rating = 4.5
     
+    listino = p.get("list_price", 1)
+    if listino is None: listino = 1
+    
+    if role == "A": rating += (listino * 0.10)
+    elif role == "C": rating += (listino * 0.08)
+    else: rating += (listino * 0.06)
+    
+    titolarita = p.get("status_titolarita")
+    if titolarita == "Titolare": rating += 0.8
+    elif titolarita == "Ballottaggio": rating -= 0.4
+    elif titolarita == "Riserva": rating -= 2.0
+    
+    # Integrazione statistiche reali da database.csv tramite match pulito del cognome
+    p_name_clean = normalize_string(p.get("name", ""))
+    if not ADVANCED_STATS_DF.empty and p_name_clean:
+        match = ADVANCED_STATS_DF[ADVANCED_STATS_DF['clean_name'].str.contains(p_name_clean, na=False)]
+        if not match.empty:
+            row = match.iloc[0]
+            goals = row.get('Total_Goals', 0)
+            assists = row.get('Total_Assists', 0)
+            xg = row.get('Avg_xG', 0)
+            if role in ["A", "C"]:
+                rating += (goals * 0.4) + (assists * 0.3) + (xg * 2.0)
+            elif role in ["D", "P"]:
+                rating += (assists * 0.4) + (goals * 0.5)
+
+    # Modificatore squadra dal file delle partite
+    team_serie_a = p.get("team_nfl")
+    if team_serie_a in TEAM_MODIFIERS:
+        mods = TEAM_MODIFIERS[team_serie_a]
+        if role in ["A", "C"]:
+            rating += mods["att"]
+        elif role in ["D", "P"]:
+            rating += mods["def"]
+
+    if p.get("rigorista"): rating += 1.2
+    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
+    if p.get("primo_anno_serie_a"): rating -= 0.3
+    
+    if preferred_players_set and p.get("id") in preferred_players_set:
+        rating += 0.5
+        
+    return round(max(1.0, min(10.0, rating)), 1)
+
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
 teams_df = pd.DataFrame(teams_data)
@@ -397,6 +430,7 @@ with tab1:
                             st.success(f"✅ Acquistato **{selected_player['name']}** per **{target_team}** a {purchase_price} crediti!")
                             if st.button("Continua"):
                                 st.rerun()
+
     # --- PANORAMICA SQUADRE ---
     st.divider()
     st.subheader("📊 Panoramica Squadre & Alert Strategici")
@@ -471,7 +505,7 @@ with tab2:
                 listino = p.get("list_price") or 1
                 player_score = calculate_player_rating(p, st.session_state.preferred_players)
                 formatted_rosters.append({
-                    "🗑️ Elimina": False, # Funzione mockup rimozione
+                    "🗑️ Elimina": False, 
                     "⭐ Preferito": p["id"] in st.session_state.preferred_players,
                     "Squadra": r["teams"]["name"],
                     "Giocatore": p["name"],
@@ -505,7 +539,6 @@ with tab2:
             hide_index=True
         )
         
-        # Gestione Salvataggio Preferiti ed eventuale rimozione Mockup
         rosters_to_delete = []
         for _, row in edited_df.iterrows():
             if row["⭐ Preferito"]: st.session_state.preferred_players.add(row["_player_id"])
@@ -517,7 +550,6 @@ with tab2:
         if rosters_to_delete:
             if st.button("Conferma eliminazione selezionati (Mockup)", type="primary"):
                 for r_id in rosters_to_delete:
-                    # Recuperiamo l'acquisto per ripristinare il budget
                     del_item = next((item for item in rosters_data if item["id"] == r_id), None)
                     if del_item and del_item.get("teams"):
                         t_name = del_item["teams"]["name"]
