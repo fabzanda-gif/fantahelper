@@ -1,0 +1,618 @@
+player_name,clean_name,role,matches,goals,assists,avg_vote
+nan,nan,nan,0,0.0,0.0,0.0
+Carnesecchi,carnesecchi,P,37,0.0,0.0,6.36
+Djimsiti,djimsiti,D,34,0.0,0.0,5.87
+Bellanova,bellanova,D,24,0.0,1.0,5.83
+Scalvini,scalvini,D,24,3.0,1.0,6.06
+Kossounou,kossounou,D,19,1.0,0.0,5.95
+Hien,hien,D,28,1.0,0.0,5.91
+De Roon,de roon,C,34,1.0,2.0,5.97
+Pasalic,pasalic,C,33,3.0,3.0,5.94
+Maldini,maldini,C,21,2.0,1.0,5.95
+Samardzic,samardzic,C,26,2.0,2.0,5.94
+Zalewski,zalewski,C,33,2.0,5.0,6.09
+Ederson D.S.,ederson ds,C,30,1.0,1.0,6.25
+Scamacca,scamacca,A,24,8.0,1.0,6.17
+Sulemana K.,sulemana k,A,25,2.0,1.0,6.0
+De Ketelaere,de ketelaere,A,31,3.0,5.0,6.21
+Krstovic,krstovic,A,33,10.0,5.0,6.15
+Juric,juric,ALL,11,0.0,0.0,5.91
+Skorupski,skorupski,P,19,0.0,0.0,6.18
+De Silvestri,de silvestri,D,12,0.0,0.0,6.04
+Lykogiannis,lykogiannis,D,10,0.0,1.0,5.7
+Zortea,zortea,D,32,0.0,2.0,5.88
+Casale,casale,D,12,0.0,0.0,5.71
+Lucumì,lucumi,D,29,1.0,0.0,5.88
+Vitik,vitik,D,19,0.0,0.0,5.95
+Bernardeschi,bernardeschi,C,29,3.0,2.0,6.03
+Freuler,freuler,C,29,1.0,2.0,6.02
+Orsolini,orsolini,C,35,6.0,1.0,6.06
+Odgaard,odgaard,C,26,5.0,1.0,5.92
+Pobega,pobega,C,26,3.0,1.0,5.85
+Fabbian,fabbian,C,29,2.0,0.0,5.84
+Immobile,immobile,A,6,0.0,0.0,5.58
+Cambiaghi,cambiaghi,A,28,3.0,4.0,5.98
+Castro S.,castro s,A,35,7.0,1.0,5.93
+Italiano,italiano,ALL,38,0.0,0.0,6.04
+Caprile,caprile,P,38,0.0,0.0,6.29
+Luperto,luperto,D,34,1.0,1.0,5.84
+Mina,mina,D,26,2.0,1.0,6.0
+Zappa,zappa,D,31,0.0,3.0,5.92
+Obert,obert,D,35,0.0,3.0,5.89
+Idrissi R.,idrissi r,D,23,2.0,0.0,5.87
+Deiola,deiola,C,20,0.0,1.0,5.97
+Mazzitelli,mazzitelli,C,18,2.0,2.0,6.06
+Gaetano,gaetano,C,33,2.0,4.0,6.06
+Adopo,adopo,C,38,1.0,1.0,5.83
+Folorunsho,folorunsho,C,27,2.0,0.0,6.04
+Prati,prati,C,33,1.0,0.0,5.88
+Esposito Se.,esposito se,A,36,6.0,4.0,6.26
+Luvumbo,luvumbo,A,12,0.0,0.0,5.83
+Borrelli,borrelli,A,27,5.0,1.0,5.93
+Kilicsoy,kilicsoy,A,22,4.0,0.0,6.02
+Pisacane,pisacane,ALL,38,0.0,0.0,6.09
+Butez,butez,P,38,0.0,1.0,6.07
+Vojvoda,vojvoda,D,30,2.0,1.0,6.02
+Valle,valle,D,28,1.0,3.0,6.05
+Ramon,ramon,D,32,2.0,0.0,6.16
+Kempf,kempf,D,34,4.0,1.0,6.1
+Van Der Brempt,van der brempt,D,20,0.0,1.0,5.97
+Smolcic I.,smolcic i,D,28,0.0,1.0,5.96
+Sergi Roberto,sergi roberto,C,20,0.0,0.0,5.9
+Caqueret,caqueret,C,30,2.0,4.0,6.1
+Da Cunha,da cunha,C,36,2.0,4.0,6.33
+Perrone,perrone,C,36,3.0,4.0,6.22
+Paz N.,paz n,C,35,12.0,5.0,6.37
+Morata,morata,A,26,0.0,0.0,5.67
+Douvikas,douvikas,A,38,13.0,1.0,6.17
+Kuhn,kuhn,A,23,1.0,1.0,5.98
+Rodriguez Je.,rodriguez je,A,31,2.0,8.0,6.23
+Fabregas,fabregas,ALL,38,0.0,0.0,6.47
+Audero,audero,P,34,0.0,0.0,6.21
+Bianchetti,bianchetti,D,27,0.0,1.0,5.72
+Pezzella Giu.,pezzella giu,D,31,0.0,1.0,5.68
+Ceccherini,ceccherini,D,9,0.0,1.0,5.61
+Terracciano F.,terracciano f,D,36,2.0,0.0,5.86
+Baschirotto,baschirotto,D,29,2.0,0.0,5.95
+Grassi,grassi,C,30,0.0,0.0,5.8
+Bondo,bondo,C,27,0.0,0.0,5.85
+Zerbin,zerbin,C,32,0.0,2.0,5.78
+Payero,payero,C,25,1.0,0.0,5.9
+Collocolo,collocolo,C,8,0.0,0.0,5.94
+Vandeputte,vandeputte,C,32,1.0,5.0,6.06
+Sanabria,sanabria,A,25,1.0,1.0,5.78
+Bonazzoli,bonazzoli,A,35,7.0,2.0,6.16
+De Luca,de luca,A,2,0.0,0.0,6.5
+Okereke,okereke,A,10,2.0,0.0,5.9
+Nicola,nicola,ALL,29,0.0,0.0,5.83
+De Gea,de gea,P,37,0.0,0.0,6.24
+Gosens,gosens,D,26,3.0,1.0,5.92
+Ranieri L.,ranieri l,D,34,1.0,0.0,5.87
+Marì,mari,D,11,0.0,0.0,5.5
+Parisi,parisi,D,23,1.0,1.0,6.02
+Pongracic,pongracic,D,35,0.0,0.0,5.84
+Viti,viti,D,10,0.0,0.0,5.75
+Dodò,dodo,D,36,1.0,2.0,5.99
+Comuzzo,comuzzo,D,27,1.0,0.0,5.78
+Mandragora,mandragora,C,34,6.0,2.0,6.04
+Fagioli,fagioli,C,33,2.0,3.0,6.03
+Sohm,sohm,C,28,0.0,1.0,5.7
+Gudmundsson A.,gudmundsson a,C,33,2.0,3.0,5.88
+Fazzini,fazzini,C,20,0.0,0.0,5.92
+Ndour,ndour,C,33,3.0,0.0,5.82
+Kean,kean,A,26,6.0,1.0,5.88
+Pioli,pioli,ALL,10,0.0,0.0,5.25
+Leali,leali,P,22,0.0,0.0,6.16
+Martin,martin,D,33,1.0,5.0,5.97
+Vasquez,vasquez,D,36,1.0,0.0,6.08
+Marcandalli,marcandalli,D,32,0.0,1.0,5.88
+Norton-Cuffy,nortoncuffy,D,27,2.0,1.0,5.93
+Thorsby,thorsby,C,24,3.0,1.0,6.08
+Messias,messias,C,20,2.0,1.0,6.17
+Frendrup,frendrup,C,36,1.0,0.0,5.96
+Ellertsson,ellertsson,C,36,1.0,1.0,5.85
+Carboni V.,carboni v,C,12,0.0,0.0,5.75
+Gronbaek,gronbaek,C,4,0.0,0.0,5.75
+Masini,masini,C,28,0.0,1.0,5.98
+Stanciu,stanciu,C,4,0.0,0.0,5.5
+Colombo,colombo,A,38,6.0,1.0,5.92
+Vitinha O.,vitinha o,A,35,5.0,1.0,5.96
+Ekhator,ekhator,A,30,3.0,0.0,5.97
+Vieira P.,vieira p,ALL,9,0.0,0.0,5.44
+Sommer,sommer,P,33,0.0,0.0,5.92
+Dimarco,dimarco,D,35,7.0,17.0,6.6
+Acerbi,acerbi,D,18,0.0,0.0,6.03
+Bastoni,bastoni,D,28,1.0,4.0,6.2
+Pavard,pavard,D,1,0.0,0.0,6.5
+Dumfries,dumfries,D,20,3.0,1.0,6.1
+Carlos Augusto,carlos augusto,D,34,1.0,1.0,6.1
+Zielinski,zielinski,C,34,5.0,2.0,6.22
+Barella,barella,C,34,3.0,9.0,6.28
+Mkhitaryan,mkhitaryan,C,30,4.0,1.0,6.2
+Luis Henrique,luis henrique,C,30,1.0,2.0,5.9
+Diouf,diouf,C,19,1.0,0.0,6.08
+Sucic P.,sucic p,C,34,2.0,2.0,6.06
+Martinez L.,martinez l,A,30,17.0,6.0,6.42
+Thuram,thuram,A,29,13.0,6.0,6.43
+Bonny,bonny,A,33,5.0,4.0,6.12
+Chivu,chivu,ALL,38,0.0,0.0,6.49
+Di Gregorio,di gregorio,P,30,0.0,0.0,6.08
+Bremer,bremer,D,26,4.0,3.0,6.33
+Kalulu,kalulu,D,37,2.0,4.0,6.14
+Cambiaso,cambiaso,D,36,3.0,4.0,5.81
+Gatti,gatti,D,21,2.0,0.0,5.95
+Kelly L.,kelly l,D,35,1.0,1.0,6.01
+Joao Mario,joao mario,D,20,1.0,1.0,5.85
+Locatelli,locatelli,C,36,1.0,2.0,6.26
+McKennie,mckennie,C,36,5.0,6.0,6.12
+Thuram K.,thuram k,C,35,3.0,2.0,6.1
+Koopmeiners,koopmeiners,C,33,0.0,0.0,5.68
+Conceicao,conceicao,C,31,3.0,5.0,6.27
+Vlahovic,vlahovic,A,19,6.0,0.0,6.13
+Gonzalez N.,gonzalez n,A,2,0.0,0.0,6.0
+David,david,A,35,6.0,2.0,5.8
+Yildiz,yildiz,A,36,9.0,6.0,6.38
+Tudor,tudor,ALL,8,0.0,0.0,5.62
+Provedel,provedel,P,27,0.0,0.0,6.26
+Marusic,marusic,D,33,1.0,2.0,5.86
+Lazzari,lazzari,D,23,0.0,0.0,5.85
+Pellegrini Lu.,pellegrini lu,D,24,1.0,0.0,5.85
+Tavares N.,tavares n,D,23,0.0,0.0,5.91
+Gila,gila,D,31,0.0,0.0,6.03
+Provstgaard,provstgaard,D,26,0.0,0.0,5.92
+Cataldi,cataldi,C,27,1.0,3.0,6.07
+Zaccagni,zaccagni,C,26,3.0,0.0,5.88
+Guendouzi,guendouzi,C,16,2.0,0.0,6.16
+Rovella,rovella,C,11,0.0,1.0,5.73
+Dele-Bashiru,delebashiru,C,24,1.0,0.0,5.73
+Pedro,pedro,A,29,3.0,2.0,6.1
+Cancellieri,cancellieri,A,30,4.0,1.0,5.93
+Dia,dia,A,27,1.0,2.0,5.7
+Castellanos,castellanos,A,11,2.0,3.0,6.09
+Sarri,sarri,ALL,38,0.0,0.0,6.2
+Falcone,falcone,P,38,0.0,0.0,6.41
+Gallo,gallo,D,37,0.0,3.0,5.95
+Gaspar K.,gaspar k,D,23,0.0,0.0,5.85
+Tiago Gabriel,tiago gabriel,D,37,2.0,0.0,6.0
+Veiga D.,veiga d,D,36,0.0,0.0,5.82
+Kouassi,kouassi,D,4,0.0,0.0,5.5
+Sottil,sottil,C,21,1.0,2.0,6.02
+Coulibaly L.,coulibaly l,C,33,3.0,1.0,6.05
+Berisha M.,berisha m,C,13,2.0,3.0,6.15
+Ramadani,ramadani,C,37,1.0,0.0,5.91
+Kaba,kaba,C,15,0.0,0.0,5.83
+Pierret,pierret,C,3,0.0,0.0,6.0
+Tete Morente,tete morente,C,16,0.0,1.0,5.59
+Banda,banda,A,32,5.0,4.0,6.08
+Camarda,camarda,A,21,1.0,0.0,5.71
+N'Dri,ndri,A,27,2.0,0.0,5.89
+Di Francesco,di francesco,ALL,38,0.0,0.0,5.93
+Maignan,maignan,P,37,0.0,0.0,6.26
+Gabbia,gabbia,D,30,0.0,0.0,5.92
+Tomori,tomori,D,33,0.0,1.0,5.97
+Pavlovic,pavlovic,D,34,5.0,0.0,6.24
+Estupinan,estupinan,D,19,1.0,1.0,5.74
+Jimenez A.,jimenez a,D,1,0.0,0.0,5.5
+Pulisic,pulisic,C,30,8.0,4.0,6.13
+Modric,modric,C,34,2.0,3.0,6.44
+Loftus-Cheek,loftuscheek,C,28,3.0,1.0,6.07
+Fofana Y.,fofana y,C,33,2.0,3.0,5.85
+Chukwueze,chukwueze,C,1,0.0,0.0,5.5
+Saelemaekers,saelemaekers,C,35,3.0,3.0,6.14
+Jashari,jashari,C,14,0.0,1.0,5.75
+Gimenez,gimenez,A,16,0.0,1.0,5.53
+Allegri,allegri,ALL,38,0.0,0.0,6.05
+Meret,meret,P,11,0.0,1.0,6.23
+Juan Jesus,juan jesus,D,24,0.0,0.0,5.88
+Spinazzola,spinazzola,D,32,3.0,3.0,6.16
+Di Lorenzo,di lorenzo,D,26,2.0,1.0,6.08
+Rrahmani,rrahmani,D,21,2.0,0.0,6.24
+Olivera,olivera,D,25,0.0,0.0,5.78
+Politano,politano,C,34,2.0,5.0,6.09
+De Bruyne,de bruyne,C,18,2.0,2.0,6.25
+Zambo Anguissa,zambo anguissa,C,18,4.0,1.0,6.17
+Lobotka,lobotka,C,32,1.0,0.0,6.05
+McTominay,mctominay,C,33,10.0,2.0,6.39
+Gilmour,gilmour,C,17,1.0,0.0,6.06
+Neres,neres,C,16,3.0,3.0,6.19
+Vergara,vergara,C,12,1.0,0.0,6.17
+Lucca,lucca,A,16,1.0,0.0,5.84
+Lang,lang,A,18,1.0,2.0,6.03
+Conte,conte,ALL,38,0.0,0.0,6.16
+Suzuki,suzuki,P,20,0.0,0.0,6.03
+Valenti,valenti,D,27,0.0,0.0,5.96
+Valeri,valeri,D,34,0.0,2.0,6.06
+Circati,circati,D,31,1.0,0.0,5.92
+Delprato,delprato,D,35,2.0,0.0,5.91
+Lovik,lovik,D,9,0.0,0.0,5.72
+Bernabè,bernabe,C,32,3.0,1.0,6.17
+Keita M.,keita m,C,37,1.0,1.0,6.01
+Ordonez C.,ordonez c,C,28,1.0,0.0,5.84
+Sorensen O.,sorensen o,C,34,1.0,1.0,5.87
+Djuric,djuric,A,23,0.0,1.0,6.0
+Almqvist,almqvist,A,13,0.0,1.0,5.96
+Benedyczak,benedyczak,A,14,0.0,1.0,5.96
+Pellegrino M.,pellegrino m,A,37,8.0,0.0,5.99
+Cuesta,cuesta,ALL,38,0.0,0.0,6.04
+Semper,semper,P,25,0.0,0.0,6.06
+Cuadrado,cuadrado,D,19,0.0,0.0,6.03
+Caracciolo A.,caracciolo a,D,35,2.0,0.0,5.8
+Calabresi,calabresi,D,26,0.0,0.0,5.75
+Canestrelli,canestrelli,D,37,1.0,0.0,5.69
+Angori,angori,D,35,0.0,2.0,5.91
+Denoon,denoon,D,2,0.0,0.0,5.5
+Tramoni M.,tramoni m,C,27,1.0,2.0,5.74
+Aebischer,aebischer,C,35,1.0,1.0,5.8
+Akinsanmiro,akinsanmiro,C,24,0.0,1.0,5.81
+Piccinini G.,piccinini g,C,25,0.0,0.0,5.8
+Tourè I.,toure i,C,32,1.0,0.0,5.83
+Marin M.,marin m,C,23,0.0,0.0,5.89
+Nzola,nzola,A,30,2.0,1.0,5.97
+Moreo,moreo,A,37,5.0,0.0,5.99
+Meister,meister,A,28,2.0,0.0,5.66
+Gilardino,gilardino,ALL,23,0.0,0.0,5.91
+Svilar,svilar,P,38,0.0,0.0,6.26
+Mancini,mancini,D,36,4.0,2.0,6.25
+N'Dicka,ndicka,D,31,3.0,1.0,6.08
+Angelino,angelino,D,7,0.0,0.0,5.86
+Hermoso,hermoso,D,27,3.0,2.0,6.17
+Rensch,rensch,D,24,1.0,4.0,6.12
+Wesley,wesley,D,30,5.0,0.0,6.12
+Cristante,cristante,C,37,2.0,1.0,6.11
+El Shaarawy,el shaarawy,C,20,1.0,2.0,6.12
+Konè M.,kone m,C,29,2.0,3.0,6.26
+El Aynaoui,el aynaoui,C,25,1.0,2.0,5.98
+Dybala,dybala,A,22,2.0,7.0,6.25
+Soulè,soule,A,33,6.0,5.0,6.12
+Ferguson E.,ferguson e,A,16,3.0,2.0,6.09
+Dovbyk,dovbyk,A,14,3.0,1.0,6.0
+Gasperini,gasperini,ALL,38,0.0,0.0,6.26
+Turati,turati,P,6,0.0,0.0,6.17
+Romagna,romagna,D,5,0.0,0.0,5.7
+Walukiewicz,walukiewicz,D,34,0.0,1.0,5.81
+Doig,doig,D,30,0.0,0.0,5.87
+Candè,cande,D,12,0.0,0.0,5.79
+Muharemovic,muharemovic,D,32,2.0,1.0,5.91
+Ghion,ghion,C,1,0.0,0.0,6.0
+Boloca,boloca,C,2,0.0,0.0,5.75
+Lipani,lipani,C,24,0.0,1.0,5.94
+Konè I.,kone i,C,35,6.0,0.0,6.19
+Fadera,fadera,C,28,2.0,1.0,5.93
+Berardi,berardi,A,26,6.0,4.0,6.31
+Pierini,pierini,A,11,0.0,0.0,6.0
+Pinamonti,pinamonti,A,36,9.0,3.0,5.89
+Laurientè,lauriente,A,38,7.0,9.0,6.22
+Moro L.,moro l,A,14,0.0,0.0,5.82
+Grosso,grosso,ALL,38,0.0,0.0,6.17
+Israel,israel,P,9,0.0,0.0,5.89
+Masina,masina,D,5,0.0,1.0,5.5
+Biraghi,biraghi,D,14,0.0,0.0,5.68
+Lazaro,lazaro,D,31,0.0,2.0,5.71
+Pedersen,pedersen,D,29,1.0,2.0,5.84
+Coco,coco,D,35,1.0,1.0,5.84
+Tameze,tameze,C,24,0.0,0.0,5.75
+Vlasic,vlasic,C,37,3.0,3.0,6.03
+Casadei,casadei,C,33,6.0,0.0,5.97
+Ilkhan,ilkhan,C,19,1.0,2.0,5.84
+Gineitis,gineitis,C,29,0.0,1.0,5.88
+Anjorin,anjorin,C,15,0.0,0.0,5.87
+Simeone,simeone,A,32,11.0,0.0,6.08
+Ngonge,ngonge,A,20,1.0,1.0,5.85
+Adams C.,adams c,A,33,6.0,3.0,5.98
+Aboukhlal,aboukhlal,A,15,0.0,0.0,5.83
+Baroni,baroni,ALL,26,0.0,0.0,5.65
+Sava,sava,P,7,0.0,0.0,5.57
+Kamara H.,kamara h,D,26,0.0,2.0,5.88
+Bertola,bertola,D,28,0.0,1.0,5.88
+Ehizibue,ehizibue,D,32,2.0,0.0,5.86
+Zemura,zemura,D,17,0.0,0.0,5.88
+Kristensen T.,kristensen t,D,28,3.0,0.0,5.98
+Solet,solet,D,35,2.0,1.0,6.17
+Lovric,lovric,C,14,0.0,1.0,5.82
+Zarraga,zarraga,C,24,0.0,0.0,5.9
+Karlstrom,karlstrom,C,36,1.0,0.0,5.96
+Atta,atta,C,32,5.0,3.0,6.36
+Piotrowski,piotrowski,C,33,1.0,0.0,5.89
+Davis K.,davis k,A,30,6.0,4.0,6.32
+Bravo,bravo,A,8,1.0,0.0,6.0
+Bayo V.,bayo v,A,15,0.0,1.0,5.8
+Runjaic,runjaic,ALL,38,0.0,0.0,6.18
+Montipò,montipo,P,35,0.0,1.0,6.2
+Bradaric,bradaric,D,29,0.0,2.0,5.81
+Ebosse,ebosse,D,17,0.0,1.0,5.76
+Frese,frese,D,31,2.0,0.0,5.84
+Unai Nunez,unai nunez,D,17,0.0,0.0,5.85
+Oyegoke,oyegoke,D,15,0.0,0.0,5.87
+Nelsson,nelsson,D,38,0.0,0.0,5.68
+Belghali,belghali,D,26,2.0,0.0,6.1
+Cham,cham,D,6,0.0,0.0,5.58
+Niasse,niasse,C,20,0.0,1.0,5.75
+Harroui,harroui,C,23,0.0,0.0,5.8
+Serdar,serdar,C,20,2.0,0.0,5.97
+Bernede,bernede,C,32,1.0,2.0,5.88
+Sarr A.,sarr a,A,34,0.0,0.0,5.72
+Mosquera,mosquera,A,22,0.0,2.0,5.98
+Giovane,giovane,A,33,3.0,6.0,6.0
+Zanetti,zanetti,ALL,23,0.0,0.0,5.72
+Zappacosta,zappacosta,D,35,3.0,1.0,6.06
+Brescianini,brescianini,C,26,2.0,1.0,5.98
+Miranda J.,miranda j,D,32,1.0,3.0,6.0
+Heggem,heggem,D,27,0.0,0.0,5.85
+Moro N.,moro n,C,30,2.0,0.0,5.93
+Dallinga,dallinga,A,23,2.0,1.0,5.85
+Di Pardo,di pardo,D,3,0.0,0.0,5.83
+Palestra,palestra,D,37,1.0,4.0,6.27
+Baturina,baturina,C,29,6.0,3.0,6.26
+Floriani Mussolini,floriani mussolini,D,28,0.0,1.0,5.77
+Vazquez,vazquez,C,15,1.0,2.0,6.13
+Kouadio,kouadio,D,3,0.0,0.0,6.0
+Dzeko,dzeko,A,11,0.0,0.0,5.73
+Piccoli,piccoli,A,32,4.0,1.0,5.81
+Ostigard,ostigard,D,30,5.0,0.0,6.13
+Malinovskyi,malinovskyi,C,34,3.0,3.0,6.07
+Ekuban,ekuban,A,31,4.0,1.0,5.97
+Bisseck,bisseck,D,23,3.0,2.0,6.22
+Calhanoglu,calhanoglu,C,22,5.0,4.0,6.52
+Esposito F.P.,esposito fp,A,35,7.0,3.0,6.23
+Kostic,kostic,C,18,3.0,1.0,6.11
+Hysaj,hysaj,D,5,0.0,0.0,5.8
+Belahyane,belahyane,C,13,0.0,2.0,5.81
+Helgason,helgason,C,8,0.0,0.0,5.81
+Pierotti,pierotti,C,37,1.0,1.0,5.8
+Stulic,stulic,A,34,3.0,0.0,5.76
+Musah,musah,C,20,1.0,0.0,5.95
+Ricci S.,ricci s,C,31,1.0,3.0,6.0
+Balentien,balentien,A,2,0.0,0.0,6.0
+Buongiorno,buongiorno,D,33,0.0,1.0,5.89
+Ambrosino,ambrosino,A,3,0.0,0.0,5.83
+Estevez,estevez,C,31,0.0,1.0,5.85
+Oristanio,oristanio,C,20,1.0,0.0,5.8
+Cutrone,cutrone,A,15,1.0,0.0,5.73
+Mateus Lusuardi,mateus lusuardi,D,3,0.0,0.0,5.83
+Leris,leris,C,34,2.0,3.0,5.94
+Stengs,stengs,C,4,0.0,0.0,5.88
+Celik,celik,D,34,1.0,2.0,6.16
+Muric,muric,P,32,0.0,0.0,6.08
+Idzes,idzes,D,35,0.0,0.0,5.94
+Matic,matic,C,34,1.0,1.0,5.96
+Vranckx,vranckx,C,16,0.0,0.0,5.69
+Volpato,volpato,C,24,2.0,4.0,6.12
+Iannoni,iannoni,C,15,1.0,0.0,6.0
+Maripan,maripan,D,27,2.0,0.0,5.94
+Ilic,ilic,C,8,0.0,0.0,6.0
+Asllani,asllani,C,15,0.0,0.0,5.6
+Goglichidze,goglichidze,D,8,0.0,0.0,5.81
+Rui Modesto,rui modesto,D,3,0.0,1.0,5.83
+Ekkelenkamp,ekkelenkamp,C,31,5.0,3.0,6.05
+Buksa,buksa,A,25,3.0,0.0,5.9
+Bella-Kotchap,bellakotchap,D,19,0.0,0.0,5.84
+Al-Musrati,almusrati,C,18,0.0,1.0,5.78
+Bernasconi,bernasconi,D,23,0.0,3.0,6.09
+Ferguson,ferguson,C,27,1.0,0.0,5.83
+Rowe,rowe,C,28,3.0,3.0,6.2
+Zè Pedro,ze pedro,D,23,0.0,1.0,5.78
+Felici,felici,C,12,2.0,1.0,6.04
+Belotti,belotti,A,8,1.0,0.0,6.06
+Addai,addai,A,12,3.0,0.0,5.96
+Sarmiento J.,sarmiento j,C,7,0.0,0.0,5.93
+Vardy,vardy,A,29,7.0,1.0,5.95
+Lamptey,lamptey,D,2,0.0,0.0,6.0
+Nicolussi Caviglia,nicolussi caviglia,C,26,0.0,4.0,5.9
+Sabelli,sabelli,D,16,0.0,0.0,5.84
+Darmian,darmian,D,6,0.0,0.0,6.0
+Akanji,akanji,D,33,2.0,0.0,6.27
+Cabal,cabal,D,12,2.0,0.0,5.96
+Adzic,adzic,C,10,1.0,0.0,6.05
+Openda,openda,A,24,1.0,0.0,5.88
+Romagnoli,romagnoli,D,32,0.0,0.0,6.03
+Isaksen,isaksen,C,30,5.0,1.0,6.03
+Siebert,siebert,D,21,1.0,0.0,5.71
+Sala A.,sala a,C,9,0.0,1.0,5.89
+Terracciano,terracciano,P,2,0.0,0.0,6.0
+De Winter,de winter,D,26,1.0,1.0,5.77
+Rabiot,rabiot,C,29,6.0,4.0,6.33
+Nkunku,nkunku,A,32,2.0,3.0,5.95
+Milinkovic-Savic V.,milinkovicsavic v,P,27,0.0,0.0,6.2
+Beukema,beukema,D,24,2.0,0.0,5.94
+Elmas,elmas,C,33,1.0,3.0,5.83
+Hojlund,hojlund,A,33,11.0,5.0,6.21
+Ndiaye,ndiaye,D,11,0.0,0.0,5.59
+Bonfanti,bonfanti,D,9,0.0,0.0,5.61
+Baldanzi,baldanzi,C,18,1.0,2.0,6.14
+Pisilli,pisilli,C,25,2.0,4.0,6.08
+Coulibaly W.,coulibaly w,D,20,0.0,0.0,5.72
+Thorstvedt,thorstvedt,C,32,4.0,3.0,6.14
+Cheddira,cheddira,A,33,4.0,1.0,5.86
+Ismajli,ismajli,D,25,0.0,2.0,5.92
+Zaniolo,zaniolo,C,32,5.0,5.0,6.25
+Gagliardini,gagliardini,C,29,1.0,0.0,5.91
+Akpa Akpro,akpa akpro,C,22,1.0,0.0,5.86
+Orban G.,orban g,A,28,5.0,2.0,5.82
+Ahanor,ahanor,D,22,0.0,0.0,5.8
+Lookman,lookman,A,12,2.0,0.0,5.83
+Dominguez B.,dominguez b,A,15,0.0,3.0,5.87
+Goldaniga,goldaniga,D,2,0.0,0.0,6.0
+Diego Carlos,diego carlos,D,27,1.0,0.0,6.13
+Posch,posch,D,14,1.0,0.0,6.04
+Johnsen,johnsen,A,11,1.0,1.0,5.86
+Moumbagna,moumbagna,A,5,0.0,0.0,5.6
+Fortini,fortini,D,16,0.0,0.0,5.97
+Martinez Jo.,martinez jo,P,5,0.0,0.0,6.0
+Frattesi,frattesi,C,22,0.0,0.0,5.93
+Zhegrova,zhegrova,C,19,0.0,0.0,5.97
+Noslin,noslin,A,29,4.0,2.0,6.02
+Ndaba,ndaba,D,14,0.0,0.0,5.68
+Athekame,athekame,D,27,2.0,2.0,5.96
+Lorran,lorran,C,9,1.0,0.0,5.94
+Tsimikas,tsimikas,D,18,0.0,0.0,5.81
+Pellegrini Lo.,pellegrini lo,C,24,2.0,2.0,6.04
+Zapata D.,zapata d,A,28,3.0,1.0,5.86
+Zanoli,zanoli,D,19,1.0,2.0,6.05
+Miller L.,miller l,C,24,0.0,2.0,5.94
+Kastanos,kastanos,C,6,0.0,0.0,6.0
+Santiago,santiago,C,2,0.0,0.0,6.0
+Ajayi,ajayi,A,1,0.0,0.0,6.0
+Holm,holm,D,18,1.0,4.0,6.08
+Silvestri,silvestri,P,4,0.0,0.0,6.38
+Venturino,venturino,C,12,0.0,0.0,5.92
+De Vrij,de vrij,D,11,0.0,0.0,6.09
+Patric,patric,D,14,0.0,0.0,5.89
+Basic,basic,C,23,2.0,3.0,6.09
+Bartesaghi,bartesaghi,D,31,2.0,0.0,5.97
+Leao,leao,A,29,7.0,3.0,5.88
+Gutierrez,gutierrez,D,28,1.0,1.0,5.98
+Marianucci,marianucci,D,12,0.0,1.0,5.75
+Britschgi,britschgi,D,29,0.0,2.0,5.76
+Hojholt,hojholt,C,17,0.0,0.0,5.62
+Vural,vural,C,15,0.0,0.0,5.8
+Ziolkowski,ziolkowski,D,18,0.0,0.0,5.97
+Nkounkou,nkounkou,D,11,0.0,1.0,5.86
+Njie,njie,A,15,1.0,1.0,5.87
+Palma,palma,D,5,0.0,0.0,5.6
+Gueye,gueye,A,19,1.0,0.0,5.84
+Cavuoti,cavuoti,C,4,0.0,0.0,6.0
+Pavoletti,pavoletti,A,13,1.0,0.0,6.0
+Barbieri,barbieri,D,29,0.0,1.0,5.98
+Faye,faye,D,8,0.0,0.0,5.75
+Otoa,otoa,D,13,0.0,0.0,5.69
+Rugani,rugani,D,12,0.0,0.0,5.79
+Buffon L.,buffon l,A,4,0.0,0.0,6.0
+Dembelè A.,dembele a,D,2,0.0,0.0,5.5
+Kabasele,kabasele,D,30,3.0,0.0,5.98
+Ravaglia F.,ravaglia f,P,17,0.0,0.0,6.21
+Moreno Alb.,moreno alb,D,19,2.0,1.0,6.05
+Lordkipanidze D.,lordkipanidze d,C,1,0.0,0.0,6.0
+Cornet,cornet,C,8,0.0,0.0,5.44
+Vecino,vecino,C,13,0.0,1.0,5.92
+Troilo,troilo,D,21,1.0,0.0,5.79
+Albiol,albiol,D,8,0.0,1.0,5.62
+Bailey,bailey,C,7,0.0,0.0,5.79
+Okoye,okoye,P,30,0.0,1.0,6.07
+Valentini N.,valentini n,D,21,0.0,0.0,5.81
+Liteta,liteta,C,4,0.0,0.0,5.75
+Diao,diao,A,17,2.0,1.0,6.0
+Folino,folino,D,17,1.0,0.0,5.85
+Sabiri,sabiri,C,1,0.0,0.0,5.5
+Onana J.,onana j,C,3,0.0,0.0,5.83
+Perin,perin,P,9,0.0,0.0,6.11
+Maleh,maleh,C,23,1.0,0.0,5.72
+Hernani,hernani,C,4,0.0,0.0,5.75
+Paleari,paleari,P,29,0.0,0.0,6.09
+Brambilla,brambilla,ALL,1,0.0,0.0,7.0
+Begic,begic,C,1,0.0,0.0,6.0
+Cremaschi,cremaschi,C,8,0.0,0.0,6.0
+Ghilardi,ghilardi,D,23,0.0,0.0,5.98
+Criscito,criscito,ALL,1,0.0,0.0,6.0
+Spalletti,spalletti,ALL,29,0.0,0.0,6.26
+Pessina Mas.,pessina mas,P,4,0.0,0.0,6.12
+Vanoli,vanoli,ALL,28,0.0,0.0,5.96
+De Rossi,de rossi,ALL,28,0.0,0.0,6.21
+Palladino,palladino,ALL,27,0.0,0.0,6.15
+Sulemana I.,sulemana i,C,19,1.0,0.0,5.71
+Miretti,miretti,C,23,1.0,1.0,5.98
+Mazzocchi,mazzocchi,D,16,0.0,1.0,5.97
+Corvi,corvi,P,17,0.0,0.0,6.18
+Kolasinac,kolasinac,D,19,0.0,0.0,6.03
+Richardson,richardson,C,2,0.0,0.0,5.75
+Ondrejka,ondrejka,C,16,0.0,0.0,5.72
+Scuffet,scuffet,P,7,0.0,0.0,6.21
+Rodriguez Ju.,rodriguez ju,D,17,1.0,0.0,5.65
+Kouamè,kouame,A,2,0.0,0.0,6.0
+Sommariva,sommariva,P,2,0.0,0.0,5.75
+Gandelman,gandelman,C,19,2.0,1.0,5.97
+Fullkrug,fullkrug,A,20,1.0,0.0,5.78
+Rinaldi,rinaldi,P,1,0.0,0.0,7.0
+Slotsager,slotsager,D,8,0.0,0.0,5.81
+Le Borgne,le borgne,C,1,0.0,0.0,6.0
+Fini,fini,C,1,0.0,0.0,5.5
+Gorter,gorter,C,2,0.0,0.0,5.75
+Odogu,odogu,D,2,0.0,0.0,6.0
+Padelli,padelli,P,2,0.0,0.0,6.25
+Solomon,solomon,A,16,2.0,1.0,5.97
+Lavelli,lavelli,A,1,0.0,0.0,6.0
+Perez M.,perez m,D,1,0.0,0.0,5.0
+Trepy,trepy,A,8,1.0,0.0,6.06
+Coppola F.,coppola f,D,7,0.0,0.0,5.36
+Esteves T.,esteves t,D,1,0.0,0.0,6.0
+Romano,romano,C,2,0.0,0.0,6.0
+Odenthal,odenthal,D,1,0.0,0.0,6.0
+Taylor K.,taylor k,C,17,3.0,2.0,6.06
+Ratkov,ratkov,A,8,0.0,0.0,5.69
+Raspadori,raspadori,A,13,3.0,1.0,6.12
+Nuredini,nuredini,A,1,0.0,0.0,6.0
+Bozhinov,bozhinov,D,9,0.0,0.0,5.33
+Durosinmi,durosinmi,A,12,1.0,1.0,5.75
+Malen,malen,A,18,11.0,2.0,6.72
+Vaz,vaz,A,12,1.0,0.0,5.96
+Skjellerup,skjellerup,A,1,0.0,0.0,6.0
+Perilli,perilli,P,3,0.0,0.0,6.17
+Lirola,lirola,D,6,0.0,0.0,5.75
+Harrison,harrison,C,15,1.0,3.0,5.9
+Bijlow,bijlow,P,16,0.0,0.0,6.06
+Zatterstrom,zatterstrom,D,3,0.0,0.0,6.0
+Lukaku,lukaku,A,5,1.0,0.0,6.2
+Obrador,obrador,D,16,1.0,3.0,6.06
+Isaac,isaac,A,3,0.0,0.0,6.0
+Ngom,ngom,C,15,0.0,0.0,5.73
+Elphege,elphege,A,9,2.0,1.0,6.0
+Loyola,loyola,C,11,1.0,0.0,5.55
+Stojilkovic,stojilkovic,A,13,0.0,0.0,5.62
+Kulenovic,kulenovic,A,13,0.0,1.0,5.85
+Dossena,dossena,D,12,0.0,1.0,5.83
+Boga,boga,A,15,4.0,1.0,6.17
+Carboni F.,carboni f,D,7,0.0,0.0,6.0
+Strefezza,strefezza,C,14,2.0,2.0,6.21
+Hiljemark,hiljemark,ALL,15,0.0,0.0,5.47
+Zaragoza,zaragoza,C,4,0.0,1.0,5.88
+Arena A.,arena a,A,2,0.0,0.0,6.0
+Garcia U.,garcia u,D,13,1.0,2.0,6.15
+Edmundsson,edmundsson,D,15,0.0,0.0,5.97
+Bowie,bowie,A,14,4.0,0.0,5.96
+Sammarco,sammarco,ALL,15,0.0,0.0,5.77
+Amorim,amorim,C,11,0.0,0.0,5.77
+Fofana Sa.,fofana sa,C,5,0.0,0.0,5.8
+Santos A.,santos a,C,14,4.0,0.0,6.32
+Nicolas,nicolas,P,6,0.0,0.0,5.92
+Iling Junior,iling junior,C,5,0.0,0.0,5.9
+Arizala,arizala,D,10,0.0,0.0,5.9
+Pedro Felipe,pedro felipe,D,3,0.0,1.0,5.83
+Suslov,suslov,C,11,0.0,0.0,5.77
+Vermesan,vermesan,A,6,0.0,0.0,6.08
+Jean,jean,D,7,0.0,0.0,5.86
+D'Aversa,daversa,ALL,12,0.0,0.0,6.25
+Mlacic,mlacic,D,7,0.0,0.0,5.93
+Motta,motta,P,9,0.0,0.0,6.0
+Bakola,bakola,C,6,0.0,0.0,6.08
+Albarracin,albarracin,A,2,0.0,0.0,6.0
+Raterink,raterink,D,1,0.0,0.0,6.0
+Mendy P.,mendy p,A,9,2.0,0.0,5.94
+Giampaolo,giampaolo,ALL,9,0.0,0.0,5.78
+Milik,milik,A,2,0.0,0.0,6.0
+Balbo,balbo,D,6,0.0,0.0,5.83
+Mikolajewski,mikolajewski,A,3,0.0,0.0,6.0
+Helland,helland,D,6,0.0,0.0,5.5
+Braschi,braschi,A,2,0.0,0.0,5.75
+Ouedraogo L.,ouedraogo l,D,2,0.0,0.0,6.0
+Doucouré M.,doucoure m,D,1,0.0,0.0,6.0
+Mosconi,mosconi,A,2,0.0,0.0,6.0
+Bakker,bakker,D,1,0.0,0.0,6.0
+Di Gennaro,di gennaro,P,1,0.0,0.0,6.0
+Furlanetto,furlanetto,P,2,0.0,0.0,6.5
+Frangella,frangella,C,1,0.0,0.0,6.0
+Camara A.,camara a,C,1,0.0,0.0,6.0
+Sportiello,sportiello,P,1,0.0,0.0,5.5
+Vavassori,vavassori,A,1,0.0,0.0,6.0
+Lottici Tessadri,lottici tessadri,C,1,0.0,0.0,6.0
+Lezzerini,lezzerini,P,1,0.0,0.0,6.0
+Christensen O.,christensen o,P,1,0.0,0.0,7.5
+Lafont G.,lafont g,C,1,0.0,0.0,6.0
+Grossi J.,grossi j,C,1,0.0,0.0,6.0
+Carbone F.,carbone f,C,1,0.0,0.0,6.0
+Cocchi,cocchi,D,1,0.0,0.0,6.0
+Topalovic,topalovic,C,1,0.0,1.0,6.5
+Przyborek,przyborek,C,1,0.0,0.0,6.0
+Contini,contini,P,1,0.0,0.0,6.0
+Cardinali,cardinali,A,1,0.0,0.0,6.0
+Bettazzi,bettazzi,C,1,0.0,0.0,6.0
+Zacchi,zacchi,P,1,0.0,0.0,6.0
+Macchioni,macchioni,D,1,0.0,0.0,5.0
