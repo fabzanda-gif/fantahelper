@@ -138,14 +138,31 @@ def calculate_player_rating(p, preferred_players_set=None):
         elif role in ["D", "P"]:
             rating += mods["def"]
 
+    # Gestione malus e bonus
+    has_malus = False
     if p.get("rigorista"): rating += 1.2
-    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
-    if p.get("primo_anno_serie_a"): rating -= 0.3
+    
+    if p.get("propensione_cartellini") == "A rischio malus": 
+        rating -= 0.3
+        has_malus = True
+        
+    if p.get("primo_anno_serie_a"): 
+        rating -= 0.3
+        has_malus = True
+
+    if titolarita in ["Ballottaggio", "Riserva"]:
+        has_malus = True
     
     if preferred_players_set and p.get("id") in preferred_players_set:
         rating += 0.5
         
-    return round(max(1.0, min(10.0, rating)), 1)
+    final_rating = round(max(1.0, min(10.0, rating)), 1)
+    
+    # REGOLA: Se c'è un malus attivo (es. primo anno, riserva, cartellini), il voto non può mai essere 10.0 (max 9.0)
+    if has_malus and final_rating >= 10.0:
+        final_rating = 9.0
+        
+    return final_rating
 
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
