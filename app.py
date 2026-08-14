@@ -68,6 +68,51 @@ def calculate_player_rating(p, preferred_players_set=None):
         
     # Impediamo che tocchino tutti 10.0: il tetto massimo è raggiungibile solo da pochissimi top assoluti
     return round(max(1.0, min(10.0, rating)), 1)
+
+    # --- CALCOLO MODIFICATORI SQUADRA DAL CSV ---
+@st.cache_data
+def get_team_modifiers():
+    try:
+        df_matches = pd.read_csv('season-2526.csv')
+        
+        home = df_matches.groupby('HomeTeam').agg(
+            GF=('FTHG', 'sum'), GA=('FTAG', 'sum'), M=('FTHG', 'count')
+        ).reset_index().rename(columns={'HomeTeam': 'Team'})
+        
+        away = df_matches.groupby('AwayTeam').agg(
+            GF=('FTAG', 'sum'), GA=('FTHG', 'sum'), M=('FTAG', 'count')
+        ).reset_index().rename(columns={'AwayTeam': 'Team'})
+        
+        ts = pd.merge(home, away, on='Team', how='outer').fillna(0)
+        ts['Matches'] = ts['M_x'] + ts['M_y']
+        ts['TotalGF'] = ts['GF_x'] + ts['GF_y']
+        ts['TotalGA'] = ts['GA_x'] + ts['GA_y']
+        
+        # Medie campionato di riferimento
+        avg_gf_league = ts['TotalGF'].sum() / ts['Matches'].sum()
+        avg_ga_league = ts['TotalGA'].sum() / ts['Matches'].sum()
+        
+        modifiers = {}
+        for _, row in ts.iterrows():
+            team = row['Team']
+            matches = row['Matches']
+            if matches > 0:
+                team_gf_per_match = row['TotalGF'] / matches
+                team_ga_per_match = row['TotalGA'] / matches
+                
+                # Modificatore attacco (basato sui gol fatti rispetto alla media)
+                att_mod = (team_gf_per_match - avg_gf_league) * 0.8
+                # Modificatore difesa (basato sui gol subiti in meno rispetto alla media)
+                def_mod = (avg_ga_league - team_ga_per_match) * 0.9
+                
+                modifiers[team] = {"att": round(att_mod, 2), "def": round(def_mod, 2)}
+            else:
+                modifiers[team] = {"att": 0.0, "def": 0.0}
+        return modifiers
+    except Exception as e:
+        return {}
+
+TEAM_MODIFIERS = get_team_modifiers()
     
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
