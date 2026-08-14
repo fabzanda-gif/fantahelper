@@ -1,20 +1,8 @@
 import random
-import unicodedata
-import re
-import os
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client
-
-# Mappa tra il nome della squadra nel CSV e il codice usato in Supabase/team_nfl
-TEAM_MAP = {
-    "Napoli": "NAP", "Juventus": "JUV", "Milan": "MIL", "Inter": "INT",
-    "Roma": "ROM", "Lazio": "LAZ", "Atalanta": "ATA", "Fiorentina": "FIO",
-    "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
-    "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
-    "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS"
-}
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
@@ -32,38 +20,61 @@ if "show_celebration" not in st.session_state: st.session_state.show_celebration
 if "audio_url" not in st.session_state: st.session_state.audio_url = None
 if "preferred_players" not in st.session_state: st.session_state.preferred_players = set()
 
-# --- FUNZIONI DI NORMALIZZAZIONE E DATI ESTERNI ---
-def normalize_string(s):
-    if not isinstance(s, str):
-        return ""
-    nfkd_form = unicodedata.normalize('NFKD', s)
-    only_ascii = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
-    return re.sub(r'[^a-zA-Z0-9\s]', '', only_ascii).lower().strip()
+# --- FUNZIONI ---
+def play_sound(sound_url):
+    sound_html = f"""<audio autoplay><source src="{sound_url}" type="audio/mp3"></audio>"""
+    components.html(sound_html, height=0, width=0)
 
-@st.cache_data
-def load_real_player_stats():
-    try:
-        if os.path.exists('player_aggregated_stats.csv'):
-            return pd.read_csv('player_aggregated_stats.csv')
-    except Exception as e:
-        pass
-    return pd.DataFrame()
+def calculate_player_rating(p, preferred_players_set=None):
+    # Assegniamo una base di partenza leggermente diversa per ruolo
+    role = p.get("role", "D")
+    if role == "A":
+        rating = 6.0  # Gli attaccanti partono avvantaggiati
+    elif role == "C":
+        rating = 5.5
+    elif role == "P":
+        rating = 5.0
+    else:
+        rating = 4.2  # I difensori partono più bassi per evitare l'effetto monopolio
+    
+    listino = p.get("list_price", 1)
+    if listino is None: listino = 1
+    
+    # Impatto del prezzo scalato in base al ruolo
+    if role == "A":
+        rating += (listino * 0.12)  # Per gli attaccanti il listino pesa di più
+    elif role == "C":
+        rating += (listino * 0.10)
+    else:
+        rating += (listino * 0.08)  # Per i difensori il listino pesa meno
+    
+    # Status titolarità
+    titolarita = p.get("status_titolarita")
+    if titolarita == "Titolare": rating += 0.8
+    elif titolarita == "Ballottaggio": rating -= 0.4
+    elif titolarita == "Riserva": rating -= 2.0
+    
+    # Bonus pesanti per chi porta bonus (rigoristi)
+    if p.get("rigorista"): 
+        rating += 1.5  # Essere rigorista sposta tantissimo al fantacalcio
+        
+    # Malus
+    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
+    if p.get("primo_anno_serie_a"): rating -= 0.3
+    
+    # Preferiti utente
+    if preferred_players_set and p.get("id") in preferred_players_set:
+        rating += 0.5
+        
+    # Impediamo che tocchino tutti 10.0: il tetto massimo è raggiungibile solo da pochissimi top assoluti
+    return round(max(1.0, min(10.0, rating)), 1)
 
-REAL_STATS_DF = load_real_player_stats()
-
-# Mappa tra il nome della squadra nel CSV (es. season-2526.csv) e il codice in Supabase
-TEAM_MAP = {
-    "Napoli": "NAP", "Juventus": "JUV", "Milan": "MIL", "Inter": "INT",
-    "Roma": "ROM", "Lazio": "LAZ", "Atalanta": "ATA", "Fiorentina": "FIO",
-    "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
-    "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
-    "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS"
-}
-
+    # --- CALCOLO MODIFICATORI SQUADRA DAL CSV ---
 @st.cache_data
 def get_team_modifiers():
     try:
         df_matches = pd.read_csv('season-2526.csv')
+        
         home = df_matches.groupby('HomeTeam').agg(
             GF=('FTHG', 'sum'), GA=('FTAG', 'sum'), M=('FTHG', 'count')
         ).reset_index().rename(columns={'HomeTeam': 'Team'})
@@ -77,8 +88,9 @@ def get_team_modifiers():
         ts['TotalGF'] = ts['GF_x'] + ts['GF_y']
         ts['TotalGA'] = ts['GA_x'] + ts['GA_y']
         
-        avg_gf_league = ts['TotalGF'].sum() / ts['Matches'].sum() if ts['Matches'].sum() > 0 else 1.0
-        avg_ga_league = ts['TotalGA'].sum() / ts['Matches'].sum() if ts['Matches'].sum() > 0 else 1.0
+        # Medie campionato di riferimento
+        avg_gf_league = ts['TotalGF'].sum() / ts['Matches'].sum()
+        avg_ga_league = ts['TotalGA'].sum() / ts['Matches'].sum()
         
         modifiers = {}
         for _, row in ts.iterrows():
@@ -87,114 +99,21 @@ def get_team_modifiers():
             if matches > 0:
                 team_gf_per_match = row['TotalGF'] / matches
                 team_ga_per_match = row['TotalGA'] / matches
+                
+                # Modificatore attacco (basato sui gol fatti rispetto alla media)
                 att_mod = (team_gf_per_match - avg_gf_league) * 0.8
+                # Modificatore difesa (basato sui gol subiti in meno rispetto alla media)
                 def_mod = (avg_ga_league - team_ga_per_match) * 0.9
+                
                 modifiers[team] = {"att": round(att_mod, 2), "def": round(def_mod, 2)}
             else:
                 modifiers[team] = {"att": 0.0, "def": 0.0}
-        
-        # Conversione dei nomi completi in codici abbreviati (es. 'NAP') per Supabase
-        final_modifiers = {}
-        for team_name, mods in modifiers.items():
-            code = TEAM_MAP.get(team_name, team_name.upper()[:3])
-            final_modifiers[code] = mods
-            
-        return final_modifiers
+        return modifiers
     except Exception as e:
         return {}
 
 TEAM_MODIFIERS = get_team_modifiers()
-
-def play_sound(sound_url):
-    sound_html = f"""<audio autoplay><source src="{sound_url}" type="audio/mp3"></audio>"""
-    components.html(sound_html, height=0, width=0)
-
-def calculate_player_rating_detailed(p, preferred_players_set=None):
-    """Calcola il rating integrando statistiche reali, modificatori squadra e malus."""
-    role = p.get("role", "D")
-    p_name_clean = normalize_string(p.get("name", ""))
     
-    base_rating = 5.0
-    has_real_stats = False
-    goals, assists, matches, avg_vote = 0, 0, 0, 0.0
-    
-    # 1. Cerchiamo se il giocatore ha statistiche reali nelle 38 giornate
-    if not REAL_STATS_DF.empty and p_name_clean:
-        match = REAL_STATS_DF[REAL_STATS_DF['clean_name'].str.contains(p_name_clean, na=False)]
-        if not match.empty:
-            row = match.iloc[0]
-            avg_vote = row.get('avg_vote', 6.0)
-            goals = row.get('goals', 0)
-            assists = row.get('assists', 0)
-            matches = row.get('matches', 0)
-            
-            if matches > 3 and avg_vote > 0:
-                base_rating = avg_vote
-                if role in ["A", "C"]:
-                    base_rating += (goals * 0.12) + (assists * 0.08)
-                else:
-                    base_rating += (goals * 0.15) + (assists * 0.10)
-                has_real_stats = True
-
-    # 2. Base prudente se non ha statistiche
-    if not has_real_stats:
-        listino = p.get("list_price", 1) or 1
-        if role == "A": base_rating = 5.0 + (listino * 0.05)
-        elif role == "C": base_rating = 4.8 + (listino * 0.04)
-        elif role == "P": base_rating = 5.0 + (listino * 0.04)
-        else: base_rating = 4.5 + (listino * 0.04)
-    
-    rating = base_rating
-    
-    # Titolarità
-    titolarita = p.get("status_titolarita")
-    titolarita_mod = 0.4 if titolarita == "Titolare" else (-0.3 if titolarita == "Ballottaggio" else (-1.5 if titolarita == "Riserva" else 0.0))
-    rating += titolarita_mod
-
-    # --- INTEGRAZIONE MODIFICATORE SQUADRA ---
-    team_mod = 0.0
-    team_code = p.get("team_nfl") # Es. 'NAP', 'JUV' ecc.
-    if team_code in TEAM_MODIFIERS:
-        mods = TEAM_MODIFIERS[team_code]
-        team_mod = mods["att"] if role in ["A", "C"] else mods["def"]
-        rating += team_mod
-
-    # Bonus e Malus
-    has_malus = False
-    rigorista_mod = 0.8 if p.get("rigorista") else 0.0
-    rating += rigorista_mod
-    
-    cartellini_mod = -0.3 if p.get("propensione_cartellini") == "A rischio malus" else 0.0
-    if cartellini_mod < 0: has_malus = True; rating += cartellini_mod
-        
-    rookie_mod = -0.3 if p.get("primo_anno_serie_a") else 0.0
-    if rookie_mod < 0: has_malus = True; rating += rookie_mod
-
-    if titolarita in ["Ballottaggio", "Riserva"]: has_malus = True
-    
-    pref_mod = 0.5 if (preferred_players_set and p.get("id") in preferred_players_set) else 0.0
-    rating += pref_mod
-        
-    final_rating = round(max(1.0, min(10.0, rating)), 1)
-    
-    # Blocco rigido malus
-    if (has_malus or p.get("primo_anno_serie_a")) and final_rating >= 10.0:
-        final_rating = 9.0
-        
-    return {
-        "base_or_fantamedia": round(base_rating, 2),
-        "titolarita_mod": titolarita_mod,
-        "team_mod": team_mod, # Ora valorizzato!
-        "bonus_rigorista": rigorista_mod,
-        "malus_cartellini": cartellini_mod,
-        "malus_rookie": rookie_mod,
-        "preferito_mod": pref_mod,
-        "goals": int(goals),
-        "assists": int(assists),
-        "matches": int(matches),
-        "final_rating": final_rating
-    }
-
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
 teams_df = pd.DataFrame(teams_data)
@@ -242,7 +161,7 @@ role_mapping_full = {
 
 available_role_labels = {label: code for label, code in role_mapping_full.items() if code == "ALL" or code not in completed_roles}
 
-# --- GESTIONE FESTA ---
+# --- GESTIONE FESTA (PRIMA DI TUTTO) ---
 if st.session_state.show_celebration:
     st.balloons(); st.snow()
     play_sound(st.session_state.audio_url)
@@ -252,8 +171,8 @@ if st.session_state.show_celebration:
         st.rerun()
     st.stop()
 
-# --- INTERFACCIA (3 TAB) ---
-tab1, tab2, tab3 = st.tabs(["🎯 Live Asta", "📋 Rose & Analisi", "⭐️ Tutti i Giocatori (Rating)"])
+# --- INTERFACCIA ---
+tab1, tab2 = st.tabs(["🎯 Live Asta", "📋 Rose & Analisi"])
 
 with tab1:
     st.subheader("🎯 Assegnazione Guidata Giocatore")
@@ -329,6 +248,7 @@ with tab1:
             avg_spendable = budget / slots_left
             st.sidebar.caption(f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** ({slots_left} slot liberi)")
 
+        # CRUSCOTTO RISCHI EMOJI
         st.sidebar.markdown("---")
         st.sidebar.markdown("**📊 Cruscotto Rischi Rosa:**")
 
@@ -457,22 +377,26 @@ with tab1:
                         supabase.table("rosters").insert({"team_id": team_id, "player_id": selected_player["id"], "purchase_price": purchase_price}).execute()
                         supabase.table("teams").update({"remaining_budget": int(current_budget - purchase_price)}).eq("id", team_id).execute()
 
+                        # --- ATTIVAZIONE FESTA E JOHN CENA IMMEDIATA ---
                         p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
                         
                         if target_team == "Escanyol" and p_rtg >= 8.0:
-                            st.balloons(); st.snow()
+                            st.balloons()
+                            st.snow()
                             play_sound("https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3")
                             st.success(f"🔥 MASSIVE COLPO! **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺")
-                            if st.button("🎉 Clicca qui per continuare l'asta"): st.rerun()
+                            if st.button("🎉 Clicca qui per continuare l'asta"):
+                                st.rerun()
                         elif target_team == "Escanyol" and p_rtg >= 7.0:
                             st.balloons()
                             play_sound("https://www.myinstants.com/media/sounds/ta-da.mp3")
                             st.success(f"🎉 Gran colpo! **{selected_player['name']}** (Rating {p_rtg}) per l'Escanyol!")
-                            if st.button("🎉 Clicca qui per continuare l'asta"): st.rerun()
+                            if st.button("🎉 Clicca qui per continuare l'asta"):
+                                st.rerun()
                         else:
                             st.success(f"✅ Acquistato **{selected_player['name']}** per **{target_team}** a {purchase_price} crediti!")
-                            if st.button("Continua"): st.rerun()
-
+                            if st.button("Continua"):
+                                st.rerun()
     # --- PANORAMICA SQUADRE ---
     st.divider()
     st.subheader("📊 Panoramica Squadre & Alert Strategici")
@@ -493,10 +417,13 @@ with tab1:
 
             alerts = []
             nfl_counts = {}
+            club_players_map = {}
             for p in t_players:
                 if p.get("role") != "P":
                     club = p.get("team_nfl")
-                    if club: nfl_counts[club] = nfl_counts.get(club, 0) + 1
+                    if club:
+                        nfl_counts[club] = nfl_counts.get(club, 0) + 1
+                        club_players_map.setdefault(club, []).append(f"{p.get('name')} [{p.get('role')}]")
             for club, count in nfl_counts.items():
                 if count >= 4: alerts.append({"text": f"🚨 **Rischio Blocco:** {count} su {club}", "help": "Club bloccato"})
 
@@ -534,7 +461,7 @@ with tab1:
 
 with tab2:
     st.subheader("📋 Tutte le Rose & Pagelle Post-Asta")
-    st.info("🛠️ [MOCKUP] Qui sotto puoi anche eliminare i giocatori dalle rose per fare prove.")
+    st.info("🛠️ [MOCKUP] Qui sotto puoi anche eliminare i giocatori dalle rose per fare prove. Questa funzione di rimozione andrà rimossa il giorno dell'asta.")
 
     if rosters_data:
         formatted_rosters = []
@@ -544,7 +471,7 @@ with tab2:
                 listino = p.get("list_price") or 1
                 player_score = calculate_player_rating(p, st.session_state.preferred_players)
                 formatted_rosters.append({
-                    "🗑️ Elimina": False, 
+                    "🗑️ Elimina": False, # Funzione mockup rimozione
                     "⭐ Preferito": p["id"] in st.session_state.preferred_players,
                     "Squadra": r["teams"]["name"],
                     "Giocatore": p["name"],
@@ -578,16 +505,19 @@ with tab2:
             hide_index=True
         )
         
+        # Gestione Salvataggio Preferiti ed eventuale rimozione Mockup
         rosters_to_delete = []
         for _, row in edited_df.iterrows():
             if row["⭐ Preferito"]: st.session_state.preferred_players.add(row["_player_id"])
             else: st.session_state.preferred_players.discard(row["_player_id"])
             
-            if row["🗑️ Elimina"]: rosters_to_delete.append(row["_roster_id"])
+            if row["🗑️ Elimina"]:
+                rosters_to_delete.append(row["_roster_id"])
 
         if rosters_to_delete:
             if st.button("Conferma eliminazione selezionati (Mockup)", type="primary"):
                 for r_id in rosters_to_delete:
+                    # Recuperiamo l'acquisto per ripristinare il budget
                     del_item = next((item for item in rosters_data if item["id"] == r_id), None)
                     if del_item and del_item.get("teams"):
                         t_name = del_item["teams"]["name"]
@@ -620,60 +550,3 @@ with tab2:
             st.dataframe(df_grades, use_container_width=True)
     else:
         st.info("Nessun giocatore acquistato.")
-
-with tab3:
-    st.subheader("⭐️ Tutti i Giocatori ordinati per Rating")
-    st.info("In questa tabella trovi l'elenco completo di tutti i calciatori presenti nel database, ordinati per rating complessivo, con il dettaglio dei singoli fattori che compongono il voto.")
-
-    # Recuperiamo tutti i giocatori da Supabase
-    all_players_db = supabase.table("players").select("id, name, role, team_nfl, list_price, status_titolarita, rigorista, propensione_cartellini, primo_anno_serie_a").execute().data
-
-    if all_players_db:
-        detailed_players_list = []
-        for p in all_players_db:
-            det = calculate_player_rating_detailed(p, st.session_state.preferred_players)
-            is_bought = p["id"] in bought_player_ids
-            
-            detailed_players_list.append({
-                "Giocatore": p["name"],
-                "Ruolo": p["role"],
-                "Squadra A": p["team_nfl"],
-                "Rating ⭐️": det["final_rating"],
-                "Base / Fantamedia": det["base_or_fantamedia"],
-                "Gol": det["goals"],
-                "Assist": det["assists"],
-                "Presenze": det["matches"],
-                "Titolarità Mod": det["titolarita_mod"],
-                "Mod. Squadra": det["team_mod"],
-                "Bonus Rigorista": det["bonus_rigorista"],
-                "Malus Cartellini": det["malus_cartellini"],
-                "Malus Rookie": det["malus_rookie"],
-                "Bonus Preferito": det["preferito_mod"],
-                "Listino": p.get("list_price", 1),
-                "Stato": "Acquistato" if is_bought else "Libero"
-            })
-        
-        df_all_players = pd.DataFrame(detailed_players_list)
-        df_all_players = df_all_players.sort_values(by="Rating ⭐️", ascending=False).reset_index(drop=True)
-        df_all_players.index += 1
-
-        # Filtri rapidi per comodità
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
-            role_filter = st.selectbox("Filtra per Ruolo", ["Tutti", "P", "D", "C", "A"], key="tab3_role_filter")
-        with col_f2:
-            status_filter = st.selectbox("Filtra per Stato", ["Tutti", "Libero", "Acquistato"], key="tab3_status_filter")
-        with col_f3:
-            search_name = st.text_input("Cerca Giocatore per Nome", "", key="tab3_search_name")
-
-        df_filtered = df_all_players.copy()
-        if role_filter != "Tutti":
-            df_filtered = df_filtered[df_filtered["Ruolo"] == role_filter]
-        if status_filter != "Tutti":
-            df_filtered = df_filtered[df_filtered["Stato"] == status_filter]
-        if search_name:
-            df_filtered = df_filtered[df_filtered["Giocatore"].str.contains(search_name, case=False, na=False)]
-
-        st.dataframe(df_filtered, use_container_width=True)
-    else:
-        st.info("Nessun giocatore trovato nel database.")
