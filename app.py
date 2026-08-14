@@ -26,36 +26,47 @@ def play_sound(sound_url):
     components.html(sound_html, height=0, width=0)
 
 def calculate_player_rating(p, preferred_players_set=None):
-    # Base di partenza più bassa per ampliare la forbice dei giudizi
-    rating = 5.0 
+    # Assegniamo una base di partenza leggermente diversa per ruolo
+    role = p.get("role", "D")
+    if role == "A":
+        rating = 6.0  # Gli attaccanti partono avvantaggiati
+    elif role == "C":
+        rating = 5.5
+    elif role == "P":
+        rating = 5.0
+    else:
+        rating = 4.2  # I difensori partono più bassi per evitare l'effetto monopolio
     
     listino = p.get("list_price", 1)
     if listino is None: listino = 1
     
-    # Curva di crescita progressiva basata sul prezzo (evita il tetto immediato)
-    if listino >= 40: rating += 4.5
-    elif listino >= 30: rating += 3.8
-    elif listino >= 20: rating += 3.0
-    elif listino >= 10: rating += 2.0
-    elif listino >= 5: rating += 1.0
-    else: rating += (listino * 0.15)
+    # Impatto del prezzo scalato in base al ruolo
+    if role == "A":
+        rating += (listino * 0.12)  # Per gli attaccanti il listino pesa di più
+    elif role == "C":
+        rating += (listino * 0.10)
+    else:
+        rating += (listino * 0.08)  # Per i difensori il listino pesa meno
     
-    # Status titolarità con impatto marcato
+    # Status titolarità
     titolarita = p.get("status_titolarita")
-    if titolarita == "Titolare": rating += 1.2
-    elif titolarita == "Ballottaggio": rating -= 0.5
-    elif titolarita == "Riserva": rating -= 1.8
+    if titolarita == "Titolare": rating += 0.8
+    elif titolarita == "Ballottaggio": rating -= 0.4
+    elif titolarita == "Riserva": rating -= 2.0
     
-    # Bonus e malus specifici
-    if p.get("rigorista"): rating += 1.0
-    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.4
+    # Bonus pesanti per chi porta bonus (rigoristi)
+    if p.get("rigorista"): 
+        rating += 1.5  # Essere rigorista sposta tantissimo al fantacalcio
+        
+    # Malus
+    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
     if p.get("primo_anno_serie_a"): rating -= 0.3
     
     # Preferiti utente
     if preferred_players_set and p.get("id") in preferred_players_set:
-        rating += 0.8
+        rating += 0.5
         
-    # Restituisce un valore pulito compreso tra 1.0 e 10.0
+    # Impediamo che tocchino tutti 10.0: il tetto massimo è raggiungibile solo da pochissimi top assoluti
     return round(max(1.0, min(10.0, rating)), 1)
     
 # --- RECUPERO DATI ---
