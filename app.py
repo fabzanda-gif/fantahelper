@@ -26,20 +26,38 @@ def play_sound(sound_url):
     components.html(sound_html, height=0, width=0)
 
 def calculate_player_rating(p, preferred_players_set=None):
-    rating = 6.5 
+    # Base di partenza più bassa per ampliare la forbice dei giudizi
+    rating = 5.0 
+    
     listino = p.get("list_price", 1)
-    if listino >= 30: rating += 3.5
-    elif listino >= 20: rating += 2.5
-    elif listino >= 10: rating += 1.0
-    elif listino >= 5: rating += 0.5
-    if p.get("status_titolarita") == "Titolare": rating += 1.5
-    elif p.get("status_titolarita") == "Riserva": rating -= 1.5
-    if p.get("rigorista"): rating += 1.5
-    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.3
-    if p.get("primo_anno_serie_a"): rating -= 0.2
-    if preferred_players_set and p.get("id") in preferred_players_set: rating += 0.8
-    return round(max(0, min(10, rating)), 1)
-
+    if listino is None: listino = 1
+    
+    # Curva di crescita progressiva basata sul prezzo (evita il tetto immediato)
+    if listino >= 40: rating += 4.5
+    elif listino >= 30: rating += 3.8
+    elif listino >= 20: rating += 3.0
+    elif listino >= 10: rating += 2.0
+    elif listino >= 5: rating += 1.0
+    else: rating += (listino * 0.15)
+    
+    # Status titolarità con impatto marcato
+    titolarita = p.get("status_titolarita")
+    if titolarita == "Titolare": rating += 1.2
+    elif titolarita == "Ballottaggio": rating -= 0.5
+    elif titolarita == "Riserva": rating -= 1.8
+    
+    # Bonus e malus specifici
+    if p.get("rigorista"): rating += 1.0
+    if p.get("propensione_cartellini") == "A rischio malus": rating -= 0.4
+    if p.get("primo_anno_serie_a"): rating -= 0.3
+    
+    # Preferiti utente
+    if preferred_players_set and p.get("id") in preferred_players_set:
+        rating += 0.8
+        
+    # Restituisce un valore pulito compreso tra 1.0 e 10.0
+    return round(max(1.0, min(10.0, rating)), 1)
+    
 # --- RECUPERO DATI ---
 teams_data = supabase.table("teams").select("id, name, remaining_budget, initial_budget").execute().data
 teams_df = pd.DataFrame(teams_data)
