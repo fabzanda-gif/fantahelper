@@ -1,6 +1,7 @@
 import random
 import unicodedata
 import re
+import os
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -31,24 +32,15 @@ def normalize_string(s):
     return re.sub(r'[^a-zA-Z0-9\s]', '', only_ascii).lower().strip()
 
 @st.cache_data
-def load_player_advanced_stats():
+def load_real_player_stats():
     try:
-        df = pd.read_csv('database.csv')
-        aggregated = df.groupby('Player').agg(
-            Total_Goals=('Goals', 'sum'),
-            Total_Assists=('Assists', 'sum'),
-            Total_Minutes=('Minutes', 'sum'),
-            Avg_xG=('Expected Goals (xG)', 'mean'),
-            Avg_xAG=('Expected Assists (xAG)', 'mean'),
-            Total_Yellow=('Yellow Cards', 'sum'),
-            Total_Red=('Red Cards', 'sum')
-        ).reset_index()
-        aggregated['clean_name'] = aggregated['Player'].apply(normalize_string)
-        return aggregated
+        if os.path.exists('player_aggregated_stats.csv'):
+            return pd.read_csv('player_aggregated_stats.csv')
     except Exception as e:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
 
-ADVANCED_STATS_DF = load_player_advanced_stats()
+REAL_STATS_DF = load_real_player_stats()
 
 @st.cache_data
 def get_team_modifiers():
@@ -94,53 +86,55 @@ def play_sound(sound_url):
 
 def calculate_player_rating(p, preferred_players_set=None):
     role = p.get("role", "D")
-    if role == "A":
-        rating = 5.5
-    elif role == "C":
-        rating = 5.0
-    elif role == "P":
-        rating = 5.0
-    else:
-        rating = 4.5
     
-    listino = p.get("list_price", 1)
-    if listino is None: listino = 1
-    
-    if role == "A": rating += (listino * 0.10)
-    elif role == "C": rating += (listino * 0.08)
-    else: rating += (listino * 0.06)
-    
-    titolarita = p.get("status_titolarita")
-    if titolarita == "Titolare": rating += 0.8
-    elif titolarita == "Ballottaggio": rating -= 0.4
-    elif titolarita == "Riserva": rating -= 2.0
-    
-    # Integrazione statistiche reali da database.csv tramite match pulito del cognome
+    # Valutazione basata sulle statistiche reali delle 38 giornate
     p_name_clean = normalize_string(p.get("name", ""))
-    if not ADVANCED_STATS_DF.empty and p_name_clean:
-        match = ADVANCED_STATS_DF[ADVANCED_STATS_DF['clean_name'].str.contains(p_name_clean, na=False)]
+    base_rating = 5.0
+    has_real_stats = False
+    
+    if not REAL_STATS_DF.empty and p_name_clean:
+        match = REAL_STATS_DF[REAL_STATS_DF['clean_name'].str.contains(p_name_clean, na=False)]
         if not match.empty:
             row = match.iloc[0]
-            goals = row.get('Total_Goals', 0)
-            assists = row.get('Total_Assists', 0)
-            xg = row.get('Avg_xG', 0)
-            if role in ["A", "C"]:
-                rating += (goals * 0.4) + (assists * 0.3) + (xg * 2.0)
-            elif role in ["D", "P"]:
-                rating += (assists * 0.4) + (goals * 0.5)
+            avg_vote = row.get('avg_vote', 6.0)
+            goals = row.get('goals', 0)
+            assists = row.get('assists', 0)
+            matches = row.get('matches', 0)
+            
+            if matches > 3:  # Se ha un minimo di presenze, partiamo dalla sua fantamedia reale
+                base_rating = avg_vote
+                if role in ["A", "C"]:
+                    base_rating += (goals * 0.12) + (assists * 0.08)
+                else:
+                    base_rating += (goals * 0.15) + (assists * 0.10)
+                has_real_stats = True
 
-    # Modificatore squadra dal file delle partite
+    # Fallback se non ci sono dati reali nel CSV
+    if not has_real_stats:
+        listino = p.get("list_price", 1)
+        if listino is None: listino = 1
+        if role == "A": base_rating = 5.5 + (listino * 0.08)
+        elif role == "C": base_rating = 5.0 + (listino * 0.06)
+        elif role == "P": base_rating = 5.0 + (listino * 0.05)
+        else: base_rating = 4.5 + (listino * 0.05)
+    
+    rating = base_rating
+    
+    titolarita = p.get("status_titolarita")
+    if titolarita == "Titolare": rating += 0.4
+    elif titolarita == "Ballottaggio": rating -= 0.3
+    elif titolarita == "Riserva": rating -= 1.5
+    
+    # Modificatore squadra
     team_serie_a = p.get("team_nfl")
     if team_serie_a in TEAM_MODIFIERS:
         mods = TEAM_MODIFIERS[team_serie_a]
-        if role in ["A", "C"]:
-            rating += mods["att"]
-        elif role in ["D", "P"]:
-            rating += mods["def"]
+        if role in ["A", "C"]: rating += mods["att"]
+        elif role in ["D", "P"]: rating += mods["def"]
 
     # Gestione malus e bonus
     has_malus = False
-    if p.get("rigorista"): rating += 1.2
+    if p.get("rigorista"): rating += 0.8
     
     if p.get("propensione_cartellini") == "A rischio malus": 
         rating -= 0.3
@@ -158,7 +152,7 @@ def calculate_player_rating(p, preferred_players_set=None):
         
     final_rating = round(max(1.0, min(10.0, rating)), 1)
     
-    # REGOLA: Se c'è un malus attivo (es. primo anno, riserva, cartellini), il voto non può mai essere 10.0 (max 9.0)
+    # Blocco rigido: se c'è un malus attivo, non può mai essere 10.0 (max 9.0)
     if has_malus and final_rating >= 10.0:
         final_rating = 9.0
         
@@ -431,8 +425,7 @@ with tab1:
                         p_rtg = calculate_player_rating(selected_player, st.session_state.preferred_players)
                         
                         if target_team == "Escanyol" and p_rtg >= 8.0:
-                            st.balloons()
-                            st.snow()
+                            st.balloons(); st.snow()
                             play_sound("https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3")
                             st.success(f"🔥 MASSIVE COLPO! **{selected_player['name']}** (Rating {p_rtg})! AND HIS NAME IS JOHN CENA! 🎺")
                             if st.button("🎉 Clicca qui per continuare l'asta"):
