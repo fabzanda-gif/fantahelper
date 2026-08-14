@@ -7,6 +7,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client
 
+# Mappa tra il nome della squadra nel CSV e il codice usato in Supabase/team_nfl
+TEAM_MAP = {
+    "Napoli": "NAP", "Juventus": "JUV", "Milan": "MIL", "Inter": "INT",
+    "Roma": "ROM", "Lazio": "LAZ", "Atalanta": "ATA", "Fiorentina": "FIO",
+    "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
+    "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
+    "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS"
+}
+
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
 st.title("⚽ RCD Escanyol - Live Auction Assistant")
