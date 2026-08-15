@@ -28,6 +28,15 @@ ROLE_LIMITS: dict[str, int] = {
 }
 TOTAL_SLOTS_PER_TEAM = sum(ROLE_LIMITS.values())
 
+# Modificatore portieri:
+# tra le tre squadre dei portieri presenti nella rosa, la squadra
+# che ha subito meno gol prende +1.0, la seconda 0.0, la terza -1.0.
+GOALKEEPER_GOALS_CONCEDED_MODIFIERS = {
+    1: 1.0,
+    2: 0.0,
+    3: -1.0,
+}
+
 ROLE_LABELS = {
     "Tutti i ruoli": "ALL",
     "Portieri (P)": "P",
@@ -69,6 +78,24 @@ TEAM_MAP = {
 DATA_DIR = Path(__file__).resolve().parent
 STATS_FILE = DATA_DIR / "player_aggregated_stats.csv"
 SEASON_FILE = DATA_DIR / "season-2526.csv"
+
+
+# Tab 4: modifiche manuali persistenti ai giocatori.
+# Richiede una tabella Supabase dedicata (SQL fornito sotto).
+CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
+
+CUSTOM_MODIFIERS = {
+    "Nessuna modifica": {"key": None, "value": 0.0},
+    "⭐ Preferito (+0.5)": {"key": "preferito", "value": 0.5},
+    "🟢 Bonus extra +1.0": {"key": "bonus_1", "value": 1.0},
+    "🟢 Bonus extra +0.5": {"key": "bonus_05", "value": 0.5},
+    "🟢 Bonus extra +0.3": {"key": "bonus_03", "value": 0.3},
+    "🟡 Ballottaggio (-0.3)": {"key": "ballottaggio", "value": -0.3},
+    "🟠 Malus -0.5": {"key": "malus_05", "value": -0.5},
+    "🔴 Malus -1.0": {"key": "malus_1", "value": -1.0},
+    "🔴 Riserva (-1.5)": {"key": "riserva", "value": -1.5},
+}
+
 
 SOUND_URLS = {
     "massive": "https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3",
@@ -142,11 +169,83 @@ def load_players(
     return query.order("name").execute().data
 
 
+@st.cache_data(ttl=5)
+def load_custom_modifiers() -> dict[Any, dict[str, Any]]:
+    """Carica le modifiche manuali persistenti dal database."""
+    try:
+        rows = (
+            supabase.table(CUSTOM_MODIFIER_TABLE)
+            .select("player_id, modifier_key, modifier_label, modifier_value")
+            .execute()
+            .data
+        )
+    except Exception:
+        # Se la tabella non è stata ancora creata, l'app continua a funzionare
+        # usando il rating standard.
+        return {}
+
+    return {
+        row["player_id"]: row
+        for row in rows
+        if row.get("player_id") is not None
+    }
+
+
+def save_custom_modifier(
+    player_id: Any,
+    modifier_label: str,
+) -> tuple[bool, str]:
+    """Salva/sostituisce la modifica manuale di un giocatore."""
+    config = CUSTOM_MODIFIERS[modifier_label]
+
+    try:
+        (
+            supabase.table(CUSTOM_MODIFIER_TABLE)
+            .delete()
+            .eq("player_id", player_id)
+            .execute()
+        )
+
+        if config["key"] is not None:
+            (
+                supabase.table(CUSTOM_MODIFIER_TABLE)
+                .insert(
+                    {
+                        "player_id": player_id,
+                        "modifier_key": config["key"],
+                        "modifier_label": modifier_label,
+                        "modifier_value": config["value"],
+                    }
+                )
+                .execute()
+            )
+
+        load_custom_modifiers.clear()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def reset_custom_modifier(player_id: Any) -> tuple[bool, str]:
+    try:
+        (
+            supabase.table(CUSTOM_MODIFIER_TABLE)
+            .delete()
+            .eq("player_id", player_id)
+            .execute()
+        )
+        load_custom_modifiers.clear()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
 def invalidate_data_cache() -> None:
     load_teams.clear()
     load_rosters.clear()
     load_players.clear()
     load_external_data.clear()
+    load_custom_modifiers.clear()
 
 
 # ============================================================
@@ -185,9 +284,10 @@ def normalize_string(value: Any) -> str:
 
 
 @st.cache_data(ttl=300)
-def load_external_data() -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
+def load_external_data() -> tuple[pd.DataFrame, dict[str, dict[str, float]], dict[str, float]]:
     stats = pd.DataFrame()
     mods: dict[str, dict[str, float]] = {}
+    goals_conceded: dict[str, float] = {}
 
     if STATS_FILE.exists():
         try:
@@ -200,13 +300,13 @@ def load_external_data() -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
             st.warning(f"Impossibile leggere {STATS_FILE.name}: {exc}")
 
     if not SEASON_FILE.exists():
-        return stats, mods
+        return stats, mods, goals_conceded
 
     try:
         df = pd.read_csv(SEASON_FILE)
         required = {"HomeTeam", "AwayTeam", "FTHG", "FTAG"}
         if not required.issubset(df.columns):
-            return stats, mods
+            return stats, mods, goals_conceded
 
         home = (
             df.groupby("HomeTeam")
@@ -224,9 +324,19 @@ def load_external_data() -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
         ts["Matches"] = ts["M_x"] + ts["M_y"]
         ts["TotalGF"] = ts["GF_x"] + ts["GF_y"]
         ts["TotalGA"] = ts["GA_x"] + ts["GA_y"]
+
+        # Memorizziamo i gol subiti per ogni club/codice Serie A.
+        for _, row in ts.iterrows():
+            if row["Matches"] > 0:
+                code = TEAM_MAP.get(
+                    str(row["Team"]),
+                    str(row["Team"]).upper()[:3],
+                )
+                goals_conceded[code] = float(row["TotalGA"])
+
         total_matches = ts["Matches"].sum()
         if total_matches <= 0:
-            return stats, mods
+            return stats, mods, goals_conceded
 
         avg_gf = ts["TotalGF"].sum() / total_matches
         avg_ga = ts["TotalGA"].sum() / total_matches
@@ -242,10 +352,60 @@ def load_external_data() -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
     except (OSError, pd.errors.ParserError, KeyError, ZeroDivisionError) as exc:
         st.warning(f"Impossibile elaborare {SEASON_FILE.name}: {exc}")
 
-    return stats, mods
+    return stats, mods, goals_conceded
 
 
-STATS, MODS = load_external_data()
+STATS, MODS, GOALS_CONCEDED = load_external_data()
+
+
+def get_goalkeeper_ranking_for_teams(
+    team_codes: set[str],
+) -> dict[str, int]:
+    """
+    Classifica SOLO le squadre dei portieri presenti nella rosa.
+
+    1 = meno gol subiti -> +1.0
+    2 = seconda -> 0.0
+    3 = più gol subiti -> -1.0
+
+    Se sono presenti meno di tre squadre, vengono classificate solo
+    quelle disponibili.
+    """
+    if not team_codes:
+        return {}
+
+    rows = [
+        (code, GOALS_CONCEDED.get(code))
+        for code in team_codes
+        if GOALS_CONCEDED.get(code) is not None
+    ]
+    rows.sort(key=lambda item: (item[1], item[0]))
+
+    return {
+        code: position
+        for position, (code, _) in enumerate(rows[:3], start=1)
+    }
+
+
+def get_goalkeeper_modifier(
+    player: dict[str, Any],
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> tuple[float, int | None]:
+    """Restituisce modificatore e posizione della squadra del portiere."""
+    if player.get("role") != "P" or not goalkeeper_ranking:
+        return 0.0, None
+
+    position = goalkeeper_ranking.get(player.get("team_nfl"))
+    if position is None:
+        return 0.0, None
+
+    return (
+        GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0),
+        position,
+    )
+
+
+ALL_GOALKEEPER_RANKING = get_goalkeeper_ranking_for_teams(set(GOALS_CONCEDED))
 
 
 # ============================================================
@@ -255,8 +415,12 @@ STATS, MODS = load_external_data()
 def calculate_player_rating_detailed(
     player: dict[str, Any],
     preferred_players: set[Any] | None = None,
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     preferred_players = preferred_players or set()
+    if custom_modifiers is None:
+        custom_modifiers = load_custom_modifiers()
     role = player.get("role", "D")
     player_name = normalize_string(player.get("name", ""))
 
@@ -294,12 +458,38 @@ def calculate_player_rating_detailed(
     }.get(player.get("status_titolarita"), 0.0)
 
     team_mods = MODS.get(player.get("team_nfl"), {"att": 0.0, "def": 0.0})
-    team_mod = team_mods["att"] if role in {"A", "C"} else team_mods["def"]
+
+    # Portieri: il modificatore difensivo standard viene sostituito
+    # dal criterio richiesto basato sui gol subiti delle tre squadre.
+    goalkeeper_mod, goalkeeper_rank = get_goalkeeper_modifier(
+        player,
+        goalkeeper_ranking,
+    )
+    team_mod = (
+        goalkeeper_mod
+        if role == "P"
+        else team_mods["att"]
+        if role in {"A", "C"}
+        else team_mods["def"]
+    )
 
     rigorista_mod = 0.8 if player.get("rigorista") else 0.0
     cartellini_mod = -0.3 if player.get("propensione_cartellini") == "A rischio malus" else 0.0
     rookie_mod = -0.3 if player.get("primo_anno_serie_a") else 0.0
-    preferred_mod = 0.5 if player.get("id") in preferred_players else 0.0
+    # Il preferito proveniente dalla sessione resta compatibile.
+    # Se il preferito è salvato nella nuova tabella, viene letto da lì.
+    db_modifier = custom_modifiers.get(player.get("id"), {})
+    custom_mod = float(db_modifier.get("modifier_value") or 0.0)
+    db_modifier_key = db_modifier.get("modifier_key")
+
+    preferred_mod = (
+        0.5
+        if (
+            player.get("id") in preferred_players
+            and db_modifier_key != "preferito"
+        )
+        else 0.0
+    )
 
     final = round(
         max(
@@ -312,7 +502,8 @@ def calculate_player_rating_detailed(
                 + rigorista_mod
                 + cartellini_mod
                 + rookie_mod
-                + preferred_mod,
+                + preferred_mod
+                + custom_mod,
             ),
         ),
         1,
@@ -328,11 +519,15 @@ def calculate_player_rating_detailed(
         "final_rating": final,
         "base": round(base, 2),
         "team_mod": team_mod,
+        "goalkeeper_mod": goalkeeper_mod,
+        "goalkeeper_rank": goalkeeper_rank,
         "tit": titolarita_mod,
         "rig": rigorista_mod,
         "cart": cartellini_mod,
         "rook": rookie_mod,
         "pref": preferred_mod,
+        "custom_mod": custom_mod,
+        "custom_label": db_modifier.get("modifier_label", "Nessuna modifica"),
         "g": goals,
         "a": assists,
         "m": matches,
@@ -342,11 +537,30 @@ def calculate_player_rating_detailed(
 def calculate_player_rating(
     player: dict[str, Any],
     preferred_players: set[Any] | None = None,
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
 ) -> float:
     return calculate_player_rating_detailed(
         player,
         preferred_players,
+        custom_modifiers,
+        goalkeeper_ranking,
     )["final_rating"]
+
+
+
+def build_current_goalkeeper_ranking(
+    state: "AuctionState",
+) -> dict[str, int]:
+    """Classifica le squadre dei portieri attualmente presenti nelle rose."""
+    goalkeeper_teams: set[str] = set()
+
+    for players in state.team_players_map.values():
+        for player in players:
+            if player.get("role") == "P" and player.get("team_nfl"):
+                goalkeeper_teams.add(player["team_nfl"])
+
+    return get_goalkeeper_ranking_for_teams(goalkeeper_teams)
 
 
 # ============================================================
@@ -402,11 +616,18 @@ def build_auction_state(
 def calculate_team_ratings(
     state: AuctionState,
     preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
 ) -> dict[str, float]:
     return {
         team_name: (
             sum(
-                calculate_player_rating(player, preferred_players)
+                calculate_player_rating(
+                    player,
+                    preferred_players,
+                    custom_modifiers,
+                    goalkeeper_ranking,
+                )
                 for player in players
             )
             / len(players)
@@ -908,15 +1129,12 @@ def render_manual_purchase(
     teams_df: pd.DataFrame,
     state: AuctionState,
     current_role: str,
-) -> None:
+) -> str:
+    """Renderizza il pannello di acquisto manuale in una griglia allineata."""
     if is_auction_finished(state):
-        return
+        return current_role
 
-    team_filter = "ALL"
-    if current_role != "ALL":
-        players_for_filter = load_players(role=current_role)
-    else:
-        players_for_filter = load_players()
+    players_for_filter = load_players()
 
     available_nfl_teams = sorted(
         {
@@ -926,12 +1144,37 @@ def render_manual_purchase(
         }
     )
 
-    col_r, col_t = st.columns(2)
+    # Tutti i controlli restano sulla stessa riga: evita lo sfalsamento
+    # causato da colonne vuote usate come spaziatori.
+    col1, col2, col3, col4, col5 = st.columns(
+        [1.25, 1.45, 2.8, 1.0, 1.55],
+        gap="small",
+    )
 
-    with col_t:
+    with col1:
+        role_options = {
+            label: role
+            for label, role in ROLE_LABELS.items()
+            if role == "ALL" or role not in calculate_completed_roles(state)
+        }
+        role_labels = list(role_options)
+        current_label = next(
+            (label for label, role in role_options.items() if role == current_role),
+            role_labels[0],
+        )
+        selected_role_label = st.selectbox(
+            "1. Seleziona Ruolo",
+            role_labels,
+            index=role_labels.index(current_label),
+            key="main_role_select",
+        )
+        current_role = role_options[selected_role_label]
+
+    with col2:
         nfl_filter_label = st.selectbox(
-            "2. Filtra per Squadra Serie A (Opzionale)",
+            "2. Filtra per Squadra Serie A",
             ["Tutte le squadre"] + available_nfl_teams,
+            key="manual_nfl_filter",
         )
         team_filter = (
             "ALL"
@@ -939,11 +1182,7 @@ def render_manual_purchase(
             else nfl_filter_label
         )
 
-    players = load_players(
-        role=current_role,
-        team_nfl=team_filter,
-    )
-
+    players = load_players(role=current_role, team_nfl=team_filter)
     available_players = [
         player
         for player in players
@@ -951,10 +1190,8 @@ def render_manual_purchase(
     ]
 
     if not available_players:
-        st.warning(
-            "Nessun giocatore disponibile trovato con questi filtri."
-        )
-        return
+        st.warning("Nessun giocatore disponibile trovato con questi filtri.")
+        return current_role
 
     player_options = {
         (
@@ -964,53 +1201,64 @@ def render_manual_purchase(
         for player in available_players
     }
 
-    col1, col2, col3 = st.columns([3, 1, 2])
-
-    with col1:
+    with col3:
         selected_label = st.selectbox(
             "3. Seleziona Giocatore",
             list(player_options),
+            key="manual_player_select",
         )
         selected_player = player_options[selected_label]
 
-    with col2:
-        default_price = max(
-            1,
-            int(selected_player.get("list_price") or 1),
-        )
+    with col4:
+        default_price = max(1, int(selected_player.get("list_price") or 1))
         purchase_price = st.number_input(
             "4. Costo",
             min_value=1,
             max_value=500,
             value=default_price,
+            step=1,
+            key="manual_purchase_price",
         )
 
-    with col3:
+    with col5:
         role = selected_player["role"]
         active_teams = [
             team_name
             for team_name in teams_df["name"].tolist()
             if (
                 state.team_total_bought[team_name] < TOTAL_SLOTS_PER_TEAM
-                and state.team_role_totals[team_name][role]
-                < ROLE_LIMITS[role]
+                and state.team_role_totals[team_name][role] < ROLE_LIMITS[role]
             )
         ]
-
-        team_names = (
-            active_teams
-            if active_teams
-            else teams_df["name"].tolist()
-        )
+        team_names = active_teams or teams_df["name"].tolist()
 
         target_team = st.selectbox(
             "5. Squadra Acquirente",
             team_names,
             index=default_team_index(team_names),
+            key="manual_target_team",
         )
 
-    if not st.button("Conferma Acquisto", type="primary"):
-        return
+    # Valutazione immediata del giocatore selezionato.
+    current_custom = load_custom_modifiers()
+    player_details = calculate_player_rating_detailed(
+        selected_player,
+        st.session_state.preferred_players,
+        current_custom,
+        build_current_goalkeeper_ranking(state),
+    )
+    st.caption(
+        f"⭐ Rating attuale: **{player_details['final_rating']:.1f}** · "
+        f"Club: **{selected_player.get('team_nfl', '—')}** · "
+        f"Listino: **{selected_player.get('list_price', 0)} cr**"
+    )
+
+    if not st.button(
+        "Conferma Acquisto",
+        type="primary",
+        key="confirm_manual_purchase",
+    ):
+        return current_role
 
     success, error = execute_purchase(
         teams_df,
@@ -1022,12 +1270,9 @@ def render_manual_purchase(
 
     if not success:
         st.error(error)
-        return
+        return current_role
 
-    rating = calculate_player_rating(
-        selected_player,
-        st.session_state.preferred_players,
-    )
+    rating = player_details["final_rating"]
 
     if target_team == "Escanyol":
         if rating >= 8.5:
@@ -1048,8 +1293,8 @@ def render_manual_purchase(
         else:
             play_sound(SOUND_URLS["normal"])
             st.info(
-                f"✅ Operazione conclusa: preso "
-                f"**{selected_player['name']}** a {purchase_price} crediti."
+                f"✅ Operazione conclusa: preso **{selected_player['name']}** "
+                f"a {purchase_price} crediti."
             )
     else:
         st.success(
@@ -1060,10 +1305,10 @@ def render_manual_purchase(
 
     invalidate_data_cache()
     st.rerun()
+    return current_role
 
 
-# ============================================================
-# PANORAMICA SQUADRE
+# ============================================================ SQUADRE
 # ============================================================
 
 def build_team_alerts(
@@ -1512,10 +1757,13 @@ def render_all_players_tab() -> None:
     st.subheader("⭐️ Tutti i Giocatori — Rating Dettagliato")
     st.caption(
         "Il rating combina statistiche stagionali, listino, titolarità, "
-        "modificatore squadra, rigoristi, rischio cartellini, rookie e preferiti."
+        "modificatore squadra, rigoristi, rischio cartellini, rookie e preferiti. "
+        "Per i portieri, il modificatore difensivo è sostituito dal criterio "
+        "gol subiti: 1ª squadra +1.0, 2ª 0.0, 3ª -1.0."
     )
 
     all_players = load_players()
+    custom_modifiers = load_custom_modifiers()
     if not all_players:
         st.info("Nessun giocatore trovato nel database.")
         return
@@ -1531,6 +1779,8 @@ def render_all_players_tab() -> None:
         details = calculate_player_rating_detailed(
             player,
             st.session_state.preferred_players,
+            custom_modifiers,
+            ALL_GOALKEEPER_RANKING,
         )
         rows.append(
             {
@@ -1540,10 +1790,14 @@ def render_all_players_tab() -> None:
                 "Rating ⭐️": details["final_rating"],
                 "Base/Fantamedia": details["base"],
                 "Mod Squadra": details["team_mod"],
+                "Mod. Portiere": details.get("goalkeeper_mod", 0.0),
+                "Pos. Difesa": details.get("goalkeeper_rank"),
                 "Titolarità": details["tit"],
                 "Rigorista": details["rig"],
                 "Cartellini": details["cart"],
                 "Rookie": details["rook"],
+                "Bonus/Malus manuale": details["custom_label"],
+                "Mod. manuale": details["custom_mod"],
                 "Gol": details["g"],
                 "Ass": details["a"],
                 "Presenze": details["m"],
@@ -1609,8 +1863,440 @@ def render_all_players_tab() -> None:
                 "Rating ⭐️",
                 format="%.1f",
             ),
+            "Mod. manuale": st.column_config.NumberColumn(
+                "Mod. manuale",
+                format="%+.1f",
+            ),
         },
     )
+
+
+# ============================================================
+# TAB 4 — GESTIONE BONUS / MALUS
+# ============================================================
+
+def render_player_modifiers_tab() -> None:
+    st.subheader("🛠️ Gestione Bonus / Malus Giocatori")
+    st.caption(
+        "Le modifiche inserite qui vengono salvate in Supabase e "
+        "si sommano al rating calcolato automaticamente. "
+        "Il reset elimina solo la modifica manuale, senza toccare i dati originali del giocatore."
+    )
+
+    all_players = load_players()
+    if not all_players:
+        st.info("Nessun giocatore trovato nel database.")
+        return
+
+    modifiers = load_custom_modifiers()
+
+    rows = []
+    for player in all_players:
+        current = modifiers.get(player["id"], {})
+        rows.append(
+            {
+                "_player_id": player["id"],
+                "Giocatore": player.get("name", ""),
+                "Ruolo": player.get("role", ""),
+                "Club": player.get("team_nfl", ""),
+                "Modifica attuale": current.get(
+                    "modifier_label",
+                    "Nessuna modifica",
+                ),
+                "Valore": float(current.get("modifier_value") or 0.0),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        role_filter = st.selectbox(
+            "Ruolo",
+            ["Tutti", "P", "D", "C", "A"],
+            key="tab4_role_filter",
+        )
+    with c2:
+        modifier_filter = st.selectbox(
+            "Stato modifica",
+            ["Tutti", "Con bonus/malus", "Senza modifica"],
+            key="tab4_modifier_filter",
+        )
+    with c3:
+        search = st.text_input(
+            "Cerca giocatore",
+            key="tab4_search",
+        )
+
+    filtered = df.copy()
+
+    if role_filter != "Tutti":
+        filtered = filtered[filtered["Ruolo"] == role_filter]
+
+    if modifier_filter == "Con bonus/malus":
+        filtered = filtered[filtered["Valore"] != 0]
+    elif modifier_filter == "Senza modifica":
+        filtered = filtered[filtered["Valore"] == 0]
+
+    if search:
+        filtered = filtered[
+            filtered["Giocatore"].astype(str).str.contains(
+                re.escape(search),
+                case=False,
+                na=False,
+                regex=True,
+            )
+        ]
+
+    st.markdown("### Modifica singolo giocatore")
+
+    if filtered.empty:
+        st.info("Nessun giocatore corrisponde ai filtri.")
+        return
+
+    player_labels = {
+        f"{row['Giocatore']} [{row['Ruolo']}] — {row['Club']}": row["_player_id"]
+        for _, row in filtered.iterrows()
+    }
+
+    selected_label = st.selectbox(
+        "Giocatore",
+        list(player_labels),
+        key="tab4_selected_player",
+    )
+    selected_id = player_labels[selected_label]
+
+    current = modifiers.get(selected_id, {})
+    current_label = current.get(
+        "modifier_label",
+        "Nessuna modifica",
+    )
+
+    modifier_options = list(CUSTOM_MODIFIERS)
+    current_index = (
+        modifier_options.index(current_label)
+        if current_label in modifier_options
+        else 0
+    )
+
+    selected_modifier = st.selectbox(
+        "Bonus / Malus",
+        modifier_options,
+        index=current_index,
+        key=f"tab4_modifier_{selected_id}",
+        help=(
+            "La modifica viene aggiunta al rating. "
+            "Esempio: se Audero è indicato come Titolare ma tu ritieni "
+            "che sia in ballottaggio, seleziona 'Ballottaggio (-0.3)'."
+        ),
+    )
+
+    player = next(
+        player for player in all_players
+        if player["id"] == selected_id
+    )
+
+    base_details = calculate_player_rating_detailed(
+        player,
+        st.session_state.preferred_players,
+        modifiers,
+    )
+    new_value = CUSTOM_MODIFIERS[selected_modifier]["value"]
+    current_rating = base_details["final_rating"]
+    # Il rating attuale include già la modifica esistente.
+    rating_without_current_custom = current_rating - float(
+        current.get("modifier_value") or 0.0
+    )
+    preview_rating = round(
+        max(
+            1.0,
+            min(10.0, rating_without_current_custom + new_value),
+        ),
+        1,
+    )
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric("Rating senza modifica manuale", f"{rating_without_current_custom:.1f}")
+    with p2:
+        st.metric("Modifica scelta", f"{new_value:+.1f}")
+    with p3:
+        st.metric("Rating finale previsto", f"{preview_rating:.1f}")
+
+    b1, b2 = st.columns(2)
+
+    with b1:
+        if st.button(
+            "💾 Salva bonus/malus",
+            type="primary",
+            use_container_width=True,
+        ):
+            ok, error = save_custom_modifier(
+                selected_id,
+                selected_modifier,
+            )
+            if ok:
+                st.success(
+                    f"Modifica salvata per **{player['name']}**."
+                )
+                invalidate_data_cache()
+                st.rerun()
+            else:
+                st.error(
+                    "Impossibile salvare la modifica. "
+                    "Controlla che la tabella Supabase "
+                    f"`{CUSTOM_MODIFIER_TABLE}` esista.\n\n{error}"
+                )
+
+    with b2:
+        if st.button(
+            "♻️ Reset modifica giocatore",
+            use_container_width=True,
+        ):
+            ok, error = reset_custom_modifier(selected_id)
+            if ok:
+                st.success(
+                    f"Modifica rimossa da **{player['name']}**."
+                )
+                invalidate_data_cache()
+                st.rerun()
+            else:
+                st.error(f"Impossibile effettuare il reset: {error}")
+
+    st.divider()
+    st.markdown("### 📋 Modifiche attualmente salvate")
+
+    active = df[df["Valore"] != 0].copy()
+    if active.empty:
+        st.info("Nessun bonus/malus personalizzato salvato.")
+    else:
+        st.dataframe(
+            active.drop(columns=["_player_id"]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Valore": st.column_config.NumberColumn(
+                    "Valore",
+                    format="%+.1f",
+                ),
+            },
+        )
+
+    with st.expander("⚠️ Reset di tutte le modifiche manuali"):
+        st.warning(
+            "Cancella tutti i bonus/malus personalizzati della tabella. "
+            "Non modifica i dati originali dei giocatori."
+        )
+        if st.button(
+            "🗑️ Cancella TUTTI i bonus/malus",
+            type="secondary",
+            key="tab4_reset_all",
+        ):
+            try:
+                saved = (
+                    supabase.table(CUSTOM_MODIFIER_TABLE)
+                    .select("player_id")
+                    .execute()
+                    .data
+                )
+                for row in saved:
+                    (
+                        supabase.table(CUSTOM_MODIFIER_TABLE)
+                        .delete()
+                        .eq("player_id", row["player_id"])
+                        .execute()
+                    )
+                invalidate_data_cache()
+                st.success("Tutte le modifiche manuali sono state cancellate.")
+                st.rerun()
+            except Exception as exc:
+                st.error(
+                    f"Reset globale non riuscito: {exc}"
+                )
+
+
+# ============================================================
+# TAB 1 — VALUTAZIONE E ROSA RCD ESCANYOL
+# ============================================================
+
+def render_my_team_evaluation(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> None:
+    """Valuta la rosa RCD Escanyol costruita fino a questo momento."""
+    team_name = "Escanyol"
+    if team_name not in state.team_players_map:
+        st.info("La squadra RCD Escanyol non è presente tra le squadre configurate.")
+        return
+
+    players = state.team_players_map[team_name]
+    purchases = state.team_purchases_map[team_name]
+    team_row = teams_df[teams_df["name"] == team_name]
+
+    bought = len(players)
+    remaining = int(team_row.iloc[0]["remaining_budget"]) if not team_row.empty else 0
+    initial = int(team_row.iloc[0]["initial_budget"]) if not team_row.empty else 0
+    spent = sum(int(p.get("purchase_price") or 0) for p in purchases)
+    listino = sum(int(p.get("list_price") or 1) for p in players)
+    slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
+    rating = ratings.get(team_name, 0.0)
+
+    grades = calculate_auction_grades(
+        teams_df.to_dict("records"),
+        state,
+        ratings,
+    )
+    grade_row = grades[grades["Squadra"] == team_name]
+    auction_grade = float(grade_row.iloc[0]["Voto Asta"]) if not grade_row.empty else 0.0
+
+    ranking = build_current_goalkeeper_ranking(state)
+    alerts = build_team_alerts(players, bought)
+    role_counts = state.team_role_totals[team_name]
+
+    st.markdown("### 🧠 Valutazione RCD Escanyol")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("⭐ Rating Rosa", f"{rating:.1f}/10")
+    c2.metric("🏆 Voto Asta", f"{auction_grade:.1f}/10")
+    c3.metric("💰 Budget residuo", f"{remaining} cr")
+    c4.metric("👥 Giocatori", f"{bought}/{TOTAL_SLOTS_PER_TEAM}")
+    c5.metric("📊 Speso / Listino", f"{spent}/{listino} cr")
+
+    role_text = " · ".join(
+        f"**{role}** {role_counts[role]}/{ROLE_LIMITS[role]}"
+        for role in ["P", "D", "C", "A"]
+    )
+    st.markdown(role_text)
+
+    if slots_left:
+        st.caption(
+            f"Hai ancora **{slots_left} slot**. Budget medio teorico disponibile: "
+            f"**{remaining / slots_left:.1f} crediti/slot**."
+        )
+    else:
+        st.success("🎉 Rosa completa!")
+
+    if not players:
+        st.info("Non hai ancora acquistato giocatori.")
+        return
+
+    if rating >= 8:
+        st.success("🔥 Rosa molto competitiva: la base costruita finora è da Scudetto.")
+    elif rating >= 6.5:
+        st.info("👍 Rosa competitiva, con margine per migliorare i reparti ancora incompleti.")
+    else:
+        st.warning("⚠️ Rosa ancora da rinforzare: concentrati sui reparti più scoperti.")
+
+    if alerts:
+        with st.expander(f"🚨 Alert strategici RCD Escanyol ({len(alerts)})", expanded=True):
+            for alert in alerts:
+                st.markdown(alert["text"], help=alert["help"])
+    else:
+        st.success("✅ Nessun alert strategico rilevante al momento.")
+
+    if ranking:
+        goalkeeper_rows = []
+        for code, position in sorted(ranking.items(), key=lambda item: item[1]):
+            modifier = GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0)
+            goalkeeper_rows.append(
+                {
+                    "Pos.": position,
+                    "Squadra": code,
+                    "Gol subiti": GOALS_CONCEDED.get(code, 0),
+                    "Mod. P": modifier,
+                }
+            )
+        with st.expander("🧤 Classifica portieri usata dal rating"):
+            st.dataframe(
+                pd.DataFrame(goalkeeper_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Mod. P": st.column_config.NumberColumn(format="%+.1f"),
+                },
+            )
+
+
+def render_my_roster(
+    state: AuctionState,
+) -> None:
+    """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
+    team_name = "Escanyol"
+    players = state.team_players_map.get(team_name, [])
+
+    st.markdown("### 👕 Rosa RCD Escanyol")
+    if not players:
+        st.info("La rosa è ancora vuota.")
+        return
+
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+    purchases = state.team_purchases_map.get(team_name, [])
+    purchase_by_player = {
+        purchase.get("players", {}).get("id"): purchase
+        for purchase in purchases
+        if purchase.get("players")
+    }
+
+    # In build_auction_state players e purchases provengono dalla stessa query,
+    # quindi usiamo anche la posizione per sicurezza nel caso l'id non sia presente.
+    rows_by_role = {role: [] for role in ["P", "D", "C", "A"]}
+    for player in players:
+        details = calculate_player_rating_detailed(
+            player,
+            st.session_state.preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        purchase = purchase_by_player.get(player.get("id"), {})
+        manual_value = details.get("custom_mod", 0.0)
+        manual_label = details.get("custom_label", "Nessuna modifica")
+        bonus_malus = (
+            f"{manual_label} ({manual_value:+.1f})"
+            if manual_value
+            else "—"
+        )
+        rows_by_role.setdefault(player.get("role", "D"), []).append(
+            {
+                "Nome": player.get("name", ""),
+                "Rating": details["final_rating"],
+                "Squadra": player.get("team_nfl", "—"),
+                "Crediti Spesi": int(purchase.get("purchase_price") or 0),
+                "Crediti Dichiarati": int(player.get("list_price") or 0),
+                "Bonus/Malus": bonus_malus,
+                "_sort_rating": details["final_rating"],
+            }
+        )
+
+    role_titles = {
+        "P": "🧤 Portieri",
+        "D": "🛡️ Difensori",
+        "C": "🎯 Centrocampisti",
+        "A": "⚡ Attaccanti",
+    }
+
+    for role in ["P", "D", "C", "A"]:
+        role_rows = sorted(
+            rows_by_role.get(role, []),
+            key=lambda row: (-row["_sort_rating"], row["Nome"]),
+        )
+        st.markdown(f"#### {role_titles[role]} ({len(role_rows)}/{ROLE_LIMITS[role]})")
+        if not role_rows:
+            st.caption("Nessun giocatore acquistato in questo ruolo.")
+            continue
+
+        display = pd.DataFrame(role_rows).drop(columns=["_sort_rating"])
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Rating": st.column_config.NumberColumn(format="%.1f"),
+                "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
+                "Crediti Dichiarati": st.column_config.NumberColumn(format="%d cr"),
+            },
+        )
 
 
 # ============================================================
@@ -1630,22 +2316,26 @@ def main() -> None:
         st.session_state.preferred_players = set()
 
     preferred_players = st.session_state.preferred_players
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
     ratings = calculate_team_ratings(
         state,
         preferred_players,
+        custom_modifiers,
+        goalkeeper_ranking,
     )
 
     completed_roles = calculate_completed_roles(state)
     auction_finished = is_auction_finished(state)
 
-    available_role_labels = {
-        label: role
-        for label, role in ROLE_LABELS.items()
-        if role == "ALL" or role not in completed_roles
-    }
 
-    tab1, tab2, tab3 = st.tabs(
-        ["🎯 Live Asta", "📋 Rose & Analisi", "⭐️ Tutti i Giocatori (Rating)"]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        [
+            "🎯 Live Asta",
+            "📋 Rose & Analisi",
+            "⭐️ Tutti i Giocatori (Rating)",
+            "🛠️ Bonus / Malus",
+        ]
     )
 
     with tab1:
@@ -1658,18 +2348,14 @@ def main() -> None:
             )
             current_role = "ALL"
         else:
-            col_role, _ = st.columns(2)
+            current_role = "ALL"
 
-            with col_role:
-                selected_role_label = st.selectbox(
-                    "1. Seleziona Ruolo",
-                    list(available_role_labels),
-                    key="main_role_select",
-                )
-
-            current_role = available_role_labels[
-                selected_role_label
-            ]
+        # Il pannello contiene tutti e 5 i dropdown/controlli sulla stessa riga.
+        current_role = render_manual_purchase(
+            teams_df,
+            state,
+            current_role,
+        )
 
         render_top5(
             current_role,
@@ -1688,19 +2374,21 @@ def main() -> None:
             state,
         )
 
-        render_manual_purchase(
-            teams_df,
-            state,
-            current_role,
-        )
-
-        render_team_overview(
+        render_my_team_evaluation(
             teams_df,
             state,
             ratings,
         )
 
+        render_my_roster(state)
+
     with tab2:
+        render_team_overview(
+            teams_df,
+            state,
+            ratings,
+        )
+        st.divider()
         render_rosters_tab(
             teams,
             teams_df,
@@ -1711,6 +2399,9 @@ def main() -> None:
 
     with tab3:
         render_all_players_tab()
+
+    with tab4:
+        render_player_modifiers_tab()
 
 
 if __name__ == "__main__":
