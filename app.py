@@ -851,7 +851,7 @@ def describe_goalkeeper_strategy(players: list[dict[str, Any]]) -> str:
     else: defense="Non ho abbastanza dati sui gol subiti per giudicare le difese."
     quality=(f"Rating medio portieri {avg_rating:.1f}: reparto di alto livello." if avg_rating>=8 else f"Rating medio portieri {avg_rating:.1f}: reparto competitivo." if avg_rating>=7 else f"Rating medio portieri {avg_rating:.1f}: reparto sotto il livello ideale.")
     if len(keepers)>=ROLE_LIMITS["P"]:
-        return f"{diversification} {defense} {quality} Portieri completati: non c'è nulla da correggere qui. Ora sposterei attenzione e budget sui difensori."
+        return f"{diversification} {defense} {quality} Portieri completati. Ora sposterei attenzione e budget sui difensori."
     return f"{diversification} {defense} {quality} Finché il reparto non è completo, privilegia il valore per credito e non il solo rating."
 
 
