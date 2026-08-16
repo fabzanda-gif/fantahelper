@@ -122,7 +122,7 @@ CUSTOM_MODIFIERS = {
 
 
 SOUND_URLS = {
-    "massive": "https://github.com/fabzanda-gif/fantahelper/blob/main/johncenaprankcall_cutted.mp3",
+    "massive": "https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/johncenaprankcall_cutted.mp3",
     "great": "https://www.myinstants.com/media/sounds/ta-da.mp3",
     "normal": "https://www.myinstants.com/media/sounds/plop.mp3",
 }
