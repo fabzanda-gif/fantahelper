@@ -376,7 +376,7 @@ def queue_purchase_banner(
         title = "🔥 MASSIVE COLPO!"
         message = (
             f"Hai preso **{player_name}** (Rating {rating:.1f})! "
-            "AND HIS NAME IS JOHN CENA! 🎺🎺🎺"
+            "! 🎺🎺🎺"
         )
     elif rating >= 7.5:
         level = "great"
