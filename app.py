@@ -28,6 +28,20 @@ ROLE_LIMITS: dict[str, int] = {
 }
 TOTAL_SLOTS_PER_TEAM = sum(ROLE_LIMITS.values())
 
+# Stima iniziale usata solo quando non esistono ancora abbastanza
+# precedenti di asta nel database. Appena ci sono acquisti reali,
+# la stima viene sostituita dalla mediana dei moltiplicatori osservati.
+DEFAULT_AUCTION_MULTIPLIER = 2.5
+MIN_HISTORY_FOR_ROLE_ESTIMATE = 2
+
+DRAFT_ORDER = ("P", "D", "C", "A")
+ROLE_NAMES = {
+    "P": "Portieri",
+    "D": "Difensori",
+    "C": "Centrocampisti",
+    "A": "Attaccanti",
+}
+
 # Modificatore portieri:
 # tra le tre squadre dei portieri presenti nella rosa, la squadra
 # che ha subito meno gol prende +1.0, la seconda 0.0, la terza -1.0.
@@ -580,6 +594,351 @@ def get_goalkeeper_modifier(
 ALL_GOALKEEPER_RANKING = get_goalkeeper_ranking_for_teams(set(GOALS_CONCEDED))
 
 
+def get_my_team_name_from_state(state: "AuctionState") -> str | None:
+    return resolve_my_team_name(list(state.team_players_map))
+
+
+def get_my_team_players_and_purchases(
+    state: "AuctionState",
+) -> tuple[str | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return None, [], []
+    return (
+        team_name,
+        state.team_players_map.get(team_name, []),
+        state.team_purchases_map.get(team_name, []),
+    )
+
+
+def get_my_team_draft_role(state: "AuctionState") -> str | None:
+    """Restituisce il prossimo ruolo della rosa RCD Escanyol secondo PDCA."""
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return "P"
+
+    counts = state.team_role_totals.get(team_name, {})
+    for role in DRAFT_ORDER:
+        if counts.get(role, 0) < ROLE_LIMITS[role]:
+            return role
+    return None
+
+
+def role_label(role: str) -> str:
+    return {
+        "P": "Portieri (P)",
+        "D": "Difensori (D)",
+        "C": "Centrocampisti (C)",
+        "A": "Attaccanti (A)",
+    }.get(role, "Tutti i ruoli")
+
+
+def auction_history_ratios(
+    rosters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Estrae i moltiplicatori prezzo pagato/listino dagli acquisti reali."""
+    history = []
+    for roster in rosters:
+        player = roster.get("players") or {}
+        list_price = float(player.get("list_price") or 0)
+        paid = float(roster.get("purchase_price") or 0)
+        if list_price <= 0 or paid <= 0:
+            continue
+        ratio = paid / list_price
+        # Evitiamo che un errore/outlier renda inutile la mediana.
+        ratio = max(0.5, min(8.0, ratio))
+        history.append({
+            "role": player.get("role"),
+            "list_price": list_price,
+            "paid": paid,
+            "ratio": ratio,
+            "name": player.get("name", ""),
+        })
+    return history
+
+
+def estimate_auction_price(
+    player: dict[str, Any],
+    rosters: list[dict[str, Any]],
+    budget: int | None = None,
+    slots_left_after_purchase: int = 0,
+) -> dict[str, Any]:
+    """Stima il prezzo d'asta usando i moltiplicatori osservati nel draft."""
+    history = auction_history_ratios(rosters)
+    role = player.get("role")
+    list_price = float(player.get("list_price") or 1)
+
+    role_history = [h for h in history if h["role"] == role]
+    similar_history = [
+        h for h in role_history
+        if 0.5 * list_price <= h["list_price"] <= 1.5 * list_price
+    ]
+
+    if len(similar_history) >= MIN_HISTORY_FOR_ROLE_ESTIMATE:
+        sample = similar_history
+        source = "precedenti dello stesso ruolo e fascia di listino"
+    elif len(role_history) >= MIN_HISTORY_FOR_ROLE_ESTIMATE:
+        sample = role_history
+        source = "precedenti dello stesso ruolo"
+    elif len(history) >= MIN_HISTORY_FOR_ROLE_ESTIMATE:
+        sample = history
+        source = "precedenti generali dell'asta"
+    else:
+        sample = []
+        source = "baseline: non ci sono ancora abbastanza precedenti"
+
+    if sample:
+        ratios = sorted(h["ratio"] for h in sample)
+        multiplier = float(pd.Series(ratios).median())
+    else:
+        multiplier = DEFAULT_AUCTION_MULTIPLIER
+
+    estimated = max(1, int(round(list_price * multiplier)))
+    feasible = True
+    budget_note = ""
+    max_bid = None
+
+    if budget is not None:
+        reserve = max(0, int(slots_left_after_purchase))
+        max_bid = max(1, int(budget) - reserve)
+        if estimated > max_bid:
+            feasible = False
+            budget_note = (
+                f"Budget massimo sostenibile: {max_bid} cr; "
+                f"la stima di mercato è {estimated} cr."
+            )
+
+    return {
+        "multiplier": round(multiplier, 2),
+        "estimated_price": estimated,
+        "source": source,
+        "sample_size": len(sample),
+        "feasible": feasible,
+        "budget_note": budget_note,
+        "max_bid": max_bid,
+    }
+
+
+def get_price_value_score(
+    rating: float,
+    estimated_price: int,
+    list_price: int,
+) -> float:
+    """Punteggio semplice per scegliere un giocatore consigliato."""
+    price = max(1, estimated_price)
+    list_value = max(1, list_price)
+    return round(
+        rating * 0.72
+        + (list_value / price) * 2.0
+        + max(0.0, 10.0 - price / 15.0) * 0.05,
+        3,
+    )
+
+
+def build_next_player_recommendations(
+    state: "AuctionState",
+    rosters: list[dict[str, Any]],
+    preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]],
+    role: str | None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Restituisce i migliori obiettivi acquistabili nel ruolo corrente."""
+    if not role:
+        return []
+
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return []
+
+    # Il consiglio è costruito sul budget RCD e sugli slot ancora disponibili.
+    # Cerchiamo il budget nello stato tramite le rose/teams in main e lo passiamo
+    # indirettamente in una variabile di sessione, se presente.
+    budget = st.session_state.get("my_team_budget")
+    role_count = state.team_role_totals.get(team_name, {}).get(role, 0)
+    total_count = state.team_total_bought.get(team_name, 0)
+    # Dopo questo acquisto bisogna comunque conservare almeno 1 credito
+    # per ogni slot della rosa che resterà da completare, indipendentemente dal ruolo.
+    slots_after = max(0, TOTAL_SLOTS_PER_TEAM - total_count - 1)
+
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+    candidates = [
+        player for player in load_players(role=role)
+        if player.get("id") not in state.bought_player_ids
+    ]
+
+    rows = []
+    for player in candidates:
+        details = calculate_player_rating_detailed(
+            player,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        estimate = estimate_auction_price(
+            player,
+            rosters,
+            budget=budget,
+            slots_left_after_purchase=slots_after,
+        )
+        score = get_price_value_score(
+            details["final_rating"],
+            estimate["estimated_price"],
+            int(player.get("list_price") or 1),
+        )
+        rows.append({
+            "player": player,
+            "details": details,
+            "estimate": estimate,
+            "score": score,
+        })
+
+    feasible_rows = [row for row in rows if row["estimate"]["feasible"]]
+    if feasible_rows:
+        rows = feasible_rows
+
+    rows.sort(
+        key=lambda row: (
+            row["score"],
+            row["details"]["final_rating"],
+            -(row["estimate"]["estimated_price"]),
+        ),
+        reverse=True,
+    )
+    return rows[:limit]
+
+
+def describe_goalkeeper_strategy(players: list[dict[str, Any]]) -> str:
+    keepers = [p for p in players if p.get("role") == "P"]
+    if not keepers:
+        return ""
+
+    clubs = [p.get("team_nfl") for p in keepers if p.get("team_nfl")]
+    unique_clubs = list(dict.fromkeys(clubs))
+    club_goal_data = [
+        (club, GOALS_CONCEDED.get(club))
+        for club in unique_clubs
+        if GOALS_CONCEDED.get(club) is not None
+    ]
+    avg_rating = sum(
+        calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking_from_players(keepers))["final_rating"]
+        for p in keepers
+    ) / len(keepers)
+
+    if len(unique_clubs) == 1:
+        diversification = f"Hai concentrato {len(keepers)}/{len(keepers)} portieri sulla stessa squadra: strategia molto correlata, quindi molto dipendente dalla sua difesa."
+    elif len(unique_clubs) == len(keepers):
+        diversification = f"Hai scelto {len(keepers)} portieri di {len(unique_clubs)} squadre diverse: massima diversificazione e meno dipendenza da una singola difesa."
+    else:
+        diversification = f"Hai {len(keepers)} portieri distribuiti su {len(unique_clubs)} squadre: diversificazione parziale, con una certa correlazione tra alcuni portieri."
+
+    if club_goal_data:
+        avg_ga = sum(value for _, value in club_goal_data) / len(club_goal_data)
+        league_values = list(GOALS_CONCEDED.values())
+        league_median = float(pd.Series(league_values).median()) if league_values else avg_ga
+        if avg_ga <= league_median - 4:
+            defense_judgement = "Le squadre scelte prendono pochi gol: strategia dei portieri molto buona."
+        elif avg_ga >= league_median + 4:
+            defense_judgement = "Le squadre scelte prendono molti gol: qui hai un rischio evidente da compensare."
+        else:
+            defense_judgement = "Le squadre scelte sono nella fascia media per gol subiti."
+    else:
+        defense_judgement = "Non ho abbastanza dati sui gol subiti per giudicare la difesa dei club."
+
+    quality = (
+        "Nel complesso: **ottima base**."
+        if avg_rating >= 8.0
+        else "Nel complesso: **buona base, ma non spenderei troppo altro sui portieri**."
+        if avg_rating >= 7.0
+        else "Nel complesso: **da migliorare**."
+    )
+    return f"{diversification} {defense_judgement} {quality}"
+
+
+def build_current_goalkeeper_ranking_from_players(
+    players: list[dict[str, Any]],
+) -> dict[str, int]:
+    clubs = {p.get("team_nfl") for p in players if p.get("team_nfl")}
+    return get_goalkeeper_ranking_for_teams(clubs)
+
+
+def build_draft_strategy_text(
+    state: "AuctionState",
+    rosters: list[dict[str, Any]],
+    teams_df: pd.DataFrame,
+    ratings: dict[str, float],
+) -> tuple[str, str, str]:
+    """Restituisce fase, valutazione e consiglio per il prossimo ruolo."""
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    if team_name is None or not players:
+        return "", "", ""
+
+    counts = state.team_role_totals.get(team_name, {})
+    current_role = get_my_team_draft_role(state)
+    completed = [role for role in DRAFT_ORDER if counts.get(role, 0) >= ROLE_LIMITS[role]]
+
+    sections = []
+    if counts.get("P", 0) > 0:
+        sections.append("**Portieri:** " + describe_goalkeeper_strategy(players))
+
+    if counts.get("D", 0) > 0:
+        defenders = [p for p in players if p.get("role") == "D"]
+        d_ratings = [calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state))["final_rating"] for p in defenders]
+        d_avg = sum(d_ratings) / len(d_ratings) if d_ratings else 0
+        if d_avg >= 8.0:
+            d_text = "Difesa molto forte: hai già una base di alto livello."
+        elif d_avg >= 7.0:
+            d_text = "Difesa competitiva, ma puoi ancora alzare il livello con 1-2 profili forti."
+        else:
+            d_text = "Difesa sotto il livello desiderabile: spingerei di più sui prossimi difensori."
+        sections.append(f"**Difesa:** rating medio {d_avg:.1f}. {d_text}")
+
+    if counts.get("C", 0) > 0:
+        midfielders = [p for p in players if p.get("role") == "C"]
+        c_details = [calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state)) for p in midfielders]
+        c_avg = sum(d["final_rating"] for d in c_details) / len(c_details) if c_details else 0
+        bonus_flags = sum(
+            bool(p.get("rigorista")) or bool((p.get("list_price") or 0) >= 25)
+            for p in midfielders
+        )
+        if bonus_flags < max(1, len(midfielders) // 3):
+            c_text = "Hai pochi profili ad alto potenziale bonus: qui conviene spingere."
+        elif c_avg >= 8.0:
+            c_text = "Centrocampo molto forte e con buon potenziale bonus."
+        else:
+            c_text = "Centrocampo discreto: cerca ancora qualità e giocatori con bonus."
+        sections.append(f"**Centrocampo:** rating medio {c_avg:.1f}. {c_text}")
+
+    if counts.get("A", 0) > 0:
+        attackers = [p for p in players if p.get("role") == "A"]
+        a_details = [calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state)) for p in attackers]
+        a_avg = sum(d["final_rating"] for d in a_details) / len(a_details) if a_details else 0
+        if a_avg >= 8.0:
+            a_text = "Attacco di livello alto: la fase offensiva è una forza della rosa."
+        elif a_avg >= 7.0:
+            a_text = "Attacco competitivo: manca ancora un profilo che faccia davvero la differenza."
+        else:
+            a_text = "Attacco debole: qui va concentrata una parte importante del budget."
+        sections.append(f"**Attacco:** rating medio {a_avg:.1f}. {a_text}")
+
+    if current_role:
+        next_name = ROLE_NAMES[current_role]
+        if current_role == "P":
+            advice = "Sei nella fase portieri: privilegia difese solide e cerca di non pagare troppo il terzo portiere."
+        elif current_role == "D":
+            advice = "Ora che i portieri sono sistemati, cerca difensori titolari con rating alto senza bruciare il budget."
+        elif current_role == "C":
+            advice = "Ora sposta il budget sul centrocampo: cerca rigoristi, titolari e profili con bonus."
+        else:
+            advice = "Sei sugli attaccanti: qui ha senso concentrare il budget sui rating più alti e sui profili da bonus."
+        phase = f"Fase draft: **{next_name}** ({counts.get(current_role, 0)}/{ROLE_LIMITS[current_role]})."
+    else:
+        phase = "🎉 Draft completato."
+        advice = "Ora valuta il rapporto qualità/prezzo complessivo e le eventuali correzioni di rosa."
+
+    return phase, " ".join(sections), advice
+
+
 # ============================================================
 # RATING
 # ============================================================
@@ -1005,6 +1364,7 @@ def render_top5(
     role: str,
     bought_player_ids: set[Any],
     preferred_players: set[Any],
+    state: AuctionState | None = None,
 ) -> None:
     st.sidebar.subheader("🔥 Top 5 Liberi (Ranking)")
 
@@ -1015,10 +1375,14 @@ def render_top5(
         if player["id"] not in bought_player_ids
     ]
 
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state) if state else ALL_GOALKEEPER_RANKING
+    custom_modifiers = load_custom_modifiers()
     available.sort(
         key=lambda player: calculate_player_rating(
             player,
             preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
         ),
         reverse=True,
     )
@@ -1029,7 +1393,12 @@ def render_top5(
             return
 
         for index, player in enumerate(available[:5], start=1):
-            rating = calculate_player_rating(player, preferred_players)
+            rating = calculate_player_rating(
+                player,
+                preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            )
             star = " ⭐" if player["id"] in preferred_players else ""
 
             st.markdown(
@@ -1301,6 +1670,7 @@ def render_manual_purchase(
     teams_df: pd.DataFrame,
     state: AuctionState,
     current_role: str,
+    rosters: list[dict[str, Any]],
 ) -> str:
     """Renderizza il pannello di acquisto manuale in una griglia allineata."""
     if is_auction_finished(state):
@@ -1324,10 +1694,13 @@ def render_manual_purchase(
     )
 
     with col1:
+        my_team_name = get_my_team_name_from_state(state)
+        my_counts = state.team_role_totals.get(my_team_name or "", {})
         role_options = {
             label: role
             for label, role in ROLE_LABELS.items()
-            if role == "ALL" or role not in calculate_completed_roles(state)
+            if role == "ALL"
+            or my_counts.get(role, 0) < ROLE_LIMITS[role]
         }
         role_labels = list(role_options)
         current_label = next(
@@ -1368,7 +1741,8 @@ def render_manual_purchase(
     player_options = {
         (
             f"{player['name']} [{player['role']}] "
-            f"({player['team_nfl']} - Listino: {player['list_price']})"
+            f"({player['team_nfl']} - {int(player.get('list_price') or 0)} cr. - "
+            f"{calculate_player_rating_detailed(player, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state))['final_rating']:.1f})"
         ): player
         for player in available_players
     }
@@ -1413,17 +1787,34 @@ def render_manual_purchase(
 
     # Valutazione immediata del giocatore selezionato.
     current_custom = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
     player_details = calculate_player_rating_detailed(
         selected_player,
         st.session_state.preferred_players,
         current_custom,
-        build_current_goalkeeper_ranking(state),
+        goalkeeper_ranking,
     )
-    st.caption(
-        f"⭐ Rating attuale: **{player_details['final_rating']:.1f}** · "
-        f"Club: **{selected_player.get('team_nfl', '—')}** · "
-        f"Listino: **{selected_player.get('list_price', 0)} cr**"
+    estimate = estimate_auction_price(
+        selected_player,
+        rosters,
+        budget=st.session_state.get("my_team_budget"),
+        slots_left_after_purchase=max(
+            0,
+            TOTAL_SLOTS_PER_TEAM
+            - state.team_total_bought.get(get_my_team_name_from_state(state) or "", 0)
+            - 1,
+        ),
     )
+
+    st.markdown(
+        f"💰 **Stima asta:** circa **{estimate['estimated_price']} cr** "
+        f"(**x{estimate['multiplier']:.2f}** del listino) · "
+        f"{estimate['source']} · campione {estimate['sample_size']} acquisti."
+    )
+    if estimate["budget_note"]:
+        st.caption(f"⚠️ {estimate['budget_note']}")
+    elif estimate.get("max_bid") is not None:
+        st.caption(f"Budget massimo sostenibile mantenendo 1 credito per ogni slot futuro: **{estimate['max_bid']} cr**.")
 
     if not st.button(
         "Conferma Acquisto",
@@ -1578,6 +1969,8 @@ def render_team_overview(
             if bought
             else 0.0
         )
+        total_listino = sum(int(player.get("list_price") or 0) for player in players)
+        auction_multiplier = round(spent / total_listino, 2) if total_listino > 0 else 0.0
 
         alerts = build_team_alerts(players, bought)
 
@@ -1610,6 +2003,7 @@ def render_team_overview(
                 "slots_left": slots_left,
                 "avg_price": avg_price,
                 "avg_spent": avg_spent,
+                "auction_multiplier": auction_multiplier,
                 "role_counts": state.team_role_totals[name],
                 "alerts": alerts,
                 "status": status,
@@ -1656,7 +2050,7 @@ def render_team_overview(
 
                 if bought < TOTAL_SLOTS_PER_TEAM:
                     delta = (
-                        f"{item['avg_spent']} cr/giocatore"
+                        f"{item['avg_spent']} cr/giocatore · x{item['auction_multiplier']:.2f} listino"
                         if bought
                         else "N/A"
                     )
@@ -1722,6 +2116,11 @@ def build_roster_dataframe(
                 "Club Serie A": player.get("team_nfl"),
                 "Listino": list_price,
                 "Pagato": roster.get("purchase_price", 0),
+                "Moltiplicatore Asta": round(
+                    float(roster.get("purchase_price", 0)) / float(list_price)
+                    if float(list_price) > 0 else 0.0,
+                    2,
+                ),
                 "Differenza": (
                     roster.get("purchase_price", 0) - list_price
                 ),
@@ -1868,6 +2267,10 @@ def render_rosters_tab(
         display_df,
         column_config={
             "_player_id": None,
+            "Moltiplicatore Asta": st.column_config.NumberColumn(
+                "Moltiplicatore Asta",
+                format="x%.2f",
+            ),
             "⭐ Preferito": st.column_config.CheckboxColumn(
                 "⭐ Preferito",
                 help="Dai un bonus di rating al giocatore.",
@@ -2278,27 +2681,25 @@ def render_my_team_evaluation(
     teams_df: pd.DataFrame,
     state: AuctionState,
     ratings: dict[str, float],
+    rosters: list[dict[str, Any]],
 ) -> None:
-    """Valuta la rosa RCD Escanyol costruita fino a questo momento."""
-    team_name = resolve_my_team_name(list(state.team_players_map))
-    if team_name is None:
-        st.warning(
-            "⚠️ La squadra **RCD Escanyol** non è presente tra le squadre configurate. "
-            "Controlla il campo `name` della tabella `teams` in Supabase."
-        )
+    """Valuta RCD Escanyol in modo progressivo seguendo il draft PDCA."""
+    team_name, players, purchases = get_my_team_players_and_purchases(state)
+    if team_name is None or not players:
+        # A rosa vuota non mostriamo valutazioni generiche: l'utente ha chiesto
+        # che la strategia inizi dal primo acquisto dei portieri.
         return
 
-    players = state.team_players_map[team_name]
-    purchases = state.team_purchases_map[team_name]
     team_row = teams_df[teams_df["name"] == team_name]
-
     bought = len(players)
     remaining = int(team_row.iloc[0]["remaining_budget"]) if not team_row.empty else 0
     initial = int(team_row.iloc[0]["initial_budget"]) if not team_row.empty else 0
     spent = sum(int(p.get("purchase_price") or 0) for p in purchases)
-    listino = sum(int(p.get("list_price") or 1) for p in players)
+    listino = sum(int((p.get("players") or {}).get("list_price") or 1) for p in purchases)
     slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
     rating = ratings.get(team_name, 0.0)
+    counts = state.team_role_totals.get(team_name, {})
+    current_role = get_my_team_draft_role(state)
 
     grades = calculate_auction_grades(
         teams_df.to_dict("records"),
@@ -2308,11 +2709,16 @@ def render_my_team_evaluation(
     grade_row = grades[grades["Squadra"] == team_name]
     auction_grade = float(grade_row.iloc[0]["Voto Asta"]) if not grade_row.empty else 0.0
 
-    ranking = build_current_goalkeeper_ranking(state)
-    alerts = build_team_alerts(players, bought)
-    role_counts = state.team_role_totals[team_name]
+    phase, assessment, advice = build_draft_strategy_text(
+        state,
+        rosters,
+        teams_df,
+        ratings,
+    )
 
-    st.markdown("### 🧠 Valutazione RCD Escanyol")
+    st.markdown("### 🧠 Valutazione progressiva RCD Escanyol")
+    if phase:
+        st.markdown(f"**{phase}**")
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("⭐ Rating Rosa", f"{rating:.1f}/10")
@@ -2322,50 +2728,87 @@ def render_my_team_evaluation(
     c5.metric("📊 Speso / Listino", f"{spent}/{listino} cr")
 
     role_text = " · ".join(
-        f"**{role}** {role_counts[role]}/{ROLE_LIMITS[role]}"
-        for role in ["P", "D", "C", "A"]
+        f"**{role}** {counts.get(role, 0)}/{ROLE_LIMITS[role]}"
+        for role in DRAFT_ORDER
     )
     st.markdown(role_text)
 
-    if slots_left:
-        st.caption(
-            f"Hai ancora **{slots_left} slot**. Budget medio teorico disponibile: "
-            f"**{remaining / slots_left:.1f} crediti/slot**."
+    if assessment:
+        st.info(assessment)
+    if advice:
+        st.success(f"💡 **Consiglio:** {advice}")
+
+    # Suggerimenti per il prossimo acquisto, limitati al ruolo attualmente draftato.
+    if current_role:
+        st.markdown(f"### 🎯 Prossimi obiettivi — {ROLE_NAMES[current_role]}")
+        history = auction_history_ratios(rosters)
+        if history:
+            median_multiplier = float(pd.Series([h["ratio"] for h in history]).median())
+            st.caption(
+                f"📈 Mercato osservato finora: moltiplicatore mediano **x{median_multiplier:.2f}** "
+                f"su {len(history)} acquisti con listino disponibile."
+            )
+        # Budget corrente salvato per la funzione di raccomandazione.
+        st.session_state["my_team_budget"] = remaining
+        recommendations = build_next_player_recommendations(
+            state,
+            rosters,
+            st.session_state.preferred_players,
+            load_custom_modifiers(),
+            current_role,
+            limit=5,
         )
-    else:
-        st.success("🎉 Rosa completa!")
+        if recommendations:
+            best = recommendations[0]
+            best_player = best["player"]
+            best_details = best["details"]
+            best_estimate = best["estimate"]
+            st.success(
+                f"🎯 **Priorità consigliata:** {best_player.get('name', '')} "
+                f"— Rating **{best_details['final_rating']:.1f}**, "
+                f"listino **{int(best_player.get('list_price') or 0)} cr**, "
+                f"stima asta **{best_estimate['estimated_price']} cr** "
+                f"(x{best_estimate['multiplier']:.2f})."
+            )
+            rec_rows = []
+            for index, row in enumerate(recommendations, start=1):
+                player = row["player"]
+                details = row["details"]
+                estimate = row["estimate"]
+                rec_rows.append({
+                    "#": index,
+                    "Giocatore": player.get("name", ""),
+                    "Rating": details["final_rating"],
+                    "Listino": int(player.get("list_price") or 0),
+                    "Moltiplicatore": f"x{estimate['multiplier']:.2f}",
+                    "Stima asta": estimate["estimated_price"],
+                    "Club": player.get("team_nfl", "—"),
+                })
+            st.dataframe(
+                pd.DataFrame(rec_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Rating": st.column_config.NumberColumn(format="%.1f"),
+                    "Listino": st.column_config.NumberColumn(format="%d cr"),
+                    "Stima asta": st.column_config.NumberColumn(format="%d cr"),
+                },
+            )
+        else:
+            st.caption("Non ci sono obiettivi compatibili disponibili per questo ruolo.")
 
-    if not players:
-        st.info("Non hai ancora acquistato giocatori.")
-        return
-
-    if rating >= 8:
-        st.success("🔥 Rosa molto competitiva: la base costruita finora è da Scudetto.")
-    elif rating >= 6.5:
-        st.info("👍 Rosa competitiva, con margine per migliorare i reparti ancora incompleti.")
-    else:
-        st.warning("⚠️ Rosa ancora da rinforzare: concentrati sui reparti più scoperti.")
-
-    if alerts:
-        with st.expander(f"🚨 Alert strategici RCD Escanyol ({len(alerts)})", expanded=True):
-            for alert in alerts:
-                st.markdown(alert["text"], help=alert["help"])
-    else:
-        st.success("✅ Nessun alert strategico rilevante al momento.")
-
-    if ranking:
+    # Classifica portieri solo quando almeno un portiere è stato acquistato.
+    ranking = build_current_goalkeeper_ranking(state)
+    if counts.get("P", 0) > 0 and ranking:
         goalkeeper_rows = []
         for code, position in sorted(ranking.items(), key=lambda item: item[1]):
-            modifier = GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0)
-            goalkeeper_rows.append(
-                {
-                    "Pos.": position,
-                    "Squadra": code,
-                    "Gol subiti": GOALS_CONCEDED.get(code, 0),
-                    "Mod. P": modifier,
-                }
-            )
-        with st.expander("🧤 Classifica portieri usata dal rating"):
+            goalkeeper_rows.append({
+                "Pos.": position,
+                "Squadra": code,
+                "Gol subiti": GOALS_CONCEDED.get(code, 0),
+                "Mod. P": GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0),
+            })
+        with st.expander("🧤 Strategia portieri / difese scelte"):
             st.dataframe(
                 pd.DataFrame(goalkeeper_rows),
                 use_container_width=True,
@@ -2428,6 +2871,10 @@ def render_my_roster(
                 "Squadra": player.get("team_nfl", "—"),
                 "Crediti Spesi": int(purchase.get("purchase_price") or 0),
                 "Crediti Dichiarati": int(player.get("list_price") or 0),
+                "Moltiplicatore Asta": round(
+                    int(purchase.get("purchase_price") or 0) / max(1, int(player.get("list_price") or 0)),
+                    2,
+                ),
                 "Bonus/Malus": bonus_malus,
                 "_sort_rating": details["final_rating"],
             }
@@ -2459,6 +2906,7 @@ def render_my_roster(
                 "Rating": st.column_config.NumberColumn(format="%.1f"),
                 "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
                 "Crediti Dichiarati": st.column_config.NumberColumn(format="%d cr"),
+                "Moltiplicatore Asta": st.column_config.NumberColumn(format="x%.2f"),
             },
         )
 
@@ -2530,16 +2978,37 @@ def main() -> None:
             current_role = "ALL"
 
         # Il pannello contiene tutti e 5 i dropdown/controlli sulla stessa riga.
+        my_team_name = get_my_team_name_from_state(state)
+        my_team_row = teams_df[teams_df["name"] == my_team_name] if my_team_name else pd.DataFrame()
+        st.session_state["my_team_budget"] = int(my_team_row.iloc[0]["remaining_budget"]) if not my_team_row.empty else 0
+
+        draft_role = get_my_team_draft_role(state)
+        if draft_role:
+            draft_label = role_label(draft_role)
+            valid_role_labels = [
+                label for label, role in ROLE_LABELS.items()
+                if role == "ALL" or role == draft_role or (
+                    role in DRAFT_ORDER and state.team_role_totals.get(my_team_name or "", {}).get(role, 0) < ROLE_LIMITS[role]
+                )
+            ]
+            if st.session_state.get("main_role_select") not in valid_role_labels:
+                st.session_state["main_role_select"] = draft_label
+            current_role = draft_role
+        else:
+            current_role = "ALL"
+
         current_role = render_manual_purchase(
             teams_df,
             state,
             current_role,
+            rosters,
         )
 
         render_top5(
             current_role,
             state.bought_player_ids,
             preferred_players,
+            state,
         )
 
         render_team_analysis(
@@ -2572,6 +3041,7 @@ def main() -> None:
             teams_df,
             state,
             ratings,
+            rosters,
         )
 
         render_my_roster(state)
