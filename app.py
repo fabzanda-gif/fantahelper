@@ -122,7 +122,7 @@ CUSTOM_MODIFIERS = {
 
 
 SOUND_URLS = {
-    "massive": "https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/johncenaprankcall_cutted.mp3",
+    "massive": "https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3",
     "great": "https://www.myinstants.com/media/sounds/ta-da.mp3",
     "normal": "https://www.myinstants.com/media/sounds/plop.mp3",
 }
@@ -376,7 +376,7 @@ def queue_purchase_banner(
         title = "🔥 MASSIVE COLPO!"
         message = (
             f"Hai preso **{player_name}** (Rating {rating:.1f})! "
-            "! 🎺🎺🎺"
+            "AND HIS NAME IS JOHN CENA! 🎺🎺🎺"
         )
     elif rating >= 7.5:
         level = "great"
@@ -447,7 +447,6 @@ def render_pending_purchase_banner() -> None:
 
     if level == "massive":
         st.balloons()
-        st.snow()
         play_sound(SOUND_URLS["massive"])
     elif level == "great":
         st.balloons()
@@ -719,20 +718,17 @@ def estimate_auction_price(
     }
 
 
-def get_price_value_score(
-    rating: float,
-    estimated_price: int,
-    list_price: int,
-) -> float:
-    """Punteggio semplice per scegliere un giocatore consigliato."""
-    price = max(1, estimated_price)
-    list_value = max(1, list_price)
-    return round(
-        rating * 0.72
-        + (list_value / price) * 2.0
-        + max(0.0, 10.0 - price / 15.0) * 0.05,
-        3,
-    )
+def get_price_value_score(rating: float, estimated_price: int, list_price: int) -> float:
+    """Punteggio qualità/prezzo: privilegia rating alto a costo d'asta contenuto."""
+    price=max(1.0,float(estimated_price)); lp=max(1.0,float(list_price)); r=float(rating)
+    rating_per_100=(r/price)*100.0
+    list_efficiency=lp/price
+    quality_bonus=max(0.0,r-7.0)
+    return round(rating_per_100*0.68 + list_efficiency*4.0 + quality_bonus*0.90,3)
+
+def calculate_value_per_credit(rating: float, estimated_price: int) -> float:
+    """Rating ottenibile ogni 10 crediti stimati."""
+    return round((float(rating)/max(1,estimated_price))*10.0,3)
 
 
 def build_next_player_recommendations(
@@ -781,16 +777,14 @@ def build_next_player_recommendations(
             budget=budget,
             slots_left_after_purchase=slots_after,
         )
-        score = get_price_value_score(
-            details["final_rating"],
-            estimate["estimated_price"],
-            int(player.get("list_price") or 1),
-        )
+        list_price = int(player.get("list_price") or 1)
+        score = get_price_value_score(details["final_rating"], estimate["estimated_price"], list_price)
         rows.append({
             "player": player,
             "details": details,
             "estimate": estimate,
             "score": score,
+            "rating_per_10_cr": calculate_value_per_credit(details["final_rating"], estimate["estimated_price"]),
         })
 
     feasible_rows = [row for row in rows if row["estimate"]["feasible"]]
@@ -809,50 +803,32 @@ def build_next_player_recommendations(
 
 
 def describe_goalkeeper_strategy(players: list[dict[str, Any]]) -> str:
-    keepers = [p for p in players if p.get("role") == "P"]
-    if not keepers:
-        return ""
-
-    clubs = [p.get("team_nfl") for p in keepers if p.get("team_nfl")]
-    unique_clubs = list(dict.fromkeys(clubs))
-    club_goal_data = [
-        (club, GOALS_CONCEDED.get(club))
-        for club in unique_clubs
-        if GOALS_CONCEDED.get(club) is not None
-    ]
-    avg_rating = sum(
-        calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking_from_players(keepers))["final_rating"]
-        for p in keepers
-    ) / len(keepers)
-
-    if len(unique_clubs) == 1:
-        diversification = f"Hai concentrato {len(keepers)}/{len(keepers)} portieri sulla stessa squadra: strategia molto correlata, quindi molto dipendente dalla sua difesa."
-    elif len(unique_clubs) == len(keepers):
-        diversification = f"Hai scelto {len(keepers)} portieri di {len(unique_clubs)} squadre diverse: massima diversificazione e meno dipendenza da una singola difesa."
+    """Valuta la strategia P senza chiedere di correggere un reparto già chiuso."""
+    keepers=[p for p in players if p.get("role")=="P"]
+    if not keepers: return ""
+    clubs=[p.get("team_nfl") for p in keepers if p.get("team_nfl")]
+    unique_clubs=list(dict.fromkeys(clubs))
+    club_goal_data=[(c,GOALS_CONCEDED.get(c)) for c in unique_clubs if GOALS_CONCEDED.get(c) is not None]
+    ranking=build_current_goalkeeper_ranking_from_players(keepers)
+    details=[calculate_player_rating_detailed(p,st.session_state.preferred_players,load_custom_modifiers(),ranking) for p in keepers]
+    avg_rating=sum(d["final_rating"] for d in details)/len(details)
+    if len(unique_clubs)==1:
+        diversification=f"Hai scelto {len(keepers)}/{len(keepers)} portieri della stessa squadra ({unique_clubs[0]}): strategia molto concentrata, ma non è un difetto in sé se la difesa è affidabile."
+    elif len(unique_clubs)==len(keepers):
+        diversification=f"Hai scelto {len(keepers)} portieri di {len(unique_clubs)} squadre diverse: ottima diversificazione e minore dipendenza da una singola difesa."
     else:
-        diversification = f"Hai {len(keepers)} portieri distribuiti su {len(unique_clubs)} squadre: diversificazione parziale, con una certa correlazione tra alcuni portieri."
-
+        diversification=f"Hai {len(keepers)} portieri distribuiti su {len(unique_clubs)} squadre: diversificazione parziale."
     if club_goal_data:
-        avg_ga = sum(value for _, value in club_goal_data) / len(club_goal_data)
-        league_values = list(GOALS_CONCEDED.values())
-        league_median = float(pd.Series(league_values).median()) if league_values else avg_ga
-        if avg_ga <= league_median - 4:
-            defense_judgement = "Le squadre scelte prendono pochi gol: strategia dei portieri molto buona."
-        elif avg_ga >= league_median + 4:
-            defense_judgement = "Le squadre scelte prendono molti gol: qui hai un rischio evidente da compensare."
-        else:
-            defense_judgement = "Le squadre scelte sono nella fascia media per gol subiti."
-    else:
-        defense_judgement = "Non ho abbastanza dati sui gol subiti per giudicare la difesa dei club."
-
-    quality = (
-        "Nel complesso: **ottima base**."
-        if avg_rating >= 8.0
-        else "Nel complesso: **buona base, ma non spenderei troppo altro sui portieri**."
-        if avg_rating >= 7.0
-        else "Nel complesso: **da migliorare**."
-    )
-    return f"{diversification} {defense_judgement} {quality}"
+        avg_ga=sum(v for _,v in club_goal_data)/len(club_goal_data)
+        vals=list(GOALS_CONCEDED.values()); median=float(pd.Series(vals).median()) if vals else avg_ga
+        if avg_ga <= median-4: defense="Le squadre scelte prendono pochi gol: la scelta è particolarmente solida."
+        elif avg_ga >= median+4: defense="Le squadre scelte prendono molti gol: hai accettato un rischio che va compensato soprattutto nei difensori."
+        else: defense="Le squadre scelte sono nella fascia media per gol subiti."
+    else: defense="Non ho abbastanza dati sui gol subiti per giudicare le difese."
+    quality=(f"Rating medio portieri {avg_rating:.1f}: reparto di alto livello." if avg_rating>=8 else f"Rating medio portieri {avg_rating:.1f}: reparto competitivo." if avg_rating>=7 else f"Rating medio portieri {avg_rating:.1f}: reparto sotto il livello ideale.")
+    if len(keepers)>=ROLE_LIMITS["P"]:
+        return f"{diversification} {defense} {quality} Portieri completati: non c'è nulla da correggere qui. Ora sposterei attenzione e budget sui difensori."
+    return f"{diversification} {defense} {quality} Finché il reparto non è completo, privilegia il valore per credito e non il solo rating."
 
 
 def build_current_goalkeeper_ranking_from_players(
@@ -924,13 +900,13 @@ def build_draft_strategy_text(
     if current_role:
         next_name = ROLE_NAMES[current_role]
         if current_role == "P":
-            advice = "Sei nella fase portieri: privilegia difese solide e cerca di non pagare troppo il terzo portiere."
+            advice = "Stai costruendo i portieri: privilegia il rapporto rating/costo e, a parità di valore, preferisci squadre che concedono pochi gol."
         elif current_role == "D":
-            advice = "Ora che i portieri sono sistemati, cerca difensori titolari con rating alto senza bruciare il budget."
+            advice = "I portieri sono chiusi: ora cerca difensori con rating alto ma soprattutto con buon rapporto rating/costo. Se i P sono concentrati su una squadra, una difesa solida di quella squadra aumenta la coerenza della strategia."
         elif current_role == "C":
-            advice = "Ora sposta il budget sul centrocampo: cerca rigoristi, titolari e profili con bonus."
+            advice = "Portieri e difensori sono acquisiti: cerca centrocampisti ad alto valore per credito, con titolarità, rigoristi e potenziale bonus. Non inseguire automaticamente il rating massimo."
         else:
-            advice = "Sei sugli attaccanti: qui ha senso concentrare il budget sui rating più alti e sui profili da bonus."
+            advice = "Sugli attaccanti puoi concentrare più budget sui profili forti, ma continua a confrontare rating, stima d'asta e crediti residui: un 9.0 molto costoso non è sempre migliore di un 8.6 a metà prezzo."
         phase = f"Fase draft: **{next_name}** ({counts.get(current_role, 0)}/{ROLE_LIMITS[current_role]})."
     else:
         phase = "🎉 Draft completato."
@@ -1806,11 +1782,23 @@ def render_manual_purchase(
         ),
     )
 
+    selected_value_score = get_price_value_score(
+        player_details["final_rating"], estimate["estimated_price"], int(selected_player.get("list_price") or 1)
+    )
+    selected_rating_per_10 = calculate_value_per_credit(
+        player_details["final_rating"], estimate["estimated_price"]
+    )
     st.markdown(
         f"💰 **Stima asta:** circa **{estimate['estimated_price']} cr** "
         f"(**x{estimate['multiplier']:.2f}** del listino) · "
         f"{estimate['source']} · campione {estimate['sample_size']} acquisti."
     )
+    st.caption(
+        f"📊 **Valore stimato:** {selected_rating_per_10:.2f} rating ogni 10 cr · "
+        f"Value Score **{selected_value_score:.2f}** · "
+        "la priorità premia rating alto + costo stimato contenuto."
+    )
+
     if estimate["budget_note"]:
         st.caption(f"⚠️ {estimate['budget_note']}")
     elif estimate.get("max_bid") is not None:
@@ -2764,11 +2752,12 @@ def render_my_team_evaluation(
             best_details = best["details"]
             best_estimate = best["estimate"]
             st.success(
-                f"🎯 **Priorità consigliata:** {best_player.get('name', '')} "
+                f"🎯 **Miglior rapporto qualità/prezzo:** {best_player.get('name', '')} "
                 f"— Rating **{best_details['final_rating']:.1f}**, "
                 f"listino **{int(best_player.get('list_price') or 0)} cr**, "
                 f"stima asta **{best_estimate['estimated_price']} cr** "
-                f"(x{best_estimate['multiplier']:.2f})."
+                f"(x{best_estimate['multiplier']:.2f}) · "
+                f"**{best.get('rating_per_10_cr', 0.0):.2f} rating / 10 cr**."
             )
             rec_rows = []
             for index, row in enumerate(recommendations, start=1):
@@ -2782,6 +2771,8 @@ def render_my_team_evaluation(
                     "Listino": int(player.get("list_price") or 0),
                     "Moltiplicatore": f"x{estimate['multiplier']:.2f}",
                     "Stima asta": estimate["estimated_price"],
+                    "Rating / 10 cr": row.get("rating_per_10_cr", 0.0),
+                    "Valore Score": row.get("score", 0.0),
                     "Club": player.get("team_nfl", "—"),
                 })
             st.dataframe(
@@ -2792,6 +2783,8 @@ def render_my_team_evaluation(
                     "Rating": st.column_config.NumberColumn(format="%.1f"),
                     "Listino": st.column_config.NumberColumn(format="%d cr"),
                     "Stima asta": st.column_config.NumberColumn(format="%d cr"),
+                    "Rating / 10 cr": st.column_config.NumberColumn(format="%.2f"),
+                    "Valore Score": st.column_config.NumberColumn(format="%.2f"),
                 },
             )
         else:
