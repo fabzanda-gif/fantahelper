@@ -58,6 +58,16 @@ WEAK_PLAYER_PENALTY = 0.10
 TEAM_RATING_MIN = 4.0
 TEAM_RATING_MAX = 9.5
 
+
+# Calibrazione finale dei voti squadra.
+# Obiettivo empirico richiesto:
+# 4.5 -> ~5.5
+# 6.7 -> ~8.0
+TEAM_GRADE_CALIBRATION_X1 = 4.5
+TEAM_GRADE_CALIBRATION_Y1 = 5.5
+TEAM_GRADE_CALIBRATION_X2 = 6.7
+TEAM_GRADE_CALIBRATION_Y2 = 8.0
+
 # Stima iniziale usata solo quando non esistono ancora abbastanza
 # precedenti di asta nel database. Appena ci sono acquisti reali,
 # la stima viene sostituita dalla mediana dei moltiplicatori osservati.
@@ -2317,6 +2327,27 @@ def calculate_market_efficiency(
     return round(economic_bonus, 2), round(team_multiplier, 2)
 
 
+def calibrate_team_grade(raw_grade: float) -> float:
+    """
+    Rimappa linearmente il voto finale per allargare la scala utile.
+
+    4.5 -> 5.5
+    6.7 -> 8.0
+
+    La stessa pendenza viene mantenuta anche fuori dall'intervallo,
+    con clamp finale 4.0-9.8.
+    """
+    x1 = TEAM_GRADE_CALIBRATION_X1
+    y1 = TEAM_GRADE_CALIBRATION_Y1
+    x2 = TEAM_GRADE_CALIBRATION_X2
+    y2 = TEAM_GRADE_CALIBRATION_Y2
+
+    slope = (y2 - y1) / (x2 - x1)
+    calibrated = y1 + (raw_grade - x1) * slope
+
+    return round(max(4.0, min(9.8, calibrated)), 1)
+
+
 def calculate_auction_grades(
     teams: list[dict[str, Any]],
     state: AuctionState,
@@ -2386,9 +2417,9 @@ def calculate_auction_grades(
             - risk_penalty
         )
 
-        # Piccola espansione finale per rendere più leggibile la classifica.
-        grade = 6.4 + (grade - 6.4) * 1.12
-        grade = round(max(3.5, min(9.7, grade)), 1)
+        # Calibrazione finale più leggibile:
+        # circa 4.5 -> 5.5 e 6.7 -> 8.0.
+        grade = calibrate_team_grade(grade)
 
         grades.append(
             {
@@ -2480,7 +2511,8 @@ def render_rosters_tab(
         "Il voto dell'asta privilegia la **qualità reale della rosa**: "
         "i giocatori TOP pesano più degli altri. La gestione economica viene "
         "valutata rispetto ai prezzi realmente osservati nell'asta, mentre "
-        "le criticità strategiche applicano penalità moderate."
+        "le criticità strategiche applicano penalità moderate. La scala finale "
+        "è calibrata per rendere più leggibili le differenze tra rose forti e deboli."
     )
 
     grades_df = calculate_auction_grades(
