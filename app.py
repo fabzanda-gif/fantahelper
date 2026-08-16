@@ -122,7 +122,7 @@ CUSTOM_MODIFIERS = {
 
 
 SOUND_URLS = {
-    "massive": "https://www.myinstants.com/media/sounds/john-cena-sound-effect.mp3",
+    "massive": "https://www.myinstants.com/media/sounds/john-cena-trumpet.mp3",
     "great": "https://www.myinstants.com/media/sounds/ta-da.mp3",
     "normal": "https://www.myinstants.com/media/sounds/plop.mp3",
 }
