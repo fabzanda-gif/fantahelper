@@ -38,6 +38,26 @@ ROLE_RATING_MULTIPLIERS = {
     "A": 1.0,
 }
 
+
+# Valutazione rosa più "netta".
+# I giocatori TOP devono incidere più delle riserve/terze fasce.
+TEAM_PLAYER_WEIGHTS = {
+    "TOP": 2.40,          # >= 9.0
+    "PRIMA": 1.70,        # 8.0 - 8.9
+    "SECONDA": 1.20,      # 7.0 - 7.9
+    "TERZA": 0.85,        # 6.5 - 6.9
+    "SOTTO_SOGLIA": 0.55, # < 6.5
+}
+
+# Amplifica le differenze fra rose senza alterare i rating individuali.
+TEAM_RATING_CENTER = 6.70
+TEAM_RATING_SPREAD = 1.35
+TOP_PLAYER_BONUS = 0.16
+ELITE_PLAYER_BONUS = 0.08
+WEAK_PLAYER_PENALTY = 0.10
+TEAM_RATING_MIN = 4.0
+TEAM_RATING_MAX = 9.5
+
 # Stima iniziale usata solo quando non esistono ancora abbastanza
 # precedenti di asta nel database. Appena ci sono acquisti reali,
 # la stima viene sostituita dalla mediana dei moltiplicatori osservati.
@@ -1161,6 +1181,80 @@ def build_auction_state(
     )
 
 
+def player_team_weight(rating: float) -> float:
+    """Peso del giocatore nella valutazione della rosa."""
+    if rating >= 9.0:
+        return TEAM_PLAYER_WEIGHTS["TOP"]
+    if rating >= 8.0:
+        return TEAM_PLAYER_WEIGHTS["PRIMA"]
+    if rating >= 7.0:
+        return TEAM_PLAYER_WEIGHTS["SECONDA"]
+    if rating >= 6.5:
+        return TEAM_PLAYER_WEIGHTS["TERZA"]
+    return TEAM_PLAYER_WEIGHTS["SOTTO_SOGLIA"]
+
+
+def calculate_single_team_rating(
+    players: list[dict[str, Any]],
+    preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> float:
+    """
+    Rating rosa non lineare.
+
+    - I TOP pesano molto più degli altri.
+    - I giocatori sotto 6.5 incidono negativamente.
+    - Le differenze attorno alla fascia media vengono amplificate.
+    """
+    if not players:
+        return 0.0
+
+    player_ratings = [
+        calculate_player_rating(
+            player,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        for player in players
+    ]
+
+    weights = [player_team_weight(rating) for rating in player_ratings]
+    weighted_avg = sum(
+        rating * weight
+        for rating, weight in zip(player_ratings, weights)
+    ) / max(0.001, sum(weights))
+
+    top_count = sum(rating >= 9.0 for rating in player_ratings)
+    elite_count = sum(8.5 <= rating < 9.0 for rating in player_ratings)
+    weak_count = sum(rating < 6.5 for rating in player_ratings)
+
+    # Amplificazione attorno al centro: due rose simili non finiscono
+    # automaticamente tutte nello stesso intervallo 5.5-5.9.
+    amplified = (
+        TEAM_RATING_CENTER
+        + (weighted_avg - TEAM_RATING_CENTER) * TEAM_RATING_SPREAD
+    )
+
+    # La presenza di veri TOP cambia il potenziale di una rosa.
+    star_bonus = min(
+        1.10,
+        top_count * TOP_PLAYER_BONUS
+        + elite_count * ELITE_PLAYER_BONUS,
+    )
+
+    # Profili deboli continuano a pesare, ma meno dei TOP in positivo.
+    weak_penalty = min(1.20, weak_count * WEAK_PLAYER_PENALTY)
+
+    final = amplified + star_bonus - weak_penalty
+
+    return round(
+        max(TEAM_RATING_MIN, min(TEAM_RATING_MAX, final)),
+        1,
+    )
+
+
 def calculate_team_ratings(
     state: AuctionState,
     preferred_players: set[Any],
@@ -1168,19 +1262,11 @@ def calculate_team_ratings(
     goalkeeper_ranking: dict[str, int] | None = None,
 ) -> dict[str, float]:
     return {
-        team_name: (
-            sum(
-                calculate_player_rating(
-                    player,
-                    preferred_players,
-                    custom_modifiers,
-                    goalkeeper_ranking,
-                )
-                for player in players
-            )
-            / len(players)
-            if players
-            else 0.0
+        team_name: calculate_single_team_rating(
+            players,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
         )
         for team_name, players in state.team_players_map.items()
     }
@@ -2182,12 +2268,67 @@ def build_roster_dataframe(
     return pd.DataFrame(rows)
 
 
+def calculate_market_efficiency(
+    purchases: list[dict[str, Any]],
+    all_rosters: list[dict[str, Any]],
+) -> tuple[float, float]:
+    """
+    Confronta quanto una squadra ha pagato rispetto al mercato reale dell'asta.
+
+    Ritorna:
+    - bonus/malus economico [-1.0, +1.0]
+    - moltiplicatore medio pagato dalla squadra
+
+    Il confronto usa il moltiplicatore mediano osservato nell'asta, non
+    'listino - prezzo pagato', che in un fanta a 12 penalizzerebbe quasi tutti.
+    """
+    market_ratios = []
+    for roster in all_rosters:
+        player = roster.get("players") or {}
+        list_price = float(player.get("list_price") or 0)
+        paid = float(roster.get("purchase_price") or 0)
+        if list_price > 0 and paid > 0:
+            market_ratios.append(paid / list_price)
+
+    market_multiplier = (
+        float(pd.Series(market_ratios).median())
+        if market_ratios
+        else DEFAULT_AUCTION_MULTIPLIER
+    )
+
+    team_ratios = []
+    for purchase in purchases:
+        player = purchase.get("players") or {}
+        list_price = float(player.get("list_price") or 0)
+        paid = float(purchase.get("purchase_price") or 0)
+        if list_price > 0 and paid > 0:
+            team_ratios.append(paid / list_price)
+
+    if not team_ratios:
+        return 0.0, 0.0
+
+    team_multiplier = sum(team_ratios) / len(team_ratios)
+
+    # Se paghi meno del mercato hai bonus; se paghi più del mercato hai malus.
+    relative = market_multiplier / max(team_multiplier, 0.01)
+    economic_bonus = (relative - 1.0) * 2.5
+    economic_bonus = max(-1.0, min(1.0, economic_bonus))
+
+    return round(economic_bonus, 2), round(team_multiplier, 2)
+
+
 def calculate_auction_grades(
     teams: list[dict[str, Any]],
     state: AuctionState,
     ratings: dict[str, float],
 ) -> pd.DataFrame:
     grades = []
+
+    all_rosters = [
+        purchase
+        for purchases in state.team_purchases_map.values()
+        for purchase in purchases
+    ]
 
     for team in teams:
         name = team["name"]
@@ -2199,48 +2340,64 @@ def calculate_auction_grades(
                 {
                     "Squadra": name,
                     "Voto Asta": 0.0,
-                    "Rating Medio": 0.0,
-                    "Bilancio Crediti (Listino - Speso)": 0,
+                    "Rating Rosa": 0.0,
+                    "TOP (>=9)": 0,
+                    "Moltiplicatore Pagato": 0.0,
+                    "Efficienza Mercato": 0.0,
                     "Criticità Rilevate": 0,
                 }
             )
             continue
 
-        total_listino = sum(
-            player.get("list_price") or 1
+        player_scores = [
+            calculate_player_rating(
+                player,
+                st.session_state.preferred_players,
+                load_custom_modifiers(),
+                build_current_goalkeeper_ranking(state),
+            )
             for player in players
-        )
-        total_speso = sum(
-            purchase.get("purchase_price", 0)
-            for purchase in purchases
-        )
+        ]
 
-        savings = total_listino - total_speso
-        savings_bonus = max(
-            -2.0,
-            min(2.0, savings / 15.0),
-        )
+        top_count = sum(score >= 9.0 for score in player_scores)
 
-        alerts = build_team_alerts(
-            players,
-            len(players),
-        )
+        alerts = build_team_alerts(players, len(players))
         criticality = len(alerts)
 
-        grade = (
-            ratings[name] * 0.7
-            + 5.0 * 0.3
-            + savings_bonus
-            - criticality * 0.4
+        economic_bonus, team_multiplier = calculate_market_efficiency(
+            purchases,
+            all_rosters,
         )
-        grade = round(max(0.0, min(10.0, grade)), 1)
+
+        # Il cuore del voto è la qualità della rosa.
+        # L'economia può spostare il voto, ma non schiacciare tutte le squadre.
+        quality = ratings[name]
+
+        # Un numero elevato di TOP ha un ulteriore piccolo premio nel voto asta.
+        top_bonus = min(0.50, top_count * 0.07)
+
+        # Criticità strategiche restano rilevanti, ma non dominanti.
+        risk_penalty = min(0.80, criticality * 0.18)
+
+        grade = (
+            quality * 0.88
+            + economic_bonus * 0.65
+            + top_bonus
+            - risk_penalty
+        )
+
+        # Piccola espansione finale per rendere più leggibile la classifica.
+        grade = 6.4 + (grade - 6.4) * 1.12
+        grade = round(max(3.5, min(9.7, grade)), 1)
 
         grades.append(
             {
                 "Squadra": name,
                 "Voto Asta": grade,
-                "Rating Medio": round(ratings[name], 1),
-                "Bilancio Affari (Listino - Speso)": savings,
+                "Rating Rosa": round(quality, 1),
+                "TOP (>=9)": top_count,
+                "Moltiplicatore Pagato": team_multiplier,
+                "Efficienza Mercato": economic_bonus,
                 "Criticità Rilevate": criticality,
             }
         )
@@ -2320,9 +2477,10 @@ def render_rosters_tab(
     st.divider()
     st.subheader("🏆 Classifica e Voto Asta per Squadra")
     st.markdown(
-        "Il voto dell'asta unisce: **1)** Rating medio della rosa, "
-        "**2)** Gestione economica, **3)** Penalizzazione per criticità "
-        "e rischi rosa."
+        "Il voto dell'asta privilegia la **qualità reale della rosa**: "
+        "i giocatori TOP pesano più degli altri. La gestione economica viene "
+        "valutata rispetto ai prezzi realmente osservati nell'asta, mentre "
+        "le criticità strategiche applicano penalità moderate."
     )
 
     grades_df = calculate_auction_grades(
