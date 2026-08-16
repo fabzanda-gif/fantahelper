@@ -28,6 +28,16 @@ ROLE_LIMITS: dict[str, int] = {
 }
 TOTAL_SLOTS_PER_TEAM = sum(ROLE_LIMITS.values())
 
+# Calibrazione finale per ruolo.
+# Derivata dai target richiesti:
+# P: 6.7 -> 9.0, D: 8.7 -> 9.2, C: 8.2 -> 8.5, A invariato.
+ROLE_RATING_MULTIPLIERS = {
+    "P": 9.0 / 6.7,
+    "D": 9.2 / 8.7,
+    "C": 8.5 / 8.2,
+    "A": 1.0,
+}
+
 # Stima iniziale usata solo quando non esistono ancora abbastanza
 # precedenti di asta nel database. Appena ci sono acquisti reali,
 # la stima viene sostituita dalla mediana dei moltiplicatori osservati.
@@ -851,7 +861,7 @@ def describe_goalkeeper_strategy(players: list[dict[str, Any]]) -> str:
     else: defense="Non ho abbastanza dati sui gol subiti per giudicare le difese."
     quality=(f"Rating medio portieri {avg_rating:.1f}: reparto di alto livello." if avg_rating>=8 else f"Rating medio portieri {avg_rating:.1f}: reparto competitivo." if avg_rating>=7 else f"Rating medio portieri {avg_rating:.1f}: reparto sotto il livello ideale.")
     if len(keepers)>=ROLE_LIMITS["P"]:
-        return f"{diversification} {defense} {quality} Portieri completati!"
+        return f"{diversification} {defense} {quality} Portieri completati: non c'è nulla da correggere qui. Ora sposterei attenzione e budget sui difensori."
     return f"{diversification} {defense} {quality} Finché il reparto non è completo, privilegia il valore per credito e non il solo rating."
 
 
@@ -1022,21 +1032,25 @@ def calculate_player_rating_detailed(
         else 0.0
     )
 
+    # Rating grezzo prima della calibrazione per ruolo.
+    raw_rating = (
+        base
+        + titolarita_mod
+        + team_mod
+        + rigorista_mod
+        + cartellini_mod
+        + rookie_mod
+        + preferred_mod
+        + custom_mod
+    )
+
+    # Calibrazione richiesta per rendere confrontabili i ruoli senza
+    # penalizzare portieri, difensori e centrocampisti rispetto agli attaccanti.
+    role_multiplier = ROLE_RATING_MULTIPLIERS.get(role, 1.0)
+    calibrated_rating = raw_rating * role_multiplier
+
     final = round(
-        max(
-            1.0,
-            min(
-                10.0,
-                base
-                + titolarita_mod
-                + team_mod
-                + rigorista_mod
-                + cartellini_mod
-                + rookie_mod
-                + preferred_mod
-                + custom_mod,
-            ),
-        ),
+        max(1.0, min(10.0, calibrated_rating)),
         1,
     )
 
@@ -1048,6 +1062,9 @@ def calculate_player_rating_detailed(
 
     return {
         "final_rating": final,
+        "raw_rating": round(raw_rating, 2),
+        "role_multiplier": round(role_multiplier, 3),
+        "calibrated_rating": round(calibrated_rating, 2),
         "base": round(base, 2),
         "team_mod": team_mod,
         "goalkeeper_mod": goalkeeper_mod,
@@ -2358,6 +2375,8 @@ def render_all_players_tab() -> None:
                 "Giocatore": player.get("name", ""),
                 "Ruolo": player.get("role", ""),
                 "Rating ⭐️": details["final_rating"],
+                "Moltiplicatore ruolo": details.get("role_multiplier", 1.0),
+                "Rating pre-calibrazione": details.get("raw_rating", details["final_rating"]),
                 "Base/Fantamedia": details["base"],
                 "Mod Squadra": details["team_mod"],
                 "Mod. Portiere": details.get("goalkeeper_mod", 0.0),
@@ -2431,6 +2450,14 @@ def render_all_players_tab() -> None:
             ),
             "Rating ⭐️": st.column_config.NumberColumn(
                 "Rating ⭐️",
+                format="%.1f",
+            ),
+            "Moltiplicatore ruolo": st.column_config.NumberColumn(
+                "Moltiplicatore ruolo",
+                format="x%.3f",
+            ),
+            "Rating pre-calibrazione": st.column_config.NumberColumn(
+                "Rating pre-calibrazione",
                 format="%.1f",
             ),
             "Mod. manuale": st.column_config.NumberColumn(
