@@ -84,6 +84,16 @@ SEASON_FILE = DATA_DIR / "season-2526.csv"
 # Richiede una tabella Supabase dedicata (SQL fornito sotto).
 CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
 
+# Nome della squadra dell'utente. Vengono tollerati anche i nomi usati
+# nelle versioni precedenti, così il codice non dipende da una singola
+# stringa hardcoded.
+MY_TEAM_NAME = "RCD Escanyol"
+MY_TEAM_ALIASES = (
+    "RCD Escanyol",
+    "Escanyol",
+    "RCD Escalnyol",
+)
+
 CUSTOM_MODIFIERS = {
     "Nessuna modifica": {"key": None, "value": 0.0},
     "⭐ Preferito (+0.5)": {"key": "preferito", "value": 0.5},
@@ -140,17 +150,57 @@ def load_teams() -> list[dict[str, Any]]:
 
 @st.cache_data(ttl=5)
 def load_rosters() -> list[dict[str, Any]]:
-    return (
+    """Carica le rose usando gli FK espliciti e ricostruisce le relazioni.
+
+    Non dipendiamo da `teams(name)` / `players(...)` nella query di rosters:
+    se Supabase non espone correttamente una relazione, la vecchia versione
+    riceveva `teams=None` o `players=None` e la rosa risultava vuota nella UI
+    pur avendo righe reali nella tabella `rosters`.
+    """
+    roster_rows = (
         supabase.table("rosters")
-        .select(
-            "purchase_price, teams(name), "
-            "players(id, name, role, team_nfl, list_price, status_titolarita, "
-            "rigorista, affidabilita_fisica, propensione_cartellini, "
-            "slot_fantacalcio, primo_anno_serie_a)"
-        )
+        .select("id, team_id, player_id, purchase_price")
         .execute()
         .data
     )
+
+    if not roster_rows:
+        return []
+
+    team_ids = {row.get("team_id") for row in roster_rows if row.get("team_id") is not None}
+    player_ids = {row.get("player_id") for row in roster_rows if row.get("player_id") is not None}
+
+    teams_rows = (
+        supabase.table("teams")
+        .select("id, name, remaining_budget, initial_budget")
+        .in_("id", list(team_ids))
+        .execute()
+        .data
+    ) if team_ids else []
+
+    players_rows = (
+        supabase.table("players")
+        .select(PLAYER_FIELDS)
+        .in_("id", list(player_ids))
+        .execute()
+        .data
+    ) if player_ids else []
+
+    team_by_id = {row["id"]: row for row in teams_rows}
+    player_by_id = {row["id"]: row for row in players_rows}
+
+    hydrated = []
+    for row in roster_rows:
+        hydrated.append({
+            "id": row.get("id"),
+            "purchase_price": row.get("purchase_price", 0),
+            "team_id": row.get("team_id"),
+            "player_id": row.get("player_id"),
+            "teams": team_by_id.get(row.get("team_id")),
+            "players": player_by_id.get(row.get("player_id")),
+        })
+
+    return hydrated
 
 
 @st.cache_data(ttl=5)
@@ -264,10 +314,132 @@ def play_sound(sound_url: str) -> None:
     )
 
 
-def default_team_index(team_names: list[str], preferred: str = "RCD Escanyol") -> int:
+def resolve_my_team_name(team_names: list[str]) -> str | None:
+    """Trova RCD Escanyol anche con piccole differenze di formattazione."""
+    normalized = {normalize_string(name): name for name in team_names if isinstance(name, str)}
+    for candidate in (MY_TEAM_NAME, *MY_TEAM_ALIASES):
+        hit = normalized.get(normalize_string(candidate))
+        if hit:
+            return hit
+    return None
+
+
+def is_my_team(team_name: str | None) -> bool:
+    if not team_name:
+        return False
+    return normalize_string(team_name) == normalize_string(MY_TEAM_NAME) or normalize_string(team_name) in {
+        normalize_string(alias) for alias in MY_TEAM_ALIASES
+    }
+
+
+def default_team_index(
+    team_names: list[str],
+    preferred: str = MY_TEAM_NAME,
+) -> int:
     if not team_names:
         return 0
-    return team_names.index(preferred) if preferred in team_names else 0
+
+    # Prima prova il nome canonico, poi gli alias storici.
+    for name in (preferred, *MY_TEAM_ALIASES):
+        if name in team_names:
+            return team_names.index(name)
+    return 0
+
+
+def queue_purchase_banner(
+    team_name: str,
+    player_name: str,
+    rating: float,
+    purchase_price: int,
+) -> None:
+    """Memorizza il banner prima di st.rerun(), che interrompe subito il run."""
+    if not is_my_team(team_name):
+        st.session_state.pop("pending_purchase_banner", None)
+        return
+
+    if rating >= 8.5:
+        level = "massive"
+        title = "🔥 MASSIVE COLPO!"
+        message = (
+            f"Hai preso **{player_name}** (Rating {rating:.1f})! "
+            "AND HIS NAME IS JOHN CENA! 🎺🎺🎺"
+        )
+    elif rating >= 7.5:
+        level = "great"
+        title = "🎉 Ottimo innesto!"
+        message = (
+            f"**{player_name}** con rating {rating:.1f}. "
+            "Gran bel colpo per l'Escanyol! 🌟"
+        )
+    else:
+        level = "normal"
+        title = "✅ Operazione conclusa"
+        message = f"Preso **{player_name}** a **{purchase_price}** crediti."
+
+    st.session_state["pending_purchase_banner"] = {
+        "level": level,
+        "title": title,
+        "message": message,
+    }
+
+
+def render_pending_purchase_banner() -> None:
+    """Mostra il banner dell'ultimo acquisto dopo il rerun."""
+    banner = st.session_state.get("pending_purchase_banner")
+    if not banner:
+        return
+
+    # Evita che il banner venga riprodotto ad ogni rerun, ma lo mantiene
+    # abbastanza a lungo da poter essere visualizzato anche se la pagina
+    # ricostruisce più volte la UI.
+    st.session_state.pop("pending_purchase_banner", None)
+    level = banner["level"]
+    text = f"**{banner['title']}** — {banner['message']}"
+
+    # Banner visivo indipendente dai widget di Streamlit: rimane visibile
+    # anche se il browser blocca l'autoplay dell'audio.
+    banner_class = {
+        "massive": "massive",
+        "great": "great",
+        "normal": "normal",
+    }.get(level, "normal")
+    st.markdown(
+        f"""
+        <div class=\"auction-banner {banner_class}\">
+            <div class=\"auction-banner-title\">{banner['title']}</div>
+            <div class=\"auction-banner-text\">{banner['message']}</div>
+        </div>
+        <style>
+        .auction-banner {{
+            padding: 22px 28px; margin: 12px 0 22px; border-radius: 18px;
+            text-align: center; font-size: 1.15rem;
+            border: 2px solid rgba(255,255,255,.55);
+            box-shadow: 0 10px 30px rgba(0,0,0,.16);
+            animation: auctionPulse 1.1s ease-in-out 2;
+        }}
+        .auction-banner.massive {{ background: linear-gradient(135deg,#ff416c,#ff4b2b); color:white; }}
+        .auction-banner.great {{ background: linear-gradient(135deg,#11998e,#38ef7d); color:white; }}
+        .auction-banner.normal {{ background: linear-gradient(135deg,#4facfe,#00f2fe); color:white; }}
+        .auction-banner-title {{ font-size: 1.8rem; font-weight: 800; margin-bottom: 6px; }}
+        .auction-banner-text {{ font-weight: 600; }}
+        @keyframes auctionPulse {{
+            0%,100% {{ transform: scale(1); }}
+            50% {{ transform: scale(1.025); }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if level == "massive":
+        st.balloons()
+        st.snow()
+        play_sound(SOUND_URLS["massive"])
+    elif level == "great":
+        st.balloons()
+        play_sound(SOUND_URLS["great"])
+    else:
+        play_sound(SOUND_URLS["normal"])
 
 
 # ============================================================
@@ -279,8 +451,8 @@ def normalize_string(value: Any) -> str:
         return ""
     value = unicodedata.normalize("NFKD", value)
     value = "".join(c for c in value if not unicodedata.combining(c))
-    value = re.sub(r"[^a-zA-Z0-9\\s]", "", value)
-    return re.sub(r"\\s+", " ", value).strip().lower()
+    value = re.sub(r"[^a-zA-Z0-9\s]", "", value)
+    return re.sub(r"\s+", " ", value).strip().lower()
 
 
 @st.cache_data(ttl=300)
@@ -1235,7 +1407,7 @@ def render_manual_purchase(
         target_team = st.selectbox(
             "5. Squadra Acquirente",
             team_names,
-            index=default_team_index(team_names),
+            index=default_team_index(team_names, MY_TEAM_NAME),
             key="manual_target_team",
         )
 
@@ -1274,34 +1446,17 @@ def render_manual_purchase(
 
     rating = player_details["final_rating"]
 
-    if target_team == "RCD Escanyol":
-        if rating >= 8.5:
-            st.balloons()
-            st.snow()
-            play_sound(SOUND_URLS["massive"])
-            st.success(
-                f"🔥 MASSIVE COLPO! Hai preso **{selected_player['name']}** "
-                f"(Rating {rating})! AND HIS NAME IS JOHN CENA! 🎺🎺🎺"
-            )
-        elif rating >= 7.5:
-            st.balloons()
-            play_sound(SOUND_URLS["great"])
-            st.success(
-                f"🎉 Ottimo innesto! **{selected_player['name']}** "
-                f"con rating {rating}. Gran bel colpo per l'RCD Escanyol! 🌟"
-            )
-        else:
-            play_sound(SOUND_URLS["normal"])
-            st.info(
-                f"✅ Operazione conclusa: preso **{selected_player['name']}** "
-                f"a {purchase_price} crediti."
-            )
-    else:
-        st.success(
-            f"✅ Acquistato **{selected_player['name']}** "
-            f"[{selected_player['role']}] a **{purchase_price}** crediti "
-            f"per **{target_team}**!"
+    # IMPORTANTE: st.rerun() interrompe immediatamente l'esecuzione del run.
+    # Per questo il banner deve essere salvato in session_state PRIMA del rerun.
+    if is_my_team(target_team):
+        queue_purchase_banner(
+            MY_TEAM_NAME,
+            selected_player["name"],
+            rating,
+            int(purchase_price),
         )
+    else:
+        st.session_state.pop("pending_purchase_banner", None)
 
     invalidate_data_cache()
     st.rerun()
@@ -2116,7 +2271,7 @@ def render_player_modifiers_tab() -> None:
 
 
 # ============================================================
-# TAB 1 — VALUTAZIONE E ROSA RCD Escanyol
+# TAB 1 — VALUTAZIONE E ROSA RCD ESCANYOL
 # ============================================================
 
 def render_my_team_evaluation(
@@ -2125,9 +2280,12 @@ def render_my_team_evaluation(
     ratings: dict[str, float],
 ) -> None:
     """Valuta la rosa RCD Escanyol costruita fino a questo momento."""
-    team_name = "RCD Escanyol"
-    if team_name not in state.team_players_map:
-        st.info("La squadra RCD Escanyol non è presente tra le squadre configurate.")
+    team_name = resolve_my_team_name(list(state.team_players_map))
+    if team_name is None:
+        st.warning(
+            "⚠️ La squadra **RCD Escanyol** non è presente tra le squadre configurate. "
+            "Controlla il campo `name` della tabella `teams` in Supabase."
+        )
         return
 
     players = state.team_players_map[team_name]
@@ -2222,10 +2380,16 @@ def render_my_roster(
     state: AuctionState,
 ) -> None:
     """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
-    team_name = "RCD Escanyol"
-    players = state.team_players_map.get(team_name, [])
+    team_name = resolve_my_team_name(list(state.team_players_map))
 
     st.markdown("### 👕 Rosa RCD Escanyol")
+    if team_name is None:
+        st.warning(
+            "⚠️ La squadra **RCD Escanyol** non è presente tra le squadre configurate."
+        )
+        return
+
+    players = state.team_players_map.get(team_name, [])
     if not players:
         st.info("La rosa è ancora vuota.")
         return
@@ -2341,6 +2505,21 @@ def main() -> None:
     with tab1:
         st.subheader("🎯 Assegnazione Guidata Giocatore")
 
+        refresh_col, _ = st.columns([1, 5])
+        with refresh_col:
+            if st.button("🔄 Aggiorna dati", key="refresh_live_data"):
+                invalidate_data_cache()
+                st.rerun()
+
+        # Mostrato dopo il rerun dell'acquisto.
+        render_pending_purchase_banner()
+
+        resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
+        if resolved_my_team and resolved_my_team != "RCD Escanyol":
+            st.caption(
+                f"ℹ️ RCD Escanyol collegata alla squadra Supabase **{resolved_my_team}**."
+            )
+
         if auction_finished:
             st.success(
                 "🎉 **ASTA CONCLUSA!** Tutte le squadre hanno completato "
@@ -2373,6 +2552,21 @@ def main() -> None:
             teams_df,
             state,
         )
+
+        resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
+        if resolved_my_team:
+            db_team_count = sum(
+                1 for roster in rosters
+                if roster.get("teams", {}).get("name") == resolved_my_team
+                and roster.get("players")
+            )
+            if db_team_count != state.team_total_bought.get(resolved_my_team, 0):
+                st.warning(
+                    "⚠️ Incoerenza nei dati caricati: "
+                    f"Supabase contiene {db_team_count} giocatori per **{resolved_my_team}**, "
+                    f"ma lo stato dell'asta ne ha caricati {state.team_total_bought.get(resolved_my_team, 0)}. "
+                    "La query delle rose è stata resa esplicita tramite team_id/player_id per evitare questo problema."
+                )
 
         render_my_team_evaluation(
             teams_df,
