@@ -18,7 +18,7 @@ from supabase import Client, create_client
 # CONFIGURAZIONE
 # ============================================================
 
-st.set_page_config(page_title="RCD Escanol Auction Center", layout="wide")
+st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
 
 ROLE_LIMITS: dict[str, int] = {
     "P": 3,
@@ -264,7 +264,7 @@ def play_sound(sound_url: str) -> None:
     )
 
 
-def default_team_index(team_names: list[str], preferred: str = "Escanyol") -> int:
+def default_team_index(team_names: list[str], preferred: str = "RCD Escanyol") -> int:
     if not team_names:
         return 0
     return team_names.index(preferred) if preferred in team_names else 0
@@ -1274,7 +1274,7 @@ def render_manual_purchase(
 
     rating = player_details["final_rating"]
 
-    if target_team == "Escanyol":
+    if target_team == "RCD Escanyol":
         if rating >= 8.5:
             st.balloons()
             st.snow()
@@ -1288,7 +1288,7 @@ def render_manual_purchase(
             play_sound(SOUND_URLS["great"])
             st.success(
                 f"🎉 Ottimo innesto! **{selected_player['name']}** "
-                f"con rating {rating}. Gran bel colpo per l'Escanyol! 🌟"
+                f"con rating {rating}. Gran bel colpo per l'RCD Escanyol! 🌟"
             )
         else:
             play_sound(SOUND_URLS["normal"])
@@ -2116,7 +2116,7 @@ def render_player_modifiers_tab() -> None:
 
 
 # ============================================================
-# TAB 1 — VALUTAZIONE E ROSA RCD ESCANYOL
+# TAB 1 — VALUTAZIONE E ROSA RCD Escanyol
 # ============================================================
 
 def render_my_team_evaluation(
@@ -2125,7 +2125,7 @@ def render_my_team_evaluation(
     ratings: dict[str, float],
 ) -> None:
     """Valuta la rosa RCD Escanyol costruita fino a questo momento."""
-    team_name = "Escanyol"
+    team_name = "RCD Escanyol"
     if team_name not in state.team_players_map:
         st.info("La squadra RCD Escanyol non è presente tra le squadre configurate.")
         return
@@ -2222,7 +2222,7 @@ def render_my_roster(
     state: AuctionState,
 ) -> None:
     """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
-    team_name = "Escanyol"
+    team_name = "RCD Escanyol"
     players = state.team_players_map.get(team_name, [])
 
     st.markdown("### 👕 Rosa RCD Escanyol")
@@ -2304,7 +2304,7 @@ def render_my_roster(
 # ============================================================
 
 def main() -> None:
-    st.title("⚽ RCD Escanol - Live Auction Assistant")
+    st.title("⚽ RCD Escanyol - Live Auction Assistant")
 
     teams = load_teams()
     rosters = load_rosters()
