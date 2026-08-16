@@ -718,6 +718,22 @@ def estimate_auction_price(
     }
 
 
+RECOMMENDATION_TIERS = {
+    "TOP": {"min_rating": 9.0, "max_rating": 10.0},
+    "Prima Fascia": {"min_rating": 8.0, "max_rating": 8.9},
+    "Seconda Fascia": {"min_rating": 7.0, "max_rating": 7.9},
+    "Terza Fascia": {"min_rating": 6.5, "max_rating": 6.9},
+}
+RECOMMENDATION_TIER_OPTIONS = list(RECOMMENDATION_TIERS.keys())
+
+def get_recommendation_tier(rating: float) -> str | None:
+    r = float(rating)
+    if r >= 9.0: return "TOP"
+    if r >= 8.0: return "Prima Fascia"
+    if r >= 7.0: return "Seconda Fascia"
+    if r >= 6.5: return "Terza Fascia"
+    return None
+
 def get_price_value_score(rating: float, estimated_price: int, list_price: int) -> float:
     """Punteggio qualità/prezzo: privilegia rating alto a costo d'asta contenuto."""
     price=max(1.0,float(estimated_price)); lp=max(1.0,float(list_price)); r=float(rating)
@@ -763,43 +779,51 @@ def build_next_player_recommendations(
         if player.get("id") not in state.bought_player_ids
     ]
 
+    selected_tier = st.session_state.get("recommendation_tier", "TOP")
     rows = []
     for player in candidates:
         details = calculate_player_rating_detailed(
-            player,
-            preferred_players,
-            custom_modifiers,
-            goalkeeper_ranking,
+            player, preferred_players, custom_modifiers, goalkeeper_ranking
         )
+        rating = float(details["final_rating"])
+        tier = get_recommendation_tier(rating)
+        if tier is None or tier != selected_tier:
+            continue
         estimate = estimate_auction_price(
-            player,
-            rosters,
-            budget=budget,
+            player, rosters, budget=budget,
             slots_left_after_purchase=slots_after,
         )
         list_price = int(player.get("list_price") or 1)
-        score = get_price_value_score(details["final_rating"], estimate["estimated_price"], list_price)
+        score = get_price_value_score(
+            rating, estimate["estimated_price"], list_price
+        )
         rows.append({
             "player": player,
             "details": details,
             "estimate": estimate,
             "score": score,
-            "rating_per_10_cr": calculate_value_per_credit(details["final_rating"], estimate["estimated_price"]),
+            "tier": tier,
+            "rating_per_10_cr": calculate_value_per_credit(
+                rating, estimate["estimated_price"]
+            ),
         })
 
     feasible_rows = [row for row in rows if row["estimate"]["feasible"]]
     if feasible_rows:
         rows = feasible_rows
 
+    # Il rating determina la fascia; il prezzo determina il miglior affare
+    # SOLO all'interno della fascia selezionata.
     rows.sort(
         key=lambda row: (
             row["score"],
             row["details"]["final_rating"],
-            -(row["estimate"]["estimated_price"]),
+            -row["estimate"]["estimated_price"],
         ),
         reverse=True,
     )
     return rows[:limit]
+
 
 
 def describe_goalkeeper_strategy(players: list[dict[str, Any]]) -> str:
@@ -2738,6 +2762,28 @@ def render_my_team_evaluation(
             )
         # Budget corrente salvato per la funzione di raccomandazione.
         st.session_state["my_team_budget"] = remaining
+
+        recommendation_tier = st.selectbox(
+            "🎯 Fascia dei giocatori consigliati",
+            RECOMMENDATION_TIER_OPTIONS,
+            index=RECOMMENDATION_TIER_OPTIONS.index(
+                st.session_state.get("recommendation_tier", "TOP")
+            ),
+            key="recommendation_tier",
+            help=(
+                "TOP ≥ 9.0 · Prima Fascia 8.0–8.9 · "
+                "Seconda Fascia 7.0–7.9 · Terza Fascia 6.5–6.9. "
+                "Sotto 6.5 non vengono mai consigliati."
+            ),
+        )
+        tier_min = RECOMMENDATION_TIERS[recommendation_tier]["min_rating"]
+        tier_max = RECOMMENDATION_TIERS[recommendation_tier]["max_rating"]
+        st.caption(
+            f"Filtro: **{recommendation_tier}** · Rating "
+            f"{tier_min:.1f}" + (f"–{tier_max:.1f}" if tier_max < 10 else "+") +
+            ". Il costo viene usato per trovare il miglior affare dentro la fascia."
+        )
+
         recommendations = build_next_player_recommendations(
             state,
             rosters,
@@ -2752,7 +2798,7 @@ def render_my_team_evaluation(
             best_details = best["details"]
             best_estimate = best["estimate"]
             st.success(
-                f"🎯 **Miglior rapporto qualità/prezzo:** {best_player.get('name', '')} "
+                f"🎯 **Miglior rapporto qualità/prezzo nella {recommendation_tier}:** {best_player.get('name', '')} "
                 f"— Rating **{best_details['final_rating']:.1f}**, "
                 f"listino **{int(best_player.get('list_price') or 0)} cr**, "
                 f"stima asta **{best_estimate['estimated_price']} cr** "
@@ -2767,6 +2813,7 @@ def render_my_team_evaluation(
                 rec_rows.append({
                     "#": index,
                     "Giocatore": player.get("name", ""),
+                    "Fascia": row.get("tier", recommendation_tier),
                     "Rating": details["final_rating"],
                     "Listino": int(player.get("list_price") or 0),
                     "Moltiplicatore": f"x{estimate['multiplier']:.2f}",
