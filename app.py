@@ -3984,7 +3984,7 @@ def render_matchday_import_tab() -> None:
             )
             st.session_state["season_votes_df"] = votes
             st.session_state["season_votes_source"] = uploaded.name
-            st.session_state["season_votes_sheet"] = sheet
+            st.session_state["season_votes_loaded_sheet"] = sheet
 
             played = int(votes["Voto"].notna().sum())
             c1, c2, c3, c4 = st.columns(4)
