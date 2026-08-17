@@ -24,7 +24,7 @@ st.markdown("""
 <style>
 /* ---------- RCD Escanyol Auction Dashboard ---------- */
 .block-container {
-    padding-top: 1.15rem;
+    padding-top: 3.9rem;
     padding-bottom: 3rem;
     max-width: 1500px;
 }
@@ -125,10 +125,107 @@ div[data-baseweb="tab-list"] {
     gap: .35rem;
 }
 button[data-baseweb="tab"] {
-    border-radius: 10px 10px 0 0;
-    padding-left: 1rem;
-    padding-right: 1rem;
+    border-radius: 12px;
+    padding-left: 1.05rem;
+    padding-right: 1.05rem;
+    min-height: 2.8rem;
+    font-weight: 800;
 }
+
+/* Barra tab sotto la toolbar Streamlit, sempre visibile */
+[data-testid="stTabs"] > div:first-child {
+    position: sticky;
+    top: 3.15rem;
+    z-index: 999;
+    padding: .45rem .55rem;
+    margin: 0 0 .8rem 0;
+    border: 1px solid rgba(148,163,184,.16);
+    border-radius: 14px;
+    background: rgba(9, 17, 32, .92);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 8px 28px rgba(0,0,0,.22);
+}
+div[data-baseweb="tab-list"] {
+    gap: .45rem;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+    background: linear-gradient(135deg, rgba(37,99,235,.95), rgba(59,130,246,.72));
+    color: white;
+    box-shadow: 0 6px 18px rgba(37,99,235,.25);
+}
+
+/* Veste premium */
+[data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(circle at 86% 4%, rgba(37,99,235,.18), transparent 24%),
+        radial-gradient(circle at 10% 28%, rgba(14,165,233,.09), transparent 24%),
+        linear-gradient(180deg, #09111f 0%, #0c1526 52%, #0a1220 100%);
+}
+[data-testid="stAppViewContainer"] p,
+[data-testid="stAppViewContainer"] label {
+    letter-spacing: .005em;
+}
+[data-testid="stMetric"] {
+    border: 1px solid rgba(148,163,184,.17);
+    background: linear-gradient(145deg, rgba(30,41,59,.72), rgba(15,23,42,.66));
+    box-shadow: 0 7px 22px rgba(0,0,0,.12);
+}
+.rcd-hero {
+    border: 1px solid rgba(96,165,250,.28);
+    background:
+        radial-gradient(circle at 95% 0%, rgba(59,130,246,.28), transparent 32%),
+        linear-gradient(135deg, rgba(30,64,175,.32), rgba(15,23,42,.78));
+    box-shadow: 0 16px 45px rgba(0,0,0,.22);
+}
+.rcd-hero-title {
+    font-size: 1.8rem;
+}
+.rcd-kicker {
+    color: #93c5fd;
+    opacity: .95;
+}
+.rcd-phase {
+    color: #dbeafe;
+    border: 1px solid rgba(96,165,250,.22);
+    background: rgba(37,99,235,.20);
+}
+.rcd-target {
+    border: 1px solid rgba(74,222,128,.30);
+    background:
+        radial-gradient(circle at 95% 20%, rgba(34,197,94,.13), transparent 26%),
+        linear-gradient(145deg, rgba(20,83,45,.26), rgba(15,23,42,.64));
+    box-shadow: 0 10px 28px rgba(0,0,0,.14);
+}
+.rcd-section {
+    font-size: 1.15rem;
+    letter-spacing: -.015em;
+}
+.rcd-league-card {
+    border: 1px solid rgba(148,163,184,.16);
+    border-radius: 16px;
+    padding: 15px 16px;
+    background: linear-gradient(145deg, rgba(30,41,59,.70), rgba(15,23,42,.72));
+    box-shadow: 0 8px 24px rgba(0,0,0,.12);
+    margin-bottom: 10px;
+}
+.rcd-league-team {
+    font-size: 1.05rem;
+    font-weight: 850;
+}
+.rcd-badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: .72rem;
+    font-weight: 800;
+    margin-right: 5px;
+    border: 1px solid rgba(148,163,184,.18);
+    background: rgba(148,163,184,.08);
+}
+.rcd-badge.good { color:#86efac; border-color:rgba(34,197,94,.25); background:rgba(34,197,94,.10); }
+.rcd-badge.warn { color:#fde68a; border-color:rgba(245,158,11,.25); background:rgba(245,158,11,.10); }
+.rcd-badge.bad  { color:#fca5a5; border-color:rgba(239,68,68,.25); background:rgba(239,68,68,.10); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -523,24 +620,27 @@ def queue_purchase_banner(
         st.session_state.pop("pending_purchase_banner", None)
         return
 
-    if rating >= 8.5:
+    if rating >= 9.0:
         level = "massive"
-        title = "🔥 MASSIVE COLPO!"
+        title = "🏆 COLPO TOP!"
         message = (
-            f"Hai preso **{player_name}** (Rating {rating:.1f})! "
-            "AND HIS NAME IS JOHN CENA! 🎺🎺🎺"
+            f"**{player_name}** entra nella rosa RCD Escanyol · "
+            f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
         )
-    elif rating >= 7.5:
+    elif rating >= 8.0:
         level = "great"
-        title = "🎉 Ottimo innesto!"
+        title = "✨ PRIMA FASCIA!"
         message = (
-            f"**{player_name}** con rating {rating:.1f}. "
-            "Gran bel colpo per l'Escanyol! 🌟"
+            f"Acquistato **{player_name}** · Rating **{rating:.1f}** · "
+            f"Prezzo **{purchase_price} cr**. Innesto di livello."
         )
     else:
         level = "normal"
-        title = "✅ Operazione conclusa"
-        message = f"Preso **{player_name}** a **{purchase_price}** crediti."
+        title = "✅ ACQUISTO COMPLETATO"
+        message = (
+            f"**{player_name}** è un nuovo giocatore RCD Escanyol · "
+            f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
+        )
 
     st.session_state["pending_purchase_banner"] = {
         "level": level,
@@ -583,10 +683,21 @@ def render_pending_purchase_banner() -> None:
             box-shadow: 0 10px 30px rgba(0,0,0,.16);
             animation: auctionPulse 1.1s ease-in-out 2;
         }}
-        .auction-banner.massive {{ background: linear-gradient(135deg,#ff416c,#ff4b2b); color:white; }}
-        .auction-banner.great {{ background: linear-gradient(135deg,#11998e,#38ef7d); color:white; }}
-        .auction-banner.normal {{ background: linear-gradient(135deg,#4facfe,#00f2fe); color:white; }}
-        .auction-banner-title {{ font-size: 1.8rem; font-weight: 800; margin-bottom: 6px; }}
+        .auction-banner.massive {{
+            background: radial-gradient(circle at 90% 10%, rgba(250,204,21,.35), transparent 28%),
+                        linear-gradient(135deg,#4c1d95,#1e3a8a);
+            color:white;
+        }}
+        .auction-banner.great {{
+            background: radial-gradient(circle at 90% 10%, rgba(74,222,128,.30), transparent 30%),
+                        linear-gradient(135deg,#064e3b,#0f766e);
+            color:white;
+        }}
+        .auction-banner.normal {{
+            background: linear-gradient(135deg,#1e3a8a,#0f172a);
+            color:white;
+        }}
+        .auction-banner-title {{ font-size: 1.8rem; font-weight: 900; margin-bottom: 6px; letter-spacing:.02em; }}
         .auction-banner-text {{ font-weight: 600; }}
         @keyframes auctionPulse {{
             0%,100% {{ transform: scale(1); }}
@@ -2320,8 +2431,8 @@ def render_team_overview(
     state: AuctionState,
     ratings: dict[str, float],
 ) -> None:
-    st.divider()
-    st.subheader("📊 Panoramica Squadre & Alert Strategici")
+    """Panoramica lega compatta: snapshot, classifica e dettagli solo su richiesta."""
+    st.markdown('<div class="rcd-section">📊 Panoramica Squadre & Alert Strategici</div>', unsafe_allow_html=True)
 
     if teams_df.empty:
         st.info("Nessuna squadra configurata.")
@@ -2337,142 +2448,131 @@ def render_team_overview(
         for _, row in grades_df.iterrows()
     }
 
-    summaries = []
+    rows = []
+    alerts_by_team: dict[str, list[dict[str, str]]] = {}
 
     for _, team in teams_df.iterrows():
         name = team["name"]
-        remaining_budget = int(team["remaining_budget"])
-        players = state.team_players_map[name]
-        bought = state.team_total_bought[name]
-        spent = sum(
-            purchase.get("purchase_price", 0)
-            for purchase in state.team_purchases_map[name]
-        )
-
-        slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
-        avg_price = (
-            round(remaining_budget / slots_left, 1)
-            if slots_left
-            else 0
-        )
-        avg_spent = (
-            round(spent / bought, 1)
-            if bought
-            else 0.0
-        )
-        total_listino = sum(int(player.get("list_price") or 0) for player in players)
-        auction_multiplier = round(spent / total_listino, 2) if total_listino > 0 else 0.0
-
+        players = state.team_players_map.get(name, [])
+        purchases = state.team_purchases_map.get(name, [])
+        bought = state.team_total_bought.get(name, 0)
+        budget = int(team["remaining_budget"])
+        spent = sum(int(p.get("purchase_price") or 0) for p in purchases)
+        total_listino = sum(int(p.get("list_price") or 0) for p in players)
+        multiplier = round(spent / total_listino, 2) if total_listino else 0.0
         alerts = build_team_alerts(players, bought)
+        alerts_by_team[name] = alerts
 
-        top_players = sum(
-            player.get("slot_fantacalcio") == "1° Slot"
-            or (player.get("list_price") or 0) >= 25
-            for player in players
-        )
-
-        if bought == 0:
-            status = "📭 Rosa ancora vuota."
-        else:
-            count = len(alerts)
-            risk_text = (
-                "pochi rischi"
-                if count == 0
-                else "1 rischio potenziale"
-                if count == 1
-                else f"{count} criticità da monitorare"
+        # TOP basati sul rating effettivo, non sul solo listino.
+        player_ratings = [
+            calculate_player_rating(
+                p,
+                st.session_state.preferred_players,
+                load_custom_modifiers(),
+                build_current_goalkeeper_ranking(state),
             )
-            status = (
-                f"🏆 Valutazione asta: **{auction_grade_map.get(name, 0.0):.1f}** "
-                f"({top_players} Top) — {risk_text}."
-            )
+            for p in players
+        ]
+        top_count = sum(r >= 9.0 for r in player_ratings)
 
-        summaries.append(
-            {
-                "team": team,
-                "bought": bought,
-                "slots_left": slots_left,
-                "avg_price": avg_price,
-                "avg_spent": avg_spent,
-                "auction_multiplier": auction_multiplier,
-                "role_counts": state.team_role_totals[name],
-                "alerts": alerts,
-                "status": status,
-            }
-        )
+        roles = state.team_role_totals.get(name, {})
+        rows.append({
+            "Squadra": name,
+            "Rating": round(ratings.get(name, 0.0), 1),
+            "Voto Asta": round(auction_grade_map.get(name, 0.0), 1),
+            "Budget": budget,
+            "Rosa": f"{bought}/{TOTAL_SLOTS_PER_TEAM}",
+            "P": f"{roles.get('P',0)}/{ROLE_LIMITS['P']}",
+            "D": f"{roles.get('D',0)}/{ROLE_LIMITS['D']}",
+            "C": f"{roles.get('C',0)}/{ROLE_LIMITS['C']}",
+            "A": f"{roles.get('A',0)}/{ROLE_LIMITS['A']}",
+            "TOP": top_count,
+            "x Listino": multiplier,
+            "Alert": len(alerts),
+        })
 
-    summaries.sort(
-        key=lambda item: (
-            -item["avg_price"],
-            -int(item["team"]["remaining_budget"]),
-            item["team"]["name"],
-        )
+    league_df = pd.DataFrame(rows).sort_values(
+        ["Voto Asta", "Rating"],
+        ascending=False,
+    ).reset_index(drop=True)
+    league_df.index += 1
+
+    # Snapshot: solo quattro informazioni veramente utili.
+    best_rating = max(rows, key=lambda r: r["Rating"]) if rows else None
+    best_auction = max(rows, key=lambda r: r["Voto Asta"]) if rows else None
+    richest = max(rows, key=lambda r: r["Budget"]) if rows else None
+    completed = sum(
+        state.team_total_bought.get(name, 0) >= TOTAL_SLOTS_PER_TEAM
+        for name in teams_df["name"].tolist()
     )
 
-    for start in range(0, len(summaries), 4):
-        cols = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "⭐ Miglior rosa",
+        best_rating["Squadra"] if best_rating else "—",
+        f"{best_rating['Rating']:.1f}" if best_rating else None,
+        delta_color="off",
+    )
+    c2.metric(
+        "🏆 Miglior asta",
+        best_auction["Squadra"] if best_auction else "—",
+        f"{best_auction['Voto Asta']:.1f}" if best_auction else None,
+        delta_color="off",
+    )
+    c3.metric(
+        "💰 Più crediti",
+        richest["Squadra"] if richest else "—",
+        f"{richest['Budget']} cr" if richest else None,
+        delta_color="off",
+    )
+    c4.metric("✅ Rose complete", f"{completed}/{len(rows)}")
 
-        for offset, col in enumerate(cols):
-            if start + offset >= len(summaries):
-                continue
+    st.markdown('<div class="rcd-section">🏁 Classifica live</div>', unsafe_allow_html=True)
+    st.dataframe(
+        league_df,
+        use_container_width=True,
+        column_config={
+            "Rating": st.column_config.NumberColumn(format="%.1f"),
+            "Voto Asta": st.column_config.NumberColumn(format="%.1f"),
+            "Budget": st.column_config.NumberColumn(format="%d cr"),
+            "x Listino": st.column_config.NumberColumn(format="x%.2f"),
+            "TOP": st.column_config.NumberColumn(format="%d"),
+            "Alert": st.column_config.NumberColumn(format="%d"),
+        },
+    )
 
-            item = summaries[start + offset]
-            team = item["team"]
-            name = team["name"]
-            bought = item["bought"]
-            remaining = int(team["remaining_budget"])
-            initial = max(1, int(team["initial_budget"]))
-            roles = item["role_counts"]
+    # I dettagli/alert non occupano più tutta la pagina.
+    st.markdown('<div class="rcd-section">🚨 Dettagli e alert</div>', unsafe_allow_html=True)
+    st.caption("Apri solo la squadra che vuoi analizzare.")
 
-            role_string = (
-                f"**P** {roles['P']}/{ROLE_LIMITS['P']} | "
-                f"**D** {roles['D']}/{ROLE_LIMITS['D']} | "
-                f"**C** {roles['C']}/{ROLE_LIMITS['C']} | "
-                f"**A** {roles['A']}/{ROLE_LIMITS['A']}"
+    ordered_names = league_df["Squadra"].tolist()
+    for name in ordered_names:
+        row = next(r for r in rows if r["Squadra"] == name)
+        alert_count = row["Alert"]
+        label = (
+            f"{name} · ⭐ {row['Rating']:.1f} · 🏆 {row['Voto Asta']:.1f} · "
+            f"💰 {row['Budget']} cr · 🚨 {alert_count}"
+        )
+        with st.expander(label, expanded=False):
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Rating", f"{row['Rating']:.1f}")
+            m2.metric("Voto Asta", f"{row['Voto Asta']:.1f}")
+            m3.metric("TOP", row["TOP"])
+            m4.metric("Moltiplicatore", f"x{row['x Listino']:.2f}")
+
+            st.markdown(
+                f"**Composizione:** P {row['P']} · D {row['D']} · "
+                f"C {row['C']} · A {row['A']} · Rosa {row['Rosa']}"
             )
 
-            with col:
-                title = (
-                    f"**{name}** — ⭐️ {ratings[name]:.1f}"
-                    if bought
-                    else f"**{name}**"
-                )
-                st.markdown(title)
-
-                if bought < TOTAL_SLOTS_PER_TEAM:
-                    delta = (
-                        f"{item['avg_spent']} cr/giocatore · x{item['auction_multiplier']:.2f} listino"
-                        if bought
-                        else "N/A"
-                    )
-                    st.metric(
-                        "Budget",
-                        f"{remaining} cr",
-                        delta=delta,
-                        delta_color="off",
-                    )
-                    st.markdown(role_string)
-                    st.text(
-                        f"Media max/giocatore: {item['avg_price']} cr"
-                    )
-                    st.progress(
-                        max(0.0, min(1.0, remaining / initial))
-                    )
-                else:
-                    st.success(
-                        f"✅ Rosa Completata "
-                        f"({TOTAL_SLOTS_PER_TEAM}/{TOTAL_SLOTS_PER_TEAM})"
-                    )
-
-                st.markdown(f"*{item['status']}*")
-
-                for alert in item["alerts"]:
-                    st.markdown(
-                        alert["text"],
-                        help=alert["help"],
-                    )
-
-                st.markdown("---")
+            alerts = alerts_by_team.get(name, [])
+            if not alerts:
+                st.success("Nessuna criticità strategica rilevante.")
+            else:
+                for alert in alerts:
+                    st.warning(alert["text"], icon="⚠️")
+                    if alert.get("help"):
+                        st.caption(alert["help"])
 
 
 # ============================================================
@@ -3683,7 +3783,6 @@ def main() -> None:
             )
 
     with tab2:
-        st.markdown('<div class="rcd-section">📊 Panoramica Lega</div>', unsafe_allow_html=True)
         render_team_overview(
             teams_df,
             state,
