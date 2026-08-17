@@ -20,6 +20,118 @@ from supabase import Client, create_client
 
 st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
 
+st.markdown("""
+<style>
+/* ---------- RCD Escanyol Auction Dashboard ---------- */
+.block-container {
+    padding-top: 1.15rem;
+    padding-bottom: 3rem;
+    max-width: 1500px;
+}
+[data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(circle at 85% 5%, rgba(49, 130, 206, .10), transparent 28%),
+        linear-gradient(180deg, rgba(15, 23, 42, .02), transparent 18%);
+}
+[data-testid="stMetric"] {
+    border: 1px solid rgba(128,128,128,.18);
+    border-radius: 14px;
+    padding: .75rem .9rem;
+    background: rgba(128,128,128,.055);
+}
+[data-testid="stMetricLabel"] {
+    font-size: .78rem;
+}
+[data-testid="stMetricValue"] {
+    font-weight: 750;
+}
+div[data-testid="stHorizontalBlock"] {
+    align-items: stretch;
+}
+.stButton > button[kind="primary"] {
+    border-radius: 10px;
+    min-height: 2.8rem;
+    font-weight: 750;
+}
+div[data-testid="stExpander"] {
+    border-radius: 12px;
+    border: 1px solid rgba(128,128,128,.18);
+}
+.rcd-hero {
+    border: 1px solid rgba(128,128,128,.20);
+    border-radius: 18px;
+    padding: 18px 22px;
+    margin: 2px 0 16px 0;
+    background: linear-gradient(135deg, rgba(30,64,175,.16), rgba(15,23,42,.04));
+    box-shadow: 0 8px 30px rgba(0,0,0,.06);
+}
+.rcd-hero-title {
+    font-size: 1.55rem;
+    font-weight: 850;
+    letter-spacing: -.02em;
+    margin-bottom: 2px;
+}
+.rcd-kicker {
+    font-size: .76rem;
+    font-weight: 800;
+    letter-spacing: .10em;
+    opacity: .65;
+}
+.rcd-phase {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(37,99,235,.13);
+    font-size: .82rem;
+    font-weight: 750;
+}
+.rcd-section {
+    font-size: 1.05rem;
+    font-weight: 850;
+    margin: 1.1rem 0 .55rem 0;
+}
+.rcd-target {
+    border: 1px solid rgba(34,197,94,.28);
+    border-radius: 15px;
+    padding: 15px 17px;
+    background: rgba(34,197,94,.07);
+    margin: 6px 0 10px 0;
+}
+.rcd-target-name {
+    font-size: 1.25rem;
+    font-weight: 850;
+}
+.rcd-target-meta {
+    opacity: .78;
+    margin-top: 3px;
+}
+.rcd-rolebar {
+    font-size: .88rem;
+    font-weight: 700;
+    padding: 8px 11px;
+    border-radius: 10px;
+    background: rgba(128,128,128,.07);
+    margin: 6px 0 10px 0;
+}
+.rcd-complete {
+    color: #16a34a;
+    font-weight: 800;
+}
+.rcd-muted {
+    opacity: .68;
+}
+div[data-baseweb="tab-list"] {
+    gap: .35rem;
+}
+button[data-baseweb="tab"] {
+    border-radius: 10px 10px 0 0;
+    padding-left: 1rem;
+    padding-right: 1rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
 ROLE_LIMITS: dict[str, int] = {
     "P": 3,
     "D": 8,
@@ -3056,6 +3168,47 @@ def render_player_modifiers_tab() -> None:
                 )
 
 
+def render_auction_dashboard_header(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> None:
+    """Hero compatto: identità, fase, budget, slot e rating."""
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return
+
+    team_row = teams_df[teams_df["name"] == team_name]
+    remaining = int(team_row.iloc[0]["remaining_budget"]) if not team_row.empty else 0
+    bought = state.team_total_bought.get(team_name, 0)
+    rating = ratings.get(team_name, 0.0)
+    draft_role = get_my_team_draft_role(state)
+    complete = bought >= TOTAL_SLOTS_PER_TEAM
+
+    phase = (
+        "ASTA COMPLETATA"
+        if complete
+        else f"FASE: {ROLE_NAMES.get(draft_role, 'Asta').upper()}"
+    )
+
+    st.markdown(
+        f"""
+        <div class="rcd-hero">
+          <div class="rcd-kicker">RCD ESCANYOL · AUCTION CENTER</div>
+          <div class="rcd-hero-title">⚽ Live Auction Dashboard</div>
+          <div class="rcd-phase">{phase}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Budget", f"{remaining} cr")
+    c2.metric("👥 Rosa", f"{bought}/{TOTAL_SLOTS_PER_TEAM}")
+    c3.metric("⭐ Rating Rosa", f"{rating:.1f}")
+    c4.metric("🎯 Prossimo ruolo", "—" if complete else ROLE_NAMES.get(draft_role, "—"))
+
+
 # ============================================================
 # TAB 1 — VALUTAZIONE E ROSA RCD ESCANYOL
 # ============================================================
@@ -3104,25 +3257,29 @@ def render_my_team_evaluation(
     )
 
     st.markdown(
-        "### 🏁 Valutazione finale RCD Escanyol"
+        '<div class="rcd-section">🏁 Valutazione finale</div>'
         if roster_complete
-        else "### 🧠 Valutazione progressiva RCD Escanyol"
+        else '<div class="rcd-section">🧠 Assistente asta</div>',
+        unsafe_allow_html=True,
     )
     if phase:
         st.markdown(f"**{phase}**")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("⭐ Rating Rosa", f"{rating:.1f}/10")
-    c2.metric("🏆 Voto Asta", f"{auction_grade:.1f}/10")
-    c3.metric("💰 Budget residuo", f"{remaining} cr")
-    c4.metric("👥 Giocatori", f"{bought}/{TOTAL_SLOTS_PER_TEAM}")
-    c5.metric("📊 Speso / Listino", f"{spent}/{listino} cr")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🏆 Valutazione Asta", f"{auction_grade:.1f}/10")
+    c2.metric("💸 Crediti spesi", f"{spent} cr")
+    c3.metric("📋 Valore listino", f"{listino} cr")
 
-    role_text = " · ".join(
-        f"**{role}** {counts.get(role, 0)}/{ROLE_LIMITS[role]}"
-        for role in DRAFT_ORDER
+    role_parts = []
+    for role in DRAFT_ORDER:
+        value = counts.get(role, 0)
+        limit = ROLE_LIMITS[role]
+        check = " ✓" if value >= limit else ""
+        role_parts.append(f"{role} {value}/{limit}{check}")
+    st.markdown(
+        '<div class="rcd-rolebar">' + " &nbsp; · &nbsp; ".join(role_parts) + "</div>",
+        unsafe_allow_html=True,
     )
-    st.markdown(role_text)
 
     if assessment:
         st.info(assessment)
@@ -3204,13 +3361,19 @@ def render_my_team_evaluation(
             best_player = best["player"]
             best_details = best["details"]
             best_estimate = best["estimate"]
-            st.success(
-                f"🎯 **Miglior rapporto qualità/prezzo nella {recommendation_tier}:** {best_player.get('name', '')} "
-                f"— Rating **{best_details['final_rating']:.1f}**, "
-                f"listino **{int(best_player.get('list_price') or 0)} cr**, "
-                f"stima asta **{best_estimate['estimated_price']} cr** "
-                f"(x{best_estimate['multiplier']:.2f}) · "
-                f"**{best.get('rating_per_10_cr', 0.0):.2f} rating / 10 cr**."
+            st.markdown(
+                f"""
+                <div class="rcd-target">
+                  <div class="rcd-kicker">🎯 TARGET #1 · {recommendation_tier.upper()}</div>
+                  <div class="rcd-target-name">{best_player.get('name', '')} · ⭐ {best_details['final_rating']:.1f}</div>
+                  <div class="rcd-target-meta">
+                    {best_player.get('team_nfl', '—')} · Listino {int(best_player.get('list_price') or 0)} cr ·
+                    Stima {best_estimate['estimated_price']} cr (x{best_estimate['multiplier']:.2f}) ·
+                    Value {best.get('rating_per_10_cr', 0.0):.2f}/10 cr
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
             rec_rows = []
             for index, row in enumerate(recommendations, start=1):
@@ -3229,18 +3392,19 @@ def render_my_team_evaluation(
                     "Valore Score": row.get("score", 0.0),
                     "Club": player.get("team_nfl", "—"),
                 })
-            st.dataframe(
-                pd.DataFrame(rec_rows),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Rating": st.column_config.NumberColumn(format="%.1f"),
-                    "Listino": st.column_config.NumberColumn(format="%d cr"),
-                    "Stima asta": st.column_config.NumberColumn(format="%d cr"),
-                    "Rating / 10 cr": st.column_config.NumberColumn(format="%.2f"),
-                    "Valore Score": st.column_config.NumberColumn(format="%.2f"),
-                },
-            )
+            with st.expander("Mostra altri giocatori consigliati", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(rec_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Rating": st.column_config.NumberColumn(format="%.1f"),
+                        "Listino": st.column_config.NumberColumn(format="%d cr"),
+                        "Stima asta": st.column_config.NumberColumn(format="%d cr"),
+                        "Rating / 10 cr": st.column_config.NumberColumn(format="%.2f"),
+                        "Valore Score": st.column_config.NumberColumn(format="%.2f"),
+                    },
+                )
         else:
             st.caption("Non ci sono obiettivi compatibili disponibili per questo ruolo.")
 
@@ -3272,7 +3436,7 @@ def render_my_roster(
     """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
     team_name = resolve_my_team_name(list(state.team_players_map))
 
-    st.markdown("### 👕 Rosa RCD Escanyol")
+    st.markdown('<div class="rcd-section">👕 Rosa RCD Escanyol</div>', unsafe_allow_html=True)
     if team_name is None:
         st.warning(
             "⚠️ La squadra **RCD Escanyol** non è presente tra le squadre configurate."
@@ -3340,23 +3504,44 @@ def render_my_roster(
             rows_by_role.get(role, []),
             key=lambda row: (-row["_sort_rating"], row["Nome"]),
         )
-        st.markdown(f"#### {role_titles[role]} ({len(role_rows)}/{ROLE_LIMITS[role]})")
-        if not role_rows:
-            st.caption("Nessun giocatore acquistato in questo ruolo.")
-            continue
+        complete_mark = " ✓" if len(role_rows) >= ROLE_LIMITS[role] else ""
+        with st.container(border=True):
+            st.markdown(
+                f"**{role_titles[role]}** &nbsp; "
+                f"`{len(role_rows)}/{ROLE_LIMITS[role]}{complete_mark}`"
+            )
+            if not role_rows:
+                st.caption("Nessun giocatore acquistato in questo ruolo.")
+                continue
 
-        display = pd.DataFrame(role_rows).drop(columns=["_sort_rating"])
-        st.dataframe(
-            display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Rating": st.column_config.NumberColumn(format="%.1f"),
-                "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
-                "Crediti Dichiarati": st.column_config.NumberColumn(format="%d cr"),
-                "Moltiplicatore Asta": st.column_config.NumberColumn(format="x%.2f"),
-            },
-        )
+            display = pd.DataFrame(role_rows).drop(columns=["_sort_rating"])
+            compact_cols = [
+                "Nome", "Rating", "Fascia", "Squadra",
+                "Crediti Spesi", "Bonus/Malus",
+            ]
+            st.dataframe(
+                display[compact_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Rating": st.column_config.NumberColumn(format="%.1f"),
+                    "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
+                },
+            )
+            with st.expander("Dettagli economici", expanded=False):
+                st.dataframe(
+                    display[[
+                        "Nome", "Crediti Dichiarati",
+                        "Crediti Spesi", "Moltiplicatore Asta",
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Crediti Dichiarati": st.column_config.NumberColumn(format="%d cr"),
+                        "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
+                        "Moltiplicatore Asta": st.column_config.NumberColumn(format="x%.2f"),
+                    },
+                )
 
 
 # ============================================================
@@ -3364,7 +3549,6 @@ def render_my_roster(
 # ============================================================
 
 def main() -> None:
-    st.title("⚽ RCD Escanyol - Live Auction Assistant")
 
     teams = load_teams()
     rosters = load_rosters()
@@ -3391,24 +3575,26 @@ def main() -> None:
 
     tab1, tab2, tab3, tab4 = st.tabs(
         [
-            "🎯 Live Asta",
-            "📋 Rose & Analisi",
-            "⭐️ Tutti i Giocatori (Rating)",
-            "🛠️ Bonus / Malus",
+            "🎯 ASTA",
+            "📊 LEGA",
+            "⭐ GIOCATORI",
+            "⚙️ BONUS / MALUS",
         ]
     )
 
     with tab1:
-        st.subheader("🎯 Assegnazione Guidata Giocatore")
-
-        refresh_col, _ = st.columns([1, 5])
-        with refresh_col:
-            if st.button("🔄 Aggiorna dati", key="refresh_live_data"):
-                invalidate_data_cache()
-                st.rerun()
+        render_auction_dashboard_header(teams_df, state, ratings)
 
         # Mostrato dopo il rerun dell'acquisto.
         render_pending_purchase_banner()
+
+        refresh_col, _ = st.columns([1, 6])
+        with refresh_col:
+            if st.button("↻ Aggiorna", key="refresh_live_data"):
+                invalidate_data_cache()
+                st.rerun()
+
+        st.markdown('<div class="rcd-section">🎯 Acquista giocatore</div>', unsafe_allow_html=True)
 
         resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
         if resolved_my_team and resolved_my_team != "RCD Escanyol":
@@ -3461,17 +3647,6 @@ def main() -> None:
                 state,
             )
 
-        render_team_analysis(
-            teams_df,
-            state,
-            ratings,
-        )
-
-        render_admin_tools(
-            teams_df,
-            state,
-        )
-
         resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
         if resolved_my_team:
             db_team_count = sum(
@@ -3496,7 +3671,19 @@ def main() -> None:
 
         render_my_roster(state)
 
+        with st.expander("🛠️ Strumenti asta e diagnostica", expanded=False):
+            render_team_analysis(
+                teams_df,
+                state,
+                ratings,
+            )
+            render_admin_tools(
+                teams_df,
+                state,
+            )
+
     with tab2:
+        st.markdown('<div class="rcd-section">📊 Panoramica Lega</div>', unsafe_allow_html=True)
         render_team_overview(
             teams_df,
             state,
