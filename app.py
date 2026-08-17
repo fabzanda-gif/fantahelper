@@ -1630,7 +1630,48 @@ def simulate_autofill(
             if player["role"] == role_filter
         ]
 
-    random.shuffle(free_players)
+    # Mockup più realistico:
+    # i giocatori TOP non possono rimanere liberi mentre gli slot vengono
+    # riempiti da profili peggiori. Ordiniamo quindi la simulazione per fascia:
+    # TOP -> Prima -> Seconda -> Terza -> Scommesse.
+    #
+    # All'interno della stessa fascia manteniamo una componente casuale,
+    # così simulazioni successive non producono sempre la stessa asta.
+    custom_modifiers = load_custom_modifiers()
+
+    def mockup_player_rating(player: dict[str, Any]) -> float:
+        # Per i portieri usiamo il ranking generale delle difese:
+        # durante il mockup non conosciamo ancora le tre squadre finali.
+        return calculate_player_rating(
+            player,
+            st.session_state.preferred_players,
+            custom_modifiers,
+            ALL_GOALKEEPER_RANKING,
+        )
+
+    tier_priority = {
+        "TOP": 0,
+        "Prima Fascia": 1,
+        "Seconda Fascia": 2,
+        "Terza Fascia": 3,
+        "Scommessa": 4,
+    }
+
+    # Generiamo prima un valore casuale così l'ordinamento è random
+    # solo tra giocatori appartenenti alla stessa fascia.
+    randomized_players = [
+        (
+            tier_priority[get_roster_tier(mockup_player_rating(player))],
+            random.random(),
+            -mockup_player_rating(player),
+            player,
+        )
+        for player in free_players
+    ]
+    randomized_players.sort(
+        key=lambda item: (item[0], item[1], item[2])
+    )
+    free_players = [item[3] for item in randomized_players]
 
     sim_bought = state.team_total_bought.copy()
     sim_roles = {
@@ -1665,13 +1706,23 @@ def simulate_autofill(
         if not valid_teams:
             continue
 
+        player_rating = mockup_player_rating(player)
+        player_tier = get_roster_tier(player_rating)
+
         def team_score(team_name: str) -> float:
             slots_left = TOTAL_SLOTS_PER_TEAM - sim_bought[team_name]
-            return (
-                sim_budgets[team_name] / slots_left
-                if slots_left > 0
-                else -1
-            )
+            if slots_left <= 0:
+                return -1
+
+            budget_per_slot = sim_budgets[team_name] / slots_left
+
+            # Per i TOP aggiungiamo un piccolo fattore casuale:
+            # continuano a favorire chi ha più capacità di spesa, ma non
+            # finiscono sistematicamente tutti alla stessa squadra.
+            if player_tier == "TOP":
+                return budget_per_slot * random.uniform(0.88, 1.12)
+
+            return budget_per_slot * random.uniform(0.94, 1.06)
 
         chosen_team = max(valid_teams, key=team_score)
         slots_left = TOTAL_SLOTS_PER_TEAM - sim_bought[chosen_team]
@@ -1764,6 +1815,11 @@ def render_admin_tools(
     role_filter = st.sidebar.selectbox(
         "Completa ruolo (Mockup)",
         ["Tutti"] + list(ROLE_LIMITS),
+    )
+
+    st.sidebar.caption(
+        "Nel mockup i TOP vengono assegnati prima delle fasce inferiori, "
+        "così non restano irrealisticamente svincolati."
     )
 
     if st.sidebar.button("🎲 Autocompila rose (Intermedio)"):
@@ -3396,12 +3452,14 @@ def main() -> None:
             rosters,
         )
 
-        render_top5(
-            current_role,
-            state.bought_player_ids,
-            preferred_players,
-            state,
-        )
+        # La Top 5 serve solo durante l'asta.
+        if not auction_finished:
+            render_top5(
+                current_role,
+                state.bought_player_ids,
+                preferred_players,
+                state,
+            )
 
         render_team_analysis(
             teams_df,
