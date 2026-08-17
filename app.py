@@ -656,6 +656,13 @@ def get_my_team_draft_role(state: "AuctionState") -> str | None:
     if team_name is None:
         return "P"
 
+    # Una rosa da 25 giocatori è definitivamente chiusa:
+    # non generiamo più consigli anche se i conteggi ruolo risultano anomali.
+    total_bought = state.team_total_bought.get(team_name, 0)
+    actual_players = len(state.team_players_map.get(team_name, []))
+    if max(total_bought, actual_players) >= TOTAL_SLOTS_PER_TEAM:
+        return None
+
     counts = state.team_role_totals.get(team_name, {})
     for role in DRAFT_ORDER:
         if counts.get(role, 0) < ROLE_LIMITS[role]:
@@ -920,9 +927,12 @@ def build_draft_strategy_text(
 
     counts = state.team_role_totals.get(team_name, {})
     current_role = get_my_team_draft_role(state)
-    draft_complete = all(
-        counts.get(role, 0) >= ROLE_LIMITS[role]
-        for role in DRAFT_ORDER
+    # Consideriamo conclusa l'asta della squadra appena la rosa ha 25 elementi.
+    # Questo evita consigli impossibili nel caso in cui i conteggi ruolo del DB
+    # non coincidano perfettamente con 3/8/8/6.
+    draft_complete = (
+        len(players) >= TOTAL_SLOTS_PER_TEAM
+        or state.team_total_bought.get(team_name, 0) >= TOTAL_SLOTS_PER_TEAM
     )
 
     custom_modifiers = load_custom_modifiers()
@@ -3016,7 +3026,11 @@ def render_my_team_evaluation(
     slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
     rating = ratings.get(team_name, 0.0)
     counts = state.team_role_totals.get(team_name, {})
-    current_role = get_my_team_draft_role(state)
+    roster_complete = (
+        bought >= TOTAL_SLOTS_PER_TEAM
+        or state.team_total_bought.get(team_name, 0) >= TOTAL_SLOTS_PER_TEAM
+    )
+    current_role = None if roster_complete else get_my_team_draft_role(state)
 
     grades = calculate_auction_grades(
         teams_df.to_dict("records"),
@@ -3033,7 +3047,11 @@ def render_my_team_evaluation(
         ratings,
     )
 
-    st.markdown("### 🧠 Valutazione progressiva RCD Escanyol")
+    st.markdown(
+        "### 🏁 Valutazione finale RCD Escanyol"
+        if roster_complete
+        else "### 🧠 Valutazione progressiva RCD Escanyol"
+    )
     if phase:
         st.markdown(f"**{phase}**")
 
@@ -3055,7 +3073,7 @@ def render_my_team_evaluation(
     if advice:
         st.success(f"💡 **Consiglio:** {advice}")
 
-    if current_role is None and bought >= TOTAL_SLOTS_PER_TEAM:
+    if roster_complete:
         custom_modifiers = load_custom_modifiers()
         goalkeeper_ranking = build_current_goalkeeper_ranking(state)
         tier_counts = {
@@ -3083,8 +3101,8 @@ def render_my_team_evaluation(
         q4.metric("🥉 Terza Fascia", tier_counts["Terza Fascia"])
         q5.metric("🎲 Scommesse", tier_counts["Scommessa"])
 
-    # Suggerimenti per il prossimo acquisto, limitati al ruolo attualmente draftato.
-    if current_role:
+    # Suggerimenti disponibili solo durante l'asta.
+    if (not roster_complete) and current_role:
         st.markdown(f"### 🎯 Prossimi obiettivi — {ROLE_NAMES[current_role]}")
         history = auction_history_ratios(rosters)
         if history:
