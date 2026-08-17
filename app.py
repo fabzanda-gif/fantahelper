@@ -3769,6 +3769,384 @@ def render_my_roster(
                 )
 
 
+
+# ============================================================
+# MODULO STAGIONE — IMPORT VOTI / FORMAZIONE / CAMPIONATO
+# ============================================================
+
+FANTASY_RULES_DEFAULT = {
+    "assist": 1.0,
+    "clean_sheet": 1.0,
+    "goal_conceded": -1.0,
+    "missed_penalty": -3.0,
+    "own_goal": -1.0,
+    "red_card": -1.0,
+    "penalty_saved": 3.0,
+    "goal": 3.0,
+    "yellow_card": -0.5,
+}
+
+GOAL_THRESHOLDS_DEFAULT = {
+    1: 66,
+    2: 70,
+    3: 74,
+    4: 78,
+    5: 82,
+    6: 86,
+    7: 90,
+    8: 94,
+    9: 98,
+    10: 102,
+    11: 106,
+    12: 110,
+}
+
+
+def _parse_vote(value: Any) -> float | None:
+    """Converte 6*, 6.5, ecc.; valori non numerici diventano None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", ".").replace("*", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group()) if match else None
+
+
+def parse_fantacalcio_votes_xlsx(uploaded_file: Any, sheet_name: str = "Fantacalcio") -> pd.DataFrame:
+    """
+    Legge il formato XLSX Fantacalcio mostrato nel file di test.
+    Le righe con un solo testo prima dell'header sono interpretate come club.
+    """
+    raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
+    rows: list[dict[str, Any]] = []
+    current_team = ""
+
+    for _, row in raw.iterrows():
+        values = row.tolist()
+        first = values[0] if len(values) else None
+
+        if str(first).strip() == "Cod.":
+            continue
+
+        # Riga squadra: prima cella testuale, resto vuoto.
+        rest = values[1:13]
+        if (
+            isinstance(first, str)
+            and first.strip()
+            and all(pd.isna(v) for v in rest)
+            and not first.startswith(("Voti Fantacalcio", "Solo su ", "QUESTO FILE", "E' DA "))
+        ):
+            current_team = first.strip()
+            continue
+
+        if not isinstance(first, (int, float)) or pd.isna(first):
+            continue
+        if len(values) < 13:
+            continue
+
+        role = str(values[1]).strip() if not pd.isna(values[1]) else ""
+        name = str(values[2]).strip() if not pd.isna(values[2]) else ""
+        if role not in {"P", "D", "C", "A"} or not name:
+            continue
+
+        rows.append({
+            "Codice": int(first),
+            "Ruolo": role,
+            "Giocatore": name,
+            "Squadra": current_team,
+            "Voto": _parse_vote(values[3]),
+            "Gf": int(values[4] or 0) if not pd.isna(values[4]) else 0,
+            "Gs": int(values[5] or 0) if not pd.isna(values[5]) else 0,
+            "Rp": int(values[6] or 0) if not pd.isna(values[6]) else 0,
+            "Rs": int(values[7] or 0) if not pd.isna(values[7]) else 0,
+            "Rf": int(values[8] or 0) if not pd.isna(values[8]) else 0,
+            "Au": int(values[9] or 0) if not pd.isna(values[9]) else 0,
+            "Amm": int(values[10] or 0) if not pd.isna(values[10]) else 0,
+            "Esp": int(values[11] or 0) if not pd.isna(values[11]) else 0,
+            "Ass": int(values[12] or 0) if not pd.isna(values[12]) else 0,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def calculate_weekly_fantasy_score(row: pd.Series, rules: dict[str, float]) -> float | None:
+    """Fantavoto di test basato sui bonus/malus forniti dall'utente."""
+    vote = row.get("Voto")
+    if vote is None or pd.isna(vote):
+        return None
+
+    score = float(vote)
+    score += float(row.get("Gf", 0)) * rules["goal"]
+    score += float(row.get("Gs", 0)) * rules["goal_conceded"]
+    score += float(row.get("Rp", 0)) * rules["penalty_saved"]
+    score += float(row.get("Rs", 0)) * rules["missed_penalty"]
+    score += float(row.get("Au", 0)) * rules["own_goal"]
+    score += float(row.get("Amm", 0)) * rules["yellow_card"]
+    score += float(row.get("Esp", 0)) * rules["red_card"]
+    score += float(row.get("Ass", 0)) * rules["assist"]
+
+    # Dalla schermata: Porta inviolata +1.
+    # Nel file è inferibile con sufficiente sicurezza solo per il portiere con voto.
+    if row.get("Ruolo") == "P" and int(row.get("Gs", 0)) == 0:
+        score += rules["clean_sheet"]
+
+    return round(score, 2)
+
+
+def points_to_goals(points: float, thresholds: dict[int, int] | None = None) -> int:
+    thresholds = thresholds or GOAL_THRESHOLDS_DEFAULT
+    goals = 0
+    for goal, threshold in sorted(thresholds.items()):
+        if points >= threshold:
+            goals = goal
+    return goals
+
+
+def get_season_rules_ui() -> dict[str, float]:
+    if "season_rules" not in st.session_state:
+        st.session_state.season_rules = FANTASY_RULES_DEFAULT.copy()
+    return st.session_state.season_rules
+
+
+def render_matchday_import_tab() -> None:
+    st.markdown('<div class="rcd-section">📥 Importa voti giornata</div>', unsafe_allow_html=True)
+    st.caption(
+        "Area di test per i file XLSX Fantacalcio. Per ora i dati restano nella sessione "
+        "e non vengono scritti su Supabase."
+    )
+
+    left, right = st.columns([1.25, 1])
+    with left:
+        uploaded = st.file_uploader(
+            "File voti Fantacalcio (.xlsx)",
+            type=["xlsx"],
+            key="season_votes_upload",
+        )
+    with right:
+        sheet = st.selectbox(
+            "Redazione",
+            ["Fantacalcio", "Statistico", "Italia"],
+            key="season_votes_sheet",
+        )
+
+    with st.expander("⚙️ Regolamento bonus/malus usato nel test", expanded=False):
+        rules = get_season_rules_ui()
+        cols = st.columns(4)
+        labels = [
+            ("assist", "Assist"),
+            ("clean_sheet", "Porta inviolata"),
+            ("goal_conceded", "Gol subito"),
+            ("goal", "Gol segnato"),
+            ("missed_penalty", "Rigore sbagliato"),
+            ("penalty_saved", "Rigore parato"),
+            ("own_goal", "Autogol"),
+            ("red_card", "Espulsione"),
+            ("yellow_card", "Ammonizione"),
+        ]
+        for i, (key, label) in enumerate(labels):
+            rules[key] = cols[i % 4].number_input(
+                label,
+                value=float(rules[key]),
+                step=0.5,
+                key=f"rule_{key}",
+            )
+        st.caption(
+            "Gol vittoria/pareggio, assist gold/soft e Player of the Match sono 0/1 "
+            "nel regolamento mostrato, ma il file XLSX di test non contiene colonne separate "
+            "per identificarli. Non vengono quindi inventati."
+        )
+
+    with st.expander("🥅 Soglie gol", expanded=False):
+        st.write(
+            "**66 = 1 gol · 70 = 2 · 74 = 3 · 78 = 4 · 82 = 5 · "
+            "86 = 6 · 90 = 7 · 94 = 8 · 98 = 9 · 102 = 10 · 106 = 11 · 110 = 12**"
+        )
+
+    if uploaded is not None:
+        try:
+            votes = parse_fantacalcio_votes_xlsx(uploaded, sheet)
+            if votes.empty:
+                st.error("Non sono riuscito a trovare righe giocatore nel file.")
+                return
+
+            votes["Fantavoto"] = votes.apply(
+                lambda r: calculate_weekly_fantasy_score(r, rules),
+                axis=1,
+            )
+            st.session_state["season_votes_df"] = votes
+            st.session_state["season_votes_source"] = uploaded.name
+            st.session_state["season_votes_sheet"] = sheet
+
+            played = int(votes["Voto"].notna().sum())
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Giocatori nel file", len(votes))
+            c2.metric("Con voto", played)
+            c3.metric("Gol", int(votes["Gf"].sum()))
+            c4.metric("Assist", int(votes["Ass"].sum()))
+
+            st.success(f"File letto correttamente: **{uploaded.name}** · redazione **{sheet}**.")
+        except Exception as exc:
+            st.error(f"Errore durante la lettura del file: {exc}")
+            return
+
+    votes = st.session_state.get("season_votes_df")
+    if isinstance(votes, pd.DataFrame) and not votes.empty:
+        st.markdown('<div class="rcd-section">🔎 Anteprima giornata</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            role = st.selectbox("Ruolo", ["Tutti", "P", "D", "C", "A"], key="votes_role")
+        with c2:
+            search = st.text_input("Cerca giocatore", key="votes_search")
+
+        view = votes.copy()
+        if role != "Tutti":
+            view = view[view["Ruolo"] == role]
+        if search.strip():
+            q = normalize_string(search)
+            view = view[view["Giocatore"].map(normalize_string).str.contains(q, na=False)]
+
+        st.dataframe(
+            view[["Codice", "Ruolo", "Giocatore", "Squadra", "Voto", "Fantavoto", "Gf", "Gs", "Ass", "Amm", "Esp"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Voto": st.column_config.NumberColumn(format="%.1f"),
+                "Fantavoto": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+
+def _match_vote_for_player(player: dict[str, Any], votes: pd.DataFrame) -> pd.Series | None:
+    target = normalize_string(player.get("name", ""))
+    if not target:
+        return None
+
+    exact = votes[votes["Giocatore"].map(normalize_string) == target]
+    if not exact.empty:
+        return exact.iloc[0]
+
+    # Fallback prudente per abbreviazioni tipo "Paz N.".
+    candidates = votes[
+        votes["Giocatore"].map(normalize_string).apply(
+            lambda x: bool(x) and (x in target or target in x)
+        )
+    ]
+    return candidates.iloc[0] if len(candidates) == 1 else None
+
+
+def render_formation_lab_tab(state: AuctionState) -> None:
+    st.markdown('<div class="rcd-section">🧠 Formation Lab</div>', unsafe_allow_html=True)
+    st.caption(
+        "Prototype retrospettivo: usa i voti caricati per verificare abbinamenti e logica "
+        "della futura formazione consigliata."
+    )
+
+    votes = st.session_state.get("season_votes_df")
+    if not isinstance(votes, pd.DataFrame) or votes.empty:
+        st.info("Carica prima un XLSX nella tab **📥 GIORNATE**.")
+        return
+
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    if team_name is None or not players:
+        st.info("Non trovo una rosa RCD Escanyol da confrontare con i voti.")
+        return
+
+    matched = []
+    missing = []
+    for player in players:
+        row = _match_vote_for_player(player, votes)
+        if row is None:
+            missing.append(player.get("name", ""))
+            continue
+        matched.append({
+            "Nome": player.get("name", ""),
+            "Ruolo": player.get("role", ""),
+            "Squadra": row.get("Squadra", ""),
+            "Voto": row.get("Voto"),
+            "Fantavoto": row.get("Fantavoto"),
+            "Gol": row.get("Gf", 0),
+            "Assist": row.get("Ass", 0),
+        })
+
+    if not matched:
+        st.warning(
+            "Nessun giocatore della rosa attuale coincide con il file storico. "
+            "È normale se stai usando rose/stagioni diverse."
+        )
+        return
+
+    df = pd.DataFrame(matched)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Abbinati", f"{len(df)}/{len(players)}")
+    c2.metric("Con voto", int(df["Voto"].notna().sum()))
+    c3.metric(
+        "Fantavoto medio",
+        f"{df['Fantavoto'].dropna().mean():.2f}" if df["Fantavoto"].notna().any() else "—",
+    )
+
+    # XI di test 3-4-3: non pretende ancora di essere il motore finale.
+    chosen = []
+    for role, n in [("P", 1), ("D", 3), ("C", 4), ("A", 3)]:
+        part = df[(df["Ruolo"] == role) & df["Fantavoto"].notna()].nlargest(n, "Fantavoto")
+        chosen.append(part)
+    xi = pd.concat(chosen, ignore_index=True) if chosen else pd.DataFrame()
+
+    st.markdown('<div class="rcd-section">🧪 Miglior XI retrospettivo · 3-4-3</div>', unsafe_allow_html=True)
+    st.caption(
+        "Serve solo per validare l'import: usa i fantavoti già avvenuti, quindi non è ancora "
+        "un consiglio predittivo per la giornata successiva."
+    )
+    if len(xi) == 11:
+        total = float(xi["Fantavoto"].sum())
+        c1, c2 = st.columns(2)
+        c1.metric("Punteggio XI", f"{total:.1f}")
+        c2.metric("Gol da soglia", points_to_goals(total))
+    else:
+        st.warning(f"XI incompleto: trovati {len(xi)}/11 giocatori con voto nei ruoli richiesti.")
+
+    st.dataframe(
+        xi[["Ruolo", "Nome", "Squadra", "Voto", "Fantavoto", "Gol", "Assist"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if missing:
+        with st.expander(f"Giocatori non abbinati ({len(missing)})", expanded=False):
+            st.write(", ".join(missing))
+
+
+def render_championship_lab_tab() -> None:
+    st.markdown('<div class="rcd-section">🏆 Campionato & Classifica</div>', unsafe_allow_html=True)
+    st.caption("Struttura già pronta per la fase post-asta.")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Soglia 1° gol", "66 pt")
+    c2.metric("Scatto successivo", "+4 pt")
+    c3.metric("Squadre", "12")
+
+    st.info(
+        "Per produrre la **classifica ufficiale** servono anche le formazioni schierate "
+        "da ciascuna fantasquadra e il calendario degli scontri diretti. Il solo file voti "
+        "Fantacalcio contiene i voti dei calciatori reali, non dice quali 11 siano stati "
+        "schierati da ogni squadra della lega."
+    )
+
+    st.markdown('<div class="rcd-section">📐 Motore punteggio già impostato</div>', unsafe_allow_html=True)
+    demo = pd.DataFrame({
+        "Punti": [65.5, 66, 69.5, 70, 74, 78, 82, 90, 102, 110],
+    })
+    demo["Gol"] = demo["Punti"].map(points_to_goals)
+    st.dataframe(demo, use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="rcd-section">🚧 Prossimi dati da importare</div>', unsafe_allow_html=True)
+    st.write(
+        "Quando avremo un export Fantaleghe con **formazioni/risultati/calendario**, "
+        "questa tab potrà generare automaticamente: classifica, GF/GS, differenza reti, "
+        "fantapunti, forma ultime 5, miglior attacco/difesa e analisi fortuna/sfortuna."
+    )
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -3798,12 +4176,15 @@ def main() -> None:
     auction_finished = is_auction_finished(state)
 
 
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
             "🎯 ASTA",
             "📊 LEGA",
             "⭐ GIOCATORI",
             "⚙️ BONUS / MALUS",
+            "📥 GIORNATE",
+            "🧠 FORMAZIONE",
+            "🏆 CAMPIONATO",
         ]
     )
 
@@ -3927,6 +4308,15 @@ def main() -> None:
 
     with tab4:
         render_player_modifiers_tab()
+
+    with tab5:
+        render_matchday_import_tab()
+
+    with tab6:
+        render_formation_lab_tab(state)
+
+    with tab7:
+        render_championship_lab_tab()
 
 
 if __name__ == "__main__":
