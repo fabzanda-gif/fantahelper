@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import random
-import unicodedata
-import re
 import os
+import random
+import re
+import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
-import pandas as pd
-import streamlit as st
-import openpyxl
-import streamlit.components.v1 as components
-from supabase import create_client
+from typing import Any
 
-st.write("openpyxl installato:", openpyxl.__version__)
+import pandas as pd
+import openpyxl
+import streamlit as st
+import streamlit.components.v1 as components
+from supabase import Client, create_client
 
 
 # ============================================================
@@ -508,6 +509,13 @@ def get_supabase() -> Client:
 
 
 supabase = get_supabase()
+
+# Controllo dipendenze principali per l'import XLSX.
+# Rimane discreto nella sidebar e aiuta a diagnosticare i deploy Streamlit.
+with st.sidebar.expander("🧩 Ambiente", expanded=False):
+    st.caption(f"openpyxl {openpyxl.__version__}")
+    st.caption(f"pandas {pd.__version__}")
+
 
 
 @st.cache_data(ttl=5)
