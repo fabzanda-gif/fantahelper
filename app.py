@@ -774,6 +774,11 @@ def get_recommendation_tier(rating: float) -> str | None:
     if r >= 6.5: return "Terza Fascia"
     return None
 
+def get_roster_tier(rating: float) -> str:
+    tier = get_recommendation_tier(rating)
+    return tier if tier is not None else "Scommessa"
+
+
 def get_price_value_score(rating: float, estimated_price: int, list_price: int) -> float:
     """Punteggio qualità/prezzo: privilegia rating alto a costo d'asta contenuto."""
     price=max(1.0,float(estimated_price)); lp=max(1.0,float(list_price)); r=float(rating)
@@ -908,23 +913,97 @@ def build_draft_strategy_text(
     teams_df: pd.DataFrame,
     ratings: dict[str, float],
 ) -> tuple[str, str, str]:
-    """Restituisce fase, valutazione e consiglio per il prossimo ruolo."""
+    """Valutazione progressiva; a draft chiuso solo resoconto finale."""
     team_name, players, _ = get_my_team_players_and_purchases(state)
     if team_name is None or not players:
         return "", "", ""
 
     counts = state.team_role_totals.get(team_name, {})
     current_role = get_my_team_draft_role(state)
-    completed = [role for role in DRAFT_ORDER if counts.get(role, 0) >= ROLE_LIMITS[role]]
+    draft_complete = all(
+        counts.get(role, 0) >= ROLE_LIMITS[role]
+        for role in DRAFT_ORDER
+    )
+
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+
+    def role_avg(role: str) -> float:
+        role_players = [p for p in players if p.get("role") == role]
+        if not role_players:
+            return 0.0
+        values = [
+            calculate_player_rating_detailed(
+                p,
+                st.session_state.preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            )["final_rating"]
+            for p in role_players
+        ]
+        return sum(values) / len(values)
 
     sections = []
+
+    if draft_complete:
+        keepers = [p for p in players if p.get("role") == "P"]
+        if keepers:
+            p_avg = role_avg("P")
+            clubs = [p.get("team_nfl") for p in keepers if p.get("team_nfl")]
+            unique_clubs = len(set(clubs))
+            structure = (
+                "tre portieri della stessa squadra"
+                if unique_clubs == 1
+                else "portieri distribuiti su due squadre"
+                if unique_clubs == 2
+                else "tre portieri di tre squadre diverse"
+            )
+            selected_ga = [
+                GOALS_CONCEDED.get(code)
+                for code in set(clubs)
+                if GOALS_CONCEDED.get(code) is not None
+            ]
+            if selected_ga:
+                league_values = list(GOALS_CONCEDED.values())
+                league_median = float(pd.Series(league_values).median()) if league_values else 0
+                avg_ga = sum(selected_ga) / len(selected_ga)
+                defensive_quality = (
+                    "difese che concedono pochi gol"
+                    if avg_ga <= league_median
+                    else "difese che concedono molti gol"
+                )
+            else:
+                defensive_quality = "difese senza dati sufficienti sui gol subiti"
+            p_level = "alto livello" if p_avg >= 8.0 else "solido" if p_avg >= 6.5 else "debole"
+            sections.append(
+                f"**Portieri:** {structure}, su {defensive_quality}. "
+                f"Rating medio {p_avg:.1f}: reparto {p_level}."
+            )
+
+        d_avg = role_avg("D")
+        c_avg = role_avg("C")
+        a_avg = role_avg("A")
+        d_level = "alto livello" if d_avg >= 8 else "buona" if d_avg >= 7 else "discreta" if d_avg >= 6 else "debole"
+        c_level = "alto livello" if c_avg >= 8 else "buono" if c_avg >= 7 else "discreto" if c_avg >= 6 else "debole"
+        a_level = "alto livello" if a_avg >= 8 else "buono" if a_avg >= 7 else "discreto" if a_avg >= 6 else "debole"
+
+        sections.append(f"**Difesa:** rating medio {d_avg:.1f}: difesa {d_level}.")
+        sections.append(f"**Centrocampo:** rating medio {c_avg:.1f}: centrocampo {c_level}.")
+        sections.append(f"**Attacco:** rating medio {a_avg:.1f}: attacco {a_level}.")
+
+        team_rating = ratings.get(team_name, 0.0)
+        overall = "rosa forte" if team_rating >= 6.5 else "rosa scarsa"
+        return (
+            "🏁 **Asta conclusa — valutazione finale**",
+            " ".join(sections) + f" **Giudizio complessivo:** {overall}.",
+            "",
+        )
+
     if counts.get("P", 0) > 0:
         sections.append("**Portieri:** " + describe_goalkeeper_strategy(players))
 
     if counts.get("D", 0) > 0:
-        defenders = [p for p in players if p.get("role") == "D"]
-        d_ratings = [calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state))["final_rating"] for p in defenders]
-        d_avg = sum(d_ratings) / len(d_ratings) if d_ratings else 0
+        d_avg = role_avg("D")
         if d_avg >= 8.0:
             d_text = "Difesa molto forte: hai già una base di alto livello."
         elif d_avg >= 7.0:
@@ -935,8 +1014,7 @@ def build_draft_strategy_text(
 
     if counts.get("C", 0) > 0:
         midfielders = [p for p in players if p.get("role") == "C"]
-        c_details = [calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state)) for p in midfielders]
-        c_avg = sum(d["final_rating"] for d in c_details) / len(c_details) if c_details else 0
+        c_avg = role_avg("C")
         bonus_flags = sum(
             bool(p.get("rigorista")) or bool((p.get("list_price") or 0) >= 25)
             for p in midfielders
@@ -950,9 +1028,7 @@ def build_draft_strategy_text(
         sections.append(f"**Centrocampo:** rating medio {c_avg:.1f}. {c_text}")
 
     if counts.get("A", 0) > 0:
-        attackers = [p for p in players if p.get("role") == "A"]
-        a_details = [calculate_player_rating_detailed(p, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state)) for p in attackers]
-        a_avg = sum(d["final_rating"] for d in a_details) / len(a_details) if a_details else 0
+        a_avg = role_avg("A")
         if a_avg >= 8.0:
             a_text = "Attacco di livello alto: la fase offensiva è una forza della rosa."
         elif a_avg >= 7.0:
@@ -961,21 +1037,17 @@ def build_draft_strategy_text(
             a_text = "Attacco debole: qui va concentrata una parte importante del budget."
         sections.append(f"**Attacco:** rating medio {a_avg:.1f}. {a_text}")
 
-    if current_role:
-        next_name = ROLE_NAMES[current_role]
-        if current_role == "P":
-            advice = "Stai costruendo i portieri: privilegia il rapporto rating/costo e, a parità di valore, preferisci squadre che concedono pochi gol."
-        elif current_role == "D":
-            advice = "I portieri sono chiusi: ora cerca difensori con rating alto ma soprattutto con buon rapporto rating/costo. Se i P sono concentrati su una squadra, una difesa solida di quella squadra aumenta la coerenza della strategia."
-        elif current_role == "C":
-            advice = "Portieri e difensori sono acquisiti: cerca centrocampisti ad alto valore per credito, con titolarità, rigoristi e potenziale bonus. Non inseguire automaticamente il rating massimo."
-        else:
-            advice = "Sugli attaccanti puoi concentrare più budget sui profili forti, ma continua a confrontare rating, stima d'asta e crediti residui: un 9.0 molto costoso non è sempre migliore di un 8.6 a metà prezzo."
-        phase = f"Fase draft: **{next_name}** ({counts.get(current_role, 0)}/{ROLE_LIMITS[current_role]})."
+    next_name = ROLE_NAMES[current_role]
+    if current_role == "P":
+        advice = "Stai costruendo i portieri: privilegia il rapporto rating/costo e, a parità di valore, preferisci squadre che concedono pochi gol."
+    elif current_role == "D":
+        advice = "I portieri sono chiusi: ora cerca difensori con rating alto ma soprattutto con buon rapporto rating/costo."
+    elif current_role == "C":
+        advice = "Portieri e difensori sono acquisiti: cerca centrocampisti ad alto valore per credito, con titolarità, rigoristi e potenziale bonus."
     else:
-        phase = "🎉 Draft completato."
-        advice = "Ora valuta il rapporto qualità/prezzo complessivo e le eventuali correzioni di rosa."
+        advice = "Sugli attaccanti puoi concentrare più budget sui profili forti, ma continua a confrontare rating, stima d'asta e crediti residui."
 
+    phase = f"Fase draft: **{next_name}** ({counts.get(current_role, 0)}/{ROLE_LIMITS[current_role]})."
     return phase, " ".join(sections), advice
 
 
@@ -1408,12 +1480,18 @@ def render_team_analysis(
             delta_color="off",
         )
 
-        if avg_score >= 8:
-            st.sidebar.success("Rosa da Scudetto!")
-        elif avg_score >= 6.5:
-            st.sidebar.info("Rosa competitiva.")
+        if state.team_total_bought.get(selected_team, 0) >= TOTAL_SLOTS_PER_TEAM:
+            if avg_score >= 6.5:
+                st.sidebar.success("Rosa forte.")
+            else:
+                st.sidebar.warning("Rosa scarsa.")
         else:
-            st.sidebar.warning("Rosa da rinforzare.")
+            if avg_score >= 8:
+                st.sidebar.success("Rosa da Scudetto!")
+            elif avg_score >= 6.5:
+                st.sidebar.info("Rosa competitiva.")
+            else:
+                st.sidebar.warning("Rosa da rinforzare.")
     else:
         st.sidebar.metric("Rating Rosa", "N/D")
         st.sidebar.info("Assegna giocatori per calcolare il rating.")
@@ -2071,6 +2149,16 @@ def render_team_overview(
         st.info("Nessuna squadra configurata.")
         return
 
+    grades_df = calculate_auction_grades(
+        teams_df.to_dict("records"),
+        state,
+        ratings,
+    )
+    auction_grade_map = {
+        row["Squadra"]: float(row["Voto Asta"])
+        for _, row in grades_df.iterrows()
+    }
+
     summaries = []
 
     for _, team in teams_df.iterrows():
@@ -2117,7 +2205,7 @@ def render_team_overview(
                 else f"{count} criticità da monitorare"
             )
             status = (
-                f"✨ Rating: **{ratings[name]:.1f}** "
+                f"🏆 Valutazione asta: **{auction_grade_map.get(name, 0.0):.1f}** "
                 f"({top_players} Top) — {risk_text}."
             )
 
@@ -2967,6 +3055,34 @@ def render_my_team_evaluation(
     if advice:
         st.success(f"💡 **Consiglio:** {advice}")
 
+    if current_role is None and bought >= TOTAL_SLOTS_PER_TEAM:
+        custom_modifiers = load_custom_modifiers()
+        goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+        tier_counts = {
+            "TOP": 0,
+            "Prima Fascia": 0,
+            "Seconda Fascia": 0,
+            "Terza Fascia": 0,
+            "Scommessa": 0,
+        }
+
+        for player in state.team_players_map.get(team_name, []):
+            details = calculate_player_rating_detailed(
+                player,
+                st.session_state.preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            )
+            tier_counts[get_roster_tier(details["final_rating"])] += 1
+
+        st.markdown("### 📊 Composizione qualitativa della rosa")
+        q1, q2, q3, q4, q5 = st.columns(5)
+        q1.metric("🏆 TOP", tier_counts["TOP"])
+        q2.metric("🥇 Prima Fascia", tier_counts["Prima Fascia"])
+        q3.metric("🥈 Seconda Fascia", tier_counts["Seconda Fascia"])
+        q4.metric("🥉 Terza Fascia", tier_counts["Terza Fascia"])
+        q5.metric("🎲 Scommesse", tier_counts["Scommessa"])
+
     # Suggerimenti per il prossimo acquisto, limitati al ruolo attualmente draftato.
     if current_role:
         st.markdown(f"### 🎯 Prossimi obiettivi — {ROLE_NAMES[current_role]}")
@@ -3125,6 +3241,7 @@ def render_my_roster(
             {
                 "Nome": player.get("name", ""),
                 "Rating": details["final_rating"],
+                "Fascia": get_roster_tier(details["final_rating"]),
                 "Squadra": player.get("team_nfl", "—"),
                 "Crediti Spesi": int(purchase.get("purchase_price") or 0),
                 "Crediti Dichiarati": int(player.get("list_price") or 0),
