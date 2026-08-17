@@ -28,9 +28,9 @@ st.markdown("""
    ========================================================== */
 
 :root {
-    --rcd-bg: #f5f7fb;
+    --rcd-bg: #eef4ff;
     --rcd-surface: #ffffff;
-    --rcd-surface-soft: #f8fafc;
+    --rcd-surface-soft: #edf4ff;
     --rcd-text: #172033;
     --rcd-muted: #64748b;
     --rcd-border: #dbe3ef;
@@ -50,8 +50,9 @@ st.markdown("""
 
 [data-testid="stAppViewContainer"] {
     background:
-        radial-gradient(circle at 92% 2%, rgba(37,99,235,.10), transparent 25%),
-        linear-gradient(180deg, #f8faff 0%, var(--rcd-bg) 100%);
+        radial-gradient(circle at 92% 2%, rgba(37,99,235,.20), transparent 27%),
+        radial-gradient(circle at 5% 45%, rgba(59,130,246,.10), transparent 24%),
+        linear-gradient(180deg, #f4f8ff 0%, #eaf2ff 52%, #f5f8ff 100%);
     color: var(--rcd-text);
 }
 
@@ -69,8 +70,9 @@ st.markdown("""
 
 /* Sidebar volutamente chiara e separata */
 [data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
-    border-right: 1px solid #d9e1ec;
+    background:
+        linear-gradient(180deg, #f7faff 0%, #e7effc 100%);
+    border-right: 1px solid #c9d8ef;
 }
 [data-testid="stSidebar"] * {
     color: #20283a;
@@ -85,7 +87,7 @@ st.markdown("""
     margin: 0 0 1rem 0;
     border: 1px solid var(--rcd-border);
     border-radius: 14px;
-    background: rgba(255,255,255,.97);
+    background: rgba(239,246,255,.97);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     box-shadow: 0 8px 24px rgba(15,23,42,.08);
@@ -167,8 +169,8 @@ button[data-baseweb="tab"][aria-selected="true"] span {
     border: 1px solid var(--rcd-border);
     border-radius: 15px;
     padding: .82rem .95rem;
-    background: var(--rcd-surface);
-    box-shadow: 0 7px 20px rgba(15,23,42,.055);
+    background: linear-gradient(145deg, #ffffff 0%, #f0f6ff 100%);
+    box-shadow: 0 7px 20px rgba(30,64,175,.07);
 }
 
 [data-testid="stMetricLabel"] p,
@@ -202,9 +204,9 @@ button[data-baseweb="tab"][aria-selected="true"] span {
     font-size: .88rem;
     font-weight: 750;
     padding: 9px 12px;
-    border: 1px solid #e2e8f0;
+    border: 1px solid #cfe0f8;
     border-radius: 10px;
-    background: #f8fafc;
+    background: #edf5ff;
     margin: 7px 0 12px 0;
 }
 
@@ -244,14 +246,14 @@ button[data-baseweb="tab"][aria-selected="true"] span {
 /* Container, expander, form controls */
 div[data-testid="stExpander"] {
     border-radius: 12px;
-    border: 1px solid var(--rcd-border);
-    background: rgba(255,255,255,.72);
+    border: 1px solid #cfddf2;
+    background: rgba(245,249,255,.90);
 }
 
 div[data-testid="stVerticalBlockBorderWrapper"] {
-    border-color: var(--rcd-border) !important;
+    border-color: #cfddf2 !important;
     border-radius: 14px !important;
-    background: rgba(255,255,255,.80);
+    background: linear-gradient(145deg, #ffffff, #f3f7ff);
 }
 
 div[data-baseweb="select"] > div,
@@ -804,8 +806,22 @@ def render_pending_purchase_banner() -> None:
             background: linear-gradient(135deg,#1e3a8a,#0f172a);
             color:white;
         }}
-        .auction-banner-title {{ font-size: 1.8rem; font-weight: 900; margin-bottom: 6px; letter-spacing:.02em; }}
-        .auction-banner-text {{ font-weight: 600; }}
+        .auction-banner,
+        .auction-banner *,
+        .auction-banner-title,
+        .auction-banner-text {{
+            color: #ffffff !important;
+        }}
+        .auction-banner-title {{
+            font-size: 1.8rem;
+            font-weight: 900;
+            margin-bottom: 6px;
+            letter-spacing:.02em;
+        }}
+        .auction-banner-text {{
+            font-weight: 650;
+            color: #ffffff !important;
+        }}
         @keyframes auctionPulse {{
             0%,100% {{ transform: scale(1); }}
             50% {{ transform: scale(1.025); }}
@@ -2906,12 +2922,14 @@ def calculate_auction_grades(
             }
         )
 
-    return (
+    result = (
         pd.DataFrame(grades)
         .sort_values("Voto Asta", ascending=False)
         .reset_index(drop=True)
-        .rename_axis("Posizione")
     )
+    result.index = range(1, len(result) + 1)
+    result.index.name = "Posizione"
+    return result
 
 
 def render_rosters_tab(
