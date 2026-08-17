@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import os
 import random
-import re
 import unicodedata
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-
+import re
+import os
 import pandas as pd
 import streamlit as st
+import openpyxl
 import streamlit.components.v1 as components
-from supabase import Client, create_client
+from supabase import create_client
+
+st.write("openpyxl installato:", openpyxl.__version__)
 
 
 # ============================================================
