@@ -23,7 +23,18 @@ from supabase import Client, create_client
 # CONFIGURAZIONE
 # ============================================================
 
-st.set_page_config(page_title="RCD Escanyol Auction Center", page_icon="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Gemini_Generated_Image_sf4v3ssf4v3ssf4v.jpeg", layout="wide")
+st.set_page_config(page_title="fantahe1per", page_icon="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Gemini_Generated_Image_sf4v3ssf4v3ssf4v.jpeg", layout="wide")
+
+st.markdown("""<style>
+/* Tab navigation: labels più decise e leggibili */
+div[data-testid="stTabs"] button[data-baseweb="tab"] p,
+div[data-testid="stTabs"] button[data-baseweb="tab"] span {
+    font-weight: 800 !important;
+}
+div[data-testid="stTabs"] button[data-baseweb="tab"] {
+    font-weight: 800 !important;
+}
+</style>""", unsafe_allow_html=True)
 
 st.markdown("""
 <style>
