@@ -26,13 +26,13 @@ from supabase import Client, create_client
 st.set_page_config(page_title="fantahe1per", page_icon="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Gemini_Generated_Image_sf4v3ssf4v3ssf4v.jpeg", layout="wide")
 
 st.markdown("""<style>
-/* Tab navigation: labels più decise e leggibili */
-div[data-testid="stTabs"] button[data-baseweb="tab"] p,
-div[data-testid="stTabs"] button[data-baseweb="tab"] span {
+/* Tab navigation: forza realmente il grassetto sui label BaseWeb */
+div[data-testid="stTabs"] [data-baseweb="tab-list"] button[role="tab"],
+div[data-testid="stTabs"] [data-baseweb="tab-list"] button[role="tab"] *,
+div[data-testid="stTabs"] button[data-baseweb="tab"],
+div[data-testid="stTabs"] button[data-baseweb="tab"] * {
     font-weight: 800 !important;
-}
-div[data-testid="stTabs"] button[data-baseweb="tab"] {
-    font-weight: 800 !important;
+    font-synthesis: weight !important;
 }
 </style>""", unsafe_allow_html=True)
 
@@ -4236,7 +4236,7 @@ def render_auction_dashboard_header(
     st.markdown(
         f"""
         <div class="rcd-hero">
-          <div class="rcd-kicker">RCD ESCANYOL · AUCTION CENTER</div>
+          <div class="rcd-kicker">fantahe1per</div>
           <div class="rcd-hero-title">⚽ Live Auction Dashboard</div>
           <div class="rcd-phase">{phase}</div>
         </div>
