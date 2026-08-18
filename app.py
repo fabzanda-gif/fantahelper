@@ -623,43 +623,81 @@ def clear_auth_state() -> None:
         st.session_state.pop(key, None)
 
 
+def save_authenticated_session(
+    response: Any,
+    fallback_user: Any | None = None,
+) -> dict[str, Any]:
+    """Salva in modo uniforme sessione e utente restituiti da Supabase."""
+    session = getattr(response, "session", None)
+    user = getattr(response, "user", None) or fallback_user
+
+    # set_session() in alcune versioni può restituire direttamente una sessione.
+    if session is None and getattr(response, "access_token", None):
+        session = response
+
+    if session is None:
+        raise RuntimeError("Supabase non ha restituito una sessione valida.")
+
+    access_token = getattr(session, "access_token", None)
+    refresh_token = getattr(session, "refresh_token", None)
+
+    if not access_token or not refresh_token:
+        raise RuntimeError("Token OAuth non disponibili.")
+
+    st.session_state["auth_access_token"] = access_token
+    st.session_state["auth_refresh_token"] = refresh_token
+    st.session_state["auth_user"] = _minimal_user_dict(user)
+
+    return st.session_state["auth_user"]
+
+
 def handle_oauth_callback() -> bool:
-    """Scambia il code PKCE restituito da Supabase con una sessione."""
-    code = st.query_params.get("code")
+    """Scambia il code PKCE e trasferisce la sessione al client principale."""
+    code_param = st.query_params.get("code")
     flow_id = st.query_params.get("auth_flow")
 
-    if not code or not flow_id:
+    if not code_param or not flow_id:
         return False
 
     try:
+        # Fondamentale: recuperiamo lo stesso client usato per iniziare
+        # questo specifico flusso OAuth/PKCE.
         auth_client = get_auth_flow_client(str(flow_id))
+
         response = auth_client.auth.exchange_code_for_session(
-            {"auth_code": str(code)}
+            {"auth_code": str(code_param)}
         )
 
         session = getattr(response, "session", None)
         user = getattr(response, "user", None)
 
         if session is None:
-            # Alcune versioni espongono la sessione locale dopo lo scambio.
             session = auth_client.auth.get_session()
 
         access_token = getattr(session, "access_token", None)
         refresh_token = getattr(session, "refresh_token", None)
 
         if not access_token or not refresh_token:
-            raise RuntimeError("Supabase non ha restituito una sessione valida.")
+            raise RuntimeError("Supabase non ha restituito una sessione OAuth valida.")
 
         if user is None:
             verified = auth_client.auth.get_user(access_token)
             user = getattr(verified, "user", None)
 
-        st.session_state["auth_access_token"] = access_token
-        st.session_state["auth_refresh_token"] = refresh_token
-        st.session_state["auth_user"] = _minimal_user_dict(user)
+        # Trasferiamo esplicitamente i token anche al client Supabase principale.
+        # Questo rende il ritorno OAuth più robusto, soprattutto su mobile,
+        # dove Streamlit ricrea la pagina dopo il redirect completo.
+        main_response = supabase.auth.set_session(
+            access_token,
+            refresh_token,
+        )
+        save_authenticated_session(
+            main_response,
+            fallback_user=user,
+        )
+
         st.session_state["auth_flow_id"] = str(flow_id)
 
-        # Rimuove code/verifier dalla barra URL appena terminato il login.
         st.query_params.clear()
         st.rerun()
 
@@ -671,12 +709,9 @@ def handle_oauth_callback() -> bool:
     return True
 
 
-def restore_and_verify_auth_session() -> dict[str, Any] | None:
-    """
-    Verifica il JWT con Supabase.
 
-    I token rimangono nello st.session_state della sessione Streamlit.
-    """
+def restore_and_verify_auth_session() -> dict[str, Any] | None:
+    """Ripristina e verifica la sessione OAuth/email dopo i rerun Streamlit."""
     access_token = st.session_state.get("auth_access_token")
     refresh_token = st.session_state.get("auth_refresh_token")
 
@@ -684,25 +719,20 @@ def restore_and_verify_auth_session() -> dict[str, Any] | None:
         return None
 
     try:
-        flow_id = st.session_state.get("auth_flow_id") or "restored-session"
-        auth_client = get_auth_flow_client(str(flow_id))
-        session_response = auth_client.auth.set_session(
+        # Manteniamo sincronizzato il client principale.
+        main_response = supabase.auth.set_session(
             access_token,
             refresh_token,
         )
 
-        session = getattr(session_response, "session", None)
-        if session is not None:
-            st.session_state["auth_access_token"] = getattr(
-                session, "access_token", access_token
-            )
-            st.session_state["auth_refresh_token"] = getattr(
-                session, "refresh_token", refresh_token
-            )
+        main_session = getattr(main_response, "session", None)
+        if main_session is not None:
+            access_token = getattr(main_session, "access_token", access_token)
+            refresh_token = getattr(main_session, "refresh_token", refresh_token)
+            st.session_state["auth_access_token"] = access_token
+            st.session_state["auth_refresh_token"] = refresh_token
 
-        verified = auth_client.auth.get_user(
-            st.session_state["auth_access_token"]
-        )
+        verified = supabase.auth.get_user(access_token)
         user_obj = getattr(verified, "user", None)
 
         if user_obj is None:
@@ -718,6 +748,7 @@ def restore_and_verify_auth_session() -> dict[str, Any] | None:
         return None
 
 
+
 def build_provider_login_url(provider: str) -> str:
     """
     Genera URL OAuth separato per provider.
@@ -726,9 +757,10 @@ def build_provider_login_url(provider: str) -> str:
     flow_id = uuid.uuid4().hex
     auth_client = get_auth_flow_client(flow_id)
 
+    app_url = get_public_app_url().rstrip("/")
     redirect_to = (
-        f"{get_public_app_url()}"
-        f"/?auth_callback=1&auth_flow={flow_id}"
+        f"{app_url}/"
+        f"?auth_callback=1&auth_flow={flow_id}"
     )
 
     response = auth_client.auth.sign_in_with_oauth(
@@ -5000,13 +5032,13 @@ def main() -> None:
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
-            "🎯 ASTA",
-            "📊 LEGA",
-            "⭐ GIOCATORI",
-            "⚙️ BONUS / MALUS",
-            "📥 GIORNATE",
-            "🧠 FORMAZIONE",
-            "🏆 CAMPIONATO",
+            "🎯 𝐀𝐒𝐓𝐀",
+            "📊 𝐋𝐄𝐆𝐀",
+            "⭐ 𝐆𝐈𝐎𝐂𝐀𝐓𝐎𝐑𝐈",
+            "⚙️ 𝐁𝐎𝐍𝐔𝐒 / 𝐌𝐀𝐋𝐔𝐒",
+            "📥 𝐆𝐈𝐎𝐑𝐍𝐀𝐓𝐄",
+            "🧠 𝐅𝐎𝐑𝐌𝐀𝐙𝐈𝐎𝐍𝐄",
+            "🏆 𝐂𝐀𝐌𝐏𝐈𝐎𝐍𝐀𝐓𝐎",
         ]
     )
 
