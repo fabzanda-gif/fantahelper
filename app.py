@@ -23,7 +23,7 @@ from supabase import Client, create_client
 # CONFIGURAZIONE
 # ============================================================
 
-st.set_page_config(page_title="RCD Escanyol Auction Center", layout="wide")
+st.set_page_config(page_title="RCD Escanyol Auction Center", page_icon="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Icon.png", layout="wide")
 
 st.markdown("""
 <style>
@@ -1056,7 +1056,7 @@ def render_app_logo() -> None:
         <div class="rcd-sidebar-logo-wrap">
             <img
                 class="rcd-sidebar-logo"
-                src="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Screenshot%202026-08-18%20at%2020.11.38.png"
+                src="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Screenshot%202026-08-18%20at%2020.01.18.png"
                 alt="Fantahelper"
             >
         </div>
