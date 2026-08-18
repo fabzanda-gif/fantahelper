@@ -354,6 +354,22 @@ div[data-baseweb="select"] div {
 
 
 
+
+/* Solo le 4 card "Panoramica Squadre & Alert Strategici" */
+div[data-testid="stVerticalBlock"]:has(> div > div > #league-overview-metrics)
+div[data-testid="stHorizontalBlock"] div[data-testid="stMetricValue"] {
+    font-size: clamp(1.55rem, 2.2vw, 2.25rem) !important;
+    line-height: 1.05 !important;
+}
+div[data-testid="stVerticalBlock"]:has(> div > div > #league-overview-metrics)
+div[data-testid="stHorizontalBlock"] div[data-testid="stMetricLabel"] {
+    font-size: .92rem !important;
+}
+div[data-testid="stVerticalBlock"]:has(> div > div > #league-overview-metrics)
+div[data-testid="stHorizontalBlock"] div[data-testid="stMetricDelta"] {
+    font-size: .82rem !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -2556,10 +2572,23 @@ def render_team_analysis(
         )
 
         if state.team_total_bought.get(selected_team, 0) >= TOTAL_SLOTS_PER_TEAM:
-            if avg_score >= 6.5:
-                st.sidebar.success("Rosa forte.")
+            # A rosa completa la valutazione non usa più una soglia assoluta:
+            # conta il piazzamento rispetto alle altre 12 rose, quindi esprime
+            # direttamente il potenziale competitivo della squadra.
+            league_size = max(1, len(ratings))
+
+            if rating_position == 1:
+                st.sidebar.success("🏆 Favorita per la vittoria.")
+            elif rating_position <= max(2, round(league_size * 0.25)):
+                st.sidebar.success("🔥 Rosa da titolo.")
+            elif rating_position <= max(4, round(league_size * 0.42)):
+                st.sidebar.info("⚔️ Rosa da alta classifica.")
+            elif rating_position <= max(6, round(league_size * 0.58)):
+                st.sidebar.info("📊 Rosa da metà classifica.")
+            elif rating_position <= max(9, round(league_size * 0.75)):
+                st.sidebar.warning("📉 Rosa da medio-bassa classifica.")
             else:
-                st.sidebar.warning("Rosa scarsa.")
+                st.sidebar.warning("⚠️ Rosa da bassa classifica.")
         else:
             if avg_score >= 8:
                 st.sidebar.success("Rosa da Scudetto!")
@@ -3481,6 +3510,7 @@ def render_team_overview(
         for name in teams_df["name"].tolist()
     )
 
+    st.markdown('<div id="league-overview-metrics"></div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
         "⭐ Miglior rosa",
