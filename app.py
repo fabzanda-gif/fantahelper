@@ -351,6 +351,17 @@ div[data-baseweb="select"] div {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* Tab: stesso font dell'app, solo con peso più marcato */
+div[data-testid="stTabs"] button[role="tab"],
+div[data-testid="stTabs"] button[role="tab"] p,
+div[data-testid="stTabs"] button[role="tab"] span,
+div[data-baseweb="tab-list"] button,
+div[data-baseweb="tab-list"] button p,
+div[data-baseweb="tab-list"] button span {
+    font-family: inherit !important;
+    font-weight: 700 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -5032,13 +5043,13 @@ def main() -> None:
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
-            "🎯 𝐀𝐒𝐓𝐀",
-            "📊 𝐋𝐄𝐆𝐀",
-            "⭐ 𝐆𝐈𝐎𝐂𝐀𝐓𝐎𝐑𝐈",
-            "⚙️ 𝐁𝐎𝐍𝐔𝐒 / 𝐌𝐀𝐋𝐔𝐒",
-            "📥 𝐆𝐈𝐎𝐑𝐍𝐀𝐓𝐄",
-            "🧠 𝐅𝐎𝐑𝐌𝐀𝐙𝐈𝐎𝐍𝐄",
-            "🏆 𝐂𝐀𝐌𝐏𝐈𝐎𝐍𝐀𝐓𝐎",
+            "🎯 ASTA",
+            "📊 LEGA",
+            "⭐ GIOCATORI",
+            "⚙️ BONUS / MALUS",
+            "📥 GIORNATE",
+            "🧠 FORMAZIONE",
+            "🏆 CAMPIONATO",
         ]
     )
 
