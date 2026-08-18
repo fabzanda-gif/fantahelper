@@ -1256,6 +1256,16 @@ def render_logout_sidebar() -> None:
             pass
 
         clear_auth_state()
+        for key in (
+            "current_user_team_id",
+            "current_user_team_name",
+            "_ui_defaults_for_team",
+            "sidebar_team_analysis",
+            "manual_target_team",
+            "table_team_filter_tab2",
+            "my_team_budget",
+        ):
+            st.session_state.pop(key, None)
         st.rerun()
 
 
@@ -1336,10 +1346,28 @@ def save_user_team_assignment(
         )
         st.session_state["current_user_team_id"] = str(team_id)
         st.session_state["current_user_team_name"] = team_name
+        sync_user_team_ui_defaults(team_name)
         st.session_state.pop("user_team_table_error", None)
         return True, ""
     except Exception as exc:
         return False, str(exc)
+
+
+def sync_user_team_ui_defaults(team_name: str) -> None:
+    """
+    Allinea le preselezioni della UI alla squadra associata al login.
+
+    L'inizializzazione avviene una sola volta per squadra nella sessione:
+    dopo di che l'utente resta libero di cambiare manualmente i filtri.
+    """
+    marker = st.session_state.get("_ui_defaults_for_team")
+    if marker == team_name:
+        return
+
+    st.session_state["sidebar_team_analysis"] = team_name
+    st.session_state["manual_target_team"] = team_name
+    st.session_state["table_team_filter_tab2"] = team_name
+    st.session_state["_ui_defaults_for_team"] = team_name
 
 
 def require_user_team_assignment(
@@ -1373,6 +1401,7 @@ def require_user_team_assignment(
             team_name = str(matched.get("name") or assignment.get("team_name") or "")
             st.session_state["current_user_team_id"] = assigned_id
             st.session_state["current_user_team_name"] = team_name
+            sync_user_team_ui_defaults(team_name)
             return team_name
 
     # Se la tabella non esiste ancora, mostriamo un errore esplicito invece
@@ -1702,8 +1731,9 @@ def queue_purchase_banner(
         level = "great"
         title = "✨ PRIMA FASCIA!"
         message = (
-            f"Acquistato **{player_name}** · Rating **{rating:.1f}** · "
-            f"Prezzo **{purchase_price} cr**. Innesto di livello."
+            f"**{player_name}** entra nella rosa **{team_name}** · "
+            f"Rating **{rating:.1f}** · Prezzo **{purchase_price} cr**. "
+            "Innesto di livello."
         )
     else:
         level = "normal"
@@ -1959,7 +1989,7 @@ def get_my_team_players_and_purchases(
 
 
 def get_my_team_draft_role(state: "AuctionState") -> str | None:
-    """Restituisce il prossimo ruolo della rosa RCD Escanyol secondo PDCA."""
+    """Restituisce il prossimo ruolo della squadra associata al login secondo PDCA."""
     team_name = get_my_team_name_from_state(state)
     if team_name is None:
         return "P"
@@ -2774,7 +2804,7 @@ def render_team_analysis(
     selected_team = st.sidebar.selectbox(
         "Analizza squadra",
         team_names,
-        index=default_team_index(team_names),
+        index=default_team_index(team_names, get_current_user_team_name()),
         key="sidebar_team_analysis",
     )
 
@@ -4070,7 +4100,7 @@ def render_rosters_tab(
     selected_filter = st.selectbox(
         "Filtra per Squadra",
         filter_options,
-        index=default_team_index(filter_options),
+        index=default_team_index(filter_options, get_current_user_team_name()),
         key="table_team_filter_tab2",
     )
 
@@ -4529,7 +4559,7 @@ def render_auction_dashboard_header(
         f"""
         <div class="rcd-hero">
           <div class="rcd-kicker">fantahe1per</div>
-          <div class="rcd-hero-title">⚽ Live Auction Dashboard</div>
+          <div class="rcd-hero-title">⚽ Live Auction Dashboard - {escape(team_name)}</div>
           <div class="rcd-phase">{phase}</div>
         </div>
         """,
@@ -4553,7 +4583,7 @@ def render_my_team_evaluation(
     ratings: dict[str, float],
     rosters: list[dict[str, Any]],
 ) -> None:
-    """Valuta RCD Escanyol in modo progressivo seguendo il draft PDCA."""
+    """Valuta la squadra associata al login in modo progressivo seguendo il draft PDCA."""
     team_name, players, purchases = get_my_team_players_and_purchases(state)
     if team_name is None or not players:
         # A rosa vuota non mostriamo valutazioni generiche: l'utente ha chiesto
@@ -4767,7 +4797,7 @@ def render_my_team_evaluation(
 def render_my_roster(
     state: AuctionState,
 ) -> None:
-    """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
+    """Mostra la rosa della squadra associata al login divisa P-D-C-A."""
     team_name = resolve_my_team_name(list(state.team_players_map))
 
     st.markdown(
