@@ -1211,8 +1211,26 @@ def render_authenticated_user_header(user: dict[str, Any]) -> None:
 def render_logout_sidebar() -> None:
     """Solo pulsante logout, senza Account/nome/email/avatar nella sidebar."""
     st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        """
+        <style>
+        div[data-testid="stSidebar"] button[kind="secondary"][data-testid="stBaseButton-secondary"] {
+            background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
+            border: 1px solid #1d4ed8 !important;
+            color: #ffffff !important;
+            font-weight: 800 !important;
+            box-shadow: 0 6px 16px rgba(37,99,235,.18);
+        }
+        div[data-testid="stSidebar"] button[kind="secondary"][data-testid="stBaseButton-secondary"] * {
+            color: #ffffff !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if st.sidebar.button(
-        "↪ Esci",
+        "Logout",
         key="auth_logout",
         use_container_width=True,
     ):
