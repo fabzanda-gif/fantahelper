@@ -731,100 +731,38 @@ def render_login_page() -> None:
     """Pagina login RCD Escanyol con pulsanti Google/Facebook e loghi."""
     st.markdown(
         """
-        <style>
-        [data-testid="stSidebar"] { display: none; }
-
-        .login-shell {
-            max-width: 470px;
-            margin: 5vh auto 0 auto;
-        }
-        .login-brand {
-            border-radius: 24px;
-            padding: 30px 30px 26px 30px;
-            background:
-                radial-gradient(circle at 92% 4%, rgba(96,165,250,.42), transparent 31%),
+<style>
+[data-testid="stSidebar"] { display: none; }
+.login-shell { max-width: 470px; margin: 5vh auto 0 auto; }
+.login-brand {
+    border-radius: 24px; padding: 30px 30px 26px;
+    background: radial-gradient(circle at 92% 4%, rgba(96,165,250,.42), transparent 31%),
                 linear-gradient(145deg, #102a62 0%, #1648a8 64%, #2563eb 100%);
-            box-shadow: 0 22px 55px rgba(30,64,175,.22);
-            text-align: center;
-            margin-bottom: 16px;
-        }
-        .login-brand * { color: #fff !important; }
-        .login-eyebrow {
-            font-size: .74rem;
-            font-weight: 900;
-            letter-spacing: .14em;
-            color: #bfdbfe !important;
-        }
-        .login-title {
-            font-size: 2rem;
-            font-weight: 950;
-            letter-spacing: -.04em;
-            margin: 7px 0 4px 0;
-        }
-        .login-subtitle {
-            font-size: .95rem;
-            color: #dbeafe !important;
-        }
-        .login-card {
-            border: 1px solid #cbdcf5;
-            border-radius: 20px;
-            padding: 25px 24px;
-            background: rgba(255,255,255,.97);
-            box-shadow: 0 13px 38px rgba(15,23,42,.08);
-        }
-        .login-card-title {
-            text-align:center;
-            font-weight: 900;
-            font-size: 1.08rem;
-            color:#172033 !important;
-            margin-bottom: 15px;
-        }
-        .social-login {
-            height: 52px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            width: 100%;
-            border-radius: 12px;
-            text-decoration: none !important;
-            font-size: .96rem;
-            font-weight: 850;
-            margin: 11px 0;
-            transition: transform .12s ease, box-shadow .12s ease;
-            box-sizing: border-box;
-        }
-        .social-login:hover {
-            transform: translateY(-1px);
-            text-decoration: none !important;
-        }
-        .social-login.google {
-            color: #24324a !important;
-            background: #fff;
-            border: 1px solid #cbd5e1;
-            box-shadow: 0 4px 12px rgba(15,23,42,.06);
-        }
-        .social-login.facebook {
-            color: #fff !important;
-            background: #1877F2;
-            border: 1px solid #1468d4;
-            box-shadow: 0 5px 14px rgba(24,119,242,.18);
-        }
-        .social-login.facebook span { color:#fff !important; }
-        .social-login.google span { color:#24324a !important; }
-        .social-logo {
-            width: 22px;
-            height: 22px;
-            flex: 0 0 22px;
-        }
-        .login-note {
-            text-align:center;
-            color:#64748b !important;
-            font-size:.78rem;
-            line-height:1.45;
-            margin-top:16px;
-        }
-        </style>
+    box-shadow: 0 22px 55px rgba(30,64,175,.22);
+    text-align: center; margin-bottom: 16px;
+}
+.login-brand * { color: #fff !important; }
+.login-eyebrow { font-size:.74rem; font-weight:900; letter-spacing:.14em; color:#bfdbfe !important; }
+.login-title { font-size:2rem; font-weight:950; letter-spacing:-.04em; margin:7px 0 4px; }
+.login-subtitle { font-size:.95rem; color:#dbeafe !important; }
+.login-card {
+    border:1px solid #cbdcf5; border-radius:20px; padding:25px 24px;
+    background:rgba(255,255,255,.97); box-shadow:0 13px 38px rgba(15,23,42,.08);
+}
+.login-card-title { text-align:center; font-weight:900; font-size:1.08rem; color:#172033 !important; margin-bottom:15px; }
+.social-login {
+    height:52px; display:flex; align-items:center; justify-content:center; gap:12px;
+    width:100%; border-radius:12px; text-decoration:none !important;
+    font-size:.96rem; font-weight:850; margin:11px 0; box-sizing:border-box;
+}
+.social-login:hover { transform:translateY(-1px); text-decoration:none !important; }
+.social-login.google { color:#24324a !important; background:#fff; border:1px solid #cbd5e1; box-shadow:0 4px 12px rgba(15,23,42,.06); }
+.social-login.facebook { color:#fff !important; background:#1877F2; border:1px solid #1468d4; box-shadow:0 5px 14px rgba(24,119,242,.18); }
+.social-login.facebook span { color:#fff !important; }
+.social-login.google span { color:#24324a !important; }
+.social-logo { width:22px; height:22px; flex:0 0 22px; }
+.login-note { text-align:center; color:#64748b !important; font-size:.78rem; line-height:1.45; margin-top:16px; }
+</style>
         """,
         unsafe_allow_html=True,
     )
@@ -835,66 +773,48 @@ def render_login_page() -> None:
         google_url = build_provider_login_url("google")
         facebook_url = build_provider_login_url("facebook")
     except Exception as exc:
-        st.error(
-            "Non riesco a generare i link di login. "
-            "Controlla la configurazione Auth di Supabase."
-        )
+        st.error("Non riesco a generare i link di login. Controlla la configurazione Auth di Supabase.")
         st.caption(str(exc))
         st.stop()
 
     google_url = escape(google_url, quote=True)
     facebook_url = escape(facebook_url, quote=True)
 
-    # Google "G" multicolore e Facebook "f" come SVG inline.
-    google_svg = """
-    <svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">
-      <path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41z"/>
-      <path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.63-2.43l-3.24-2.54c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22z"/>
-      <path fill="#FBBC05" d="M6.39 13.86A6 6 0 0 1 6.08 12c0-.65.11-1.28.31-1.86V7.52H3.04A10 10 0 0 0 2 12c0 1.61.38 3.13 1.04 4.48l3.35-2.62z"/>
-      <path fill="#EA4335" d="M12 6.01c1.47 0 2.79.51 3.83 1.5l2.87-2.87A9.63 9.63 0 0 0 12 2a10 10 0 0 0-8.96 5.52l3.35 2.62C7.18 7.77 9.39 6.01 12 6.01z"/>
-    </svg>
-    """
-
-    facebook_svg = """
-    <svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="12" fill="#ffffff"/>
-      <path fill="#1877F2" d="M13.52 20v-7h2.35l.35-2.73h-2.7V8.53c0-.79.22-1.33 1.35-1.33h1.44V4.76c-.25-.03-1.1-.1-2.1-.1-2.08 0-3.5 1.27-3.5 3.6v2.01H8.36V13h2.35v7h2.81z"/>
-    </svg>
-    """
-
-    st.markdown(
-        f"""
-        <div class="login-shell">
-          <div class="login-brand">
-            <div class="login-eyebrow">RCD ESCANYOL</div>
-            <div class="login-title">⚽ Auction & Season Center</div>
-            <div class="login-subtitle">
-              Asta, rosa, formazione e campionato in un unico posto.
-            </div>
-          </div>
-
-          <div class="login-card">
-            <div class="login-card-title">Accedi per continuare</div>
-
-            <a class="social-login google" href="{google_url}" target="_self">
-              {google_svg}
-              <span>Continua con Google</span>
-            </a>
-
-            <a class="social-login facebook" href="{facebook_url}" target="_self">
-              {facebook_svg}
-              <span>Continua con Facebook</span>
-            </a>
-
-            <div class="login-note">
-              L'autenticazione viene gestita da Supabase Auth.
-              La password del tuo account Google o Facebook non viene gestita dall'app.
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # IMPORTANTE: l'HTML viene costruito senza righe vuote/interruzioni tra i tag.
+    # In questo modo il parser Markdown di Streamlit non spezza il blocco HTML
+    # trasformandone alcune parti in testo/codice visibile.
+    login_html = (
+        '<div class="login-shell">'
+        '<div class="login-brand">'
+        '<div class="login-eyebrow">RCD ESCANYOL</div>'
+        '<div class="login-title">⚽ Auction &amp; Season Center</div>'
+        '<div class="login-subtitle">Asta, rosa, formazione e campionato in un unico posto.</div>'
+        '</div>'
+        '<div class="login-card">'
+        '<div class="login-card-title">Accedi per continuare</div>'
+        f'<a class="social-login google" href="{google_url}" target="_self">'
+        '<svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">'
+        '<path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41z"/>'
+        '<path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.63-2.43l-3.24-2.54c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22z"/>'
+        '<path fill="#FBBC05" d="M6.39 13.86A6 6 0 0 1 6.08 12c0-.65.11-1.28.31-1.86V7.52H3.04A10 10 0 0 0 2 12c0 1.61.38 3.13 1.04 4.48l3.35-2.62z"/>'
+        '<path fill="#EA4335" d="M12 6.01c1.47 0 2.79.51 3.83 1.5l2.87-2.87A9.63 9.63 0 0 0 12 2a10 10 0 0 0-8.96 5.52l3.35 2.62C7.18 7.77 9.39 6.01 12 6.01z"/>'
+        '</svg>'
+        '<span>Continua con Google</span>'
+        '</a>'
+        f'<a class="social-login facebook" href="{facebook_url}" target="_self">'
+        '<svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">'
+        '<circle cx="12" cy="12" r="12" fill="#ffffff"/>'
+        '<path fill="#1877F2" d="M13.52 20v-7h2.35l.35-2.73h-2.7V8.53c0-.79.22-1.33 1.35-1.33h1.44V4.76c-.25-.03-1.1-.1-2.1-.1-2.08 0-3.5 1.27-3.5 3.6v2.01H8.36V13h2.35v7h2.81z"/>'
+        '</svg>'
+        '<span>Continua con Facebook</span>'
+        '</a>'
+        '<div class="login-note">L’autenticazione viene gestita da Supabase Auth. '
+        'La password del tuo account Google o Facebook non viene gestita dall’app.</div>'
+        '</div>'
+        '</div>'
     )
+
+    st.markdown(login_html, unsafe_allow_html=True)
 
     if error:
         st.error(f"Login non completato: {error}")
