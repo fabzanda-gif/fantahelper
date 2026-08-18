@@ -504,7 +504,7 @@ class AuctionState:
 # ============================================================
 
 @st.cache_resource
-def get_supabase() -> Client:
+def get_auth_flow_client(flow_id: str) -> Client:
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"],
@@ -565,11 +565,6 @@ def get_auth_flow_client(flow_id: str) -> Client:
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"],
-        options=ClientOptions(
-            flow_type="pkce",
-            auto_refresh_token=True,
-            persist_session=True,
-        ),
     )
 
 
