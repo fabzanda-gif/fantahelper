@@ -490,6 +490,7 @@ SEASON_FILE = DATA_DIR / "season-2526.csv"
 # Tab 4: modifiche manuali persistenti ai giocatori.
 # Richiede una tabella Supabase dedicata (SQL fornito sotto).
 CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
+USER_TEAM_TABLE = "user_team_assignments"
 
 # Nome della squadra dell'utente. Vengono tollerati anche i nomi usati
 # nelle versioni precedenti, così il codice non dipende da una singola
@@ -1255,6 +1256,187 @@ def load_teams() -> list[dict[str, Any]]:
     )
 
 
+
+def get_current_user_team_name() -> str:
+    """Squadra associata all'utente loggato; fallback legacy per compatibilità."""
+    return str(
+        st.session_state.get("current_user_team_name")
+        or MY_TEAM_NAME
+    )
+
+
+def get_current_user_team_id() -> str | None:
+    value = st.session_state.get("current_user_team_id")
+    return str(value) if value is not None else None
+
+
+def load_user_team_assignment(user_id: str) -> dict[str, Any] | None:
+    """Legge l'associazione persistente del solo utente autenticato."""
+    try:
+        rows = (
+            supabase.table(USER_TEAM_TABLE)
+            .select("user_id, team_id, team_name")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception as exc:
+        st.session_state["user_team_table_error"] = str(exc)
+        return None
+
+
+def save_user_team_assignment(
+    user_id: str,
+    team_id: Any,
+    team_name: str,
+) -> tuple[bool, str]:
+    """Crea/aggiorna l'associazione utente -> squadra."""
+    try:
+        (
+            supabase.table(USER_TEAM_TABLE)
+            .upsert(
+                {
+                    "user_id": user_id,
+                    "team_id": str(team_id),
+                    "team_name": team_name,
+                },
+                on_conflict="user_id",
+            )
+            .execute()
+        )
+        st.session_state["current_user_team_id"] = str(team_id)
+        st.session_state["current_user_team_name"] = team_name
+        st.session_state.pop("user_team_table_error", None)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def require_user_team_assignment(
+    user: dict[str, Any],
+    teams: list[dict[str, Any]],
+) -> str:
+    """
+    Ogni login deve essere associato a una fantasquadra.
+
+    Se l'associazione esiste viene caricata automaticamente.
+    Se manca, l'app mostra una schermata obbligatoria di scelta e si ferma
+    finché l'utente non completa l'associazione.
+    """
+    user_id = str(user.get("id") or "").strip()
+    if not user_id:
+        st.error("Non riesco a identificare l'utente autenticato.")
+        st.stop()
+
+    team_by_id = {
+        str(team.get("id")): team
+        for team in teams
+        if team.get("id") is not None
+    }
+
+    assignment = load_user_team_assignment(user_id)
+    if assignment:
+        assigned_id = str(assignment.get("team_id") or "")
+        matched = team_by_id.get(assigned_id)
+
+        if matched:
+            team_name = str(matched.get("name") or assignment.get("team_name") or "")
+            st.session_state["current_user_team_id"] = assigned_id
+            st.session_state["current_user_team_name"] = team_name
+            return team_name
+
+    # Se la tabella non esiste ancora, mostriamo un errore esplicito invece
+    # di lasciare l'app in uno stato ambiguo.
+    table_error = st.session_state.get("user_team_table_error")
+    if table_error and (
+        "does not exist" in table_error.lower()
+        or "relation" in table_error.lower()
+        or "schema cache" in table_error.lower()
+    ):
+        st.error(
+            "Manca la tabella Supabase **user_team_assignments**. "
+            "Esegui prima lo script SQL fornito con questa versione."
+        )
+        with st.expander("Dettaglio tecnico"):
+            st.code(table_error)
+        st.stop()
+
+    st.markdown(
+        """
+        <div style="
+            max-width:680px;
+            margin:2.2rem auto .8rem auto;
+            padding:24px 26px;
+            border:1px solid #cfe0f8;
+            border-radius:20px;
+            background:linear-gradient(145deg,#ffffff,#eef5ff);
+            box-shadow:0 12px 34px rgba(30,64,175,.09);
+        ">
+            <div style="font-size:.75rem;font-weight:900;letter-spacing:.12em;color:#315a9e;">
+                CONFIGURAZIONE PROFILO
+            </div>
+            <div style="font-size:1.55rem;font-weight:950;color:#172033;margin-top:5px;">
+                ⚽ Qual è la tua squadra?
+            </div>
+            <div style="color:#64748b;margin-top:6px;">
+                Questa scelta collegherà il tuo login alla fantasquadra e verrà
+                ricordata automaticamente ai prossimi accessi.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not teams:
+        st.error("Non ci sono squadre configurate nel database.")
+        st.stop()
+
+    team_names = [str(team["name"]) for team in teams]
+    selected_name = st.selectbox(
+        "Seleziona la tua fantasquadra",
+        team_names,
+        key="first_login_team_assignment",
+    )
+    selected_team = next(
+        team for team in teams
+        if str(team["name"]) == selected_name
+    )
+
+    st.caption(
+        "L'associazione è personale: ai prossimi login l'app aprirà "
+        "automaticamente la tua squadra."
+    )
+
+    if st.button(
+        "Conferma squadra",
+        type="primary",
+        use_container_width=True,
+        key="confirm_first_team_assignment",
+    ):
+        ok, error = save_user_team_assignment(
+            user_id,
+            selected_team["id"],
+            selected_name,
+        )
+        if ok:
+            st.success(f"Squadra associata: **{selected_name}**")
+            st.rerun()
+        else:
+            if "duplicate" in error.lower() or "unique" in error.lower():
+                st.error(
+                    "Questa squadra risulta già associata a un altro account. "
+                    "Scegline un'altra oppure modifica l'associazione in Supabase."
+                )
+            else:
+                st.error(f"Non riesco a salvare l'associazione: {error}")
+
+    st.stop()
+    return ""
+
+
 @st.cache_data(ttl=5)
 def load_rosters() -> list[dict[str, Any]]:
     """Carica le rose usando gli FK espliciti e ricostruisce le relazioni.
@@ -1422,35 +1604,53 @@ def play_sound(sound_url: str) -> None:
 
 
 def resolve_my_team_name(team_names: list[str]) -> str | None:
-    """Trova RCD Escanyol anche con piccole differenze di formattazione."""
-    normalized = {normalize_string(name): name for name in team_names if isinstance(name, str)}
-    for candidate in (MY_TEAM_NAME, *MY_TEAM_ALIASES):
-        hit = normalized.get(normalize_string(candidate))
-        if hit:
-            return hit
+    """Trova la squadra associata al login corrente."""
+    normalized = {
+        normalize_string(name): name
+        for name in team_names
+        if isinstance(name, str)
+    }
+
+    assigned = get_current_user_team_name()
+    hit = normalized.get(normalize_string(assigned))
+    if hit:
+        return hit
+
+    # Compatibilità con installazioni precedenti solo quando non è ancora
+    # presente una vera associazione persistente.
+    if "current_user_team_name" not in st.session_state:
+        for candidate in (MY_TEAM_NAME, *MY_TEAM_ALIASES):
+            hit = normalized.get(normalize_string(candidate))
+            if hit:
+                return hit
+
     return None
 
 
 def is_my_team(team_name: str | None) -> bool:
     if not team_name:
         return False
-    return normalize_string(team_name) == normalize_string(MY_TEAM_NAME) or normalize_string(team_name) in {
-        normalize_string(alias) for alias in MY_TEAM_ALIASES
-    }
+    return (
+        normalize_string(team_name)
+        == normalize_string(get_current_user_team_name())
+    )
 
 
 def default_team_index(
     team_names: list[str],
-    preferred: str = MY_TEAM_NAME,
+    preferred: str | None = None,
 ) -> int:
     if not team_names:
         return 0
 
-    # Prima prova il nome canonico, poi gli alias storici.
-    for name in (preferred, *MY_TEAM_ALIASES):
-        if name in team_names:
-            return team_names.index(name)
+    preferred = preferred or get_current_user_team_name()
+
+    for index, name in enumerate(team_names):
+        if normalize_string(name) == normalize_string(preferred):
+            return index
+
     return 0
+
 
 
 def queue_purchase_banner(
@@ -1468,7 +1668,7 @@ def queue_purchase_banner(
         level = "massive"
         title = "🏆 COLPO TOP!"
         message = (
-            f"**{player_name}** entra nella rosa RCD Escanyol · "
+            f"**{player_name}** entra nella rosa **{team_name}** · "
             f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
         )
     elif rating >= 8.0:
@@ -1482,7 +1682,7 @@ def queue_purchase_banner(
         level = "normal"
         title = "✅ ACQUISTO COMPLETATO"
         message = (
-            f"**{player_name}** è un nuovo giocatore RCD Escanyol · "
+            f"**{player_name}** è un nuovo giocatore di **{team_name}** · "
             f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
         )
 
@@ -3265,7 +3465,7 @@ def render_manual_purchase(
         target_team = st.selectbox(
             "5. Squadra Acquirente",
             team_names,
-            index=default_team_index(team_names, MY_TEAM_NAME),
+            index=default_team_index(team_names, get_current_user_team_name()),
             key="manual_target_team",
         )
 
@@ -3337,7 +3537,7 @@ def render_manual_purchase(
     # Per questo il banner deve essere salvato in session_state PRIMA del rerun.
     if is_my_team(target_team):
         queue_purchase_banner(
-            MY_TEAM_NAME,
+            target_team,
             selected_player["name"],
             rating,
             int(purchase_price),
@@ -4543,10 +4743,13 @@ def render_my_roster(
     """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
     team_name = resolve_my_team_name(list(state.team_players_map))
 
-    st.markdown('<div class="rcd-section">👕 Rosa RCD Escanyol</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="rcd-section">👕 Rosa {escape(team_name or get_current_user_team_name())}</div>',
+        unsafe_allow_html=True,
+    )
     if team_name is None:
         st.warning(
-            "⚠️ La squadra **RCD Escanyol** non è presente tra le squadre configurate."
+            f"⚠️ La squadra **{get_current_user_team_name()}** non è presente tra le squadre configurate."
         )
         return
 
@@ -4931,7 +5134,9 @@ def render_formation_lab_tab(state: AuctionState) -> None:
 
     team_name, players, _ = get_my_team_players_and_purchases(state)
     if team_name is None or not players:
-        st.info("Non trovo una rosa RCD Escanyol da confrontare con i voti.")
+        st.info(
+            f"Non trovo la rosa **{get_current_user_team_name()}** da confrontare con i voti."
+        )
         return
 
     matched = []
@@ -5041,6 +5246,7 @@ def main() -> None:
     render_logout_sidebar()
 
     teams = load_teams()
+    require_user_team_assignment(current_user, teams)
     rosters = load_rosters()
 
     teams_df = pd.DataFrame(teams)
@@ -5088,12 +5294,6 @@ def main() -> None:
                 st.rerun()
 
         st.markdown('<div class="rcd-section">🎯 Acquista giocatore</div>', unsafe_allow_html=True)
-
-        resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
-        if resolved_my_team and resolved_my_team != "RCD Escanyol":
-            st.caption(
-                f"ℹ️ RCD Escanyol collegata alla squadra Supabase **{resolved_my_team}**."
-            )
 
         if auction_finished:
             st.success(
