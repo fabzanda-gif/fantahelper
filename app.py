@@ -1019,6 +1019,51 @@ def _dynamic_greeting() -> str:
     return "Buonasera"
 
 
+def render_app_logo() -> None:
+    """Logo nella parte più alta della sidebar."""
+    st.sidebar.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            padding-top: .45rem;
+        }
+        .rcd-sidebar-logo-wrap {
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            width:100%;
+            padding:.10rem .20rem .70rem .20rem;
+            margin:0;
+        }
+        .rcd-sidebar-logo {
+            display:block;
+            width:100%;
+            max-width:245px;
+            max-height:92px;
+            height:auto;
+            object-fit:contain;
+            object-position:center;
+        }
+        @media (max-width: 720px) {
+            .rcd-sidebar-logo {
+                max-width:205px;
+                max-height:76px;
+            }
+        }
+        </style>
+        <div class="rcd-sidebar-logo-wrap">
+            <img
+                class="rcd-sidebar-logo"
+                src="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Screenshot%202026-08-18%20at%2020.01.18.png"
+                alt="Fantahelper"
+            >
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+
 def render_authenticated_user_header(user: dict[str, Any]) -> None:
     """Profilo minimale in alto a destra: saluto + avatar."""
     first_name = escape(_first_name_from_user(user))
@@ -1039,7 +1084,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> None:
             align-items:center;
             justify-content:flex-end;
             gap:12px;
-            margin:-3.0rem 0 .55rem 0;
+            margin:.35rem 0 .75rem 0;
             padding-right:.15rem;
             min-height:54px;
         }}
@@ -1074,7 +1119,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> None:
         }}
         @media (max-width: 720px) {{
             .rcd-user-topbar {{
-                margin:-2.2rem 0 .45rem 0;
+                margin:.25rem 0 .65rem 0;
             }}
             .rcd-user-greeting {{
                 font-size:.90rem;
@@ -4780,6 +4825,7 @@ def render_championship_lab_tab() -> None:
 def main() -> None:
 
     current_user = require_authentication()
+    render_app_logo()
     render_authenticated_user_header(current_user)
     render_logout_sidebar()
 
