@@ -1,748 +1,539 @@
+from __future__ import annotations
+
+import os
+import random
+import re
+import unicodedata
+import uuid
+from html import escape
+from dataclasses import dataclass
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from typing import Any
+
+import pandas as pd
+import openpyxl
 import streamlit as st
 import streamlit.components.v1 as components
-import pandas as pd
-from datetime import date, datetime
-import requests
-import traceback
-import re
-import json
-import html
-from html import escape
-import uuid
-import base64
-from pathlib import Path
-from supabase import create_client
-from supabase.client import ClientOptions
-from streamlit_cookies_controller import CookieController
-import plotly.express as px
-import plotly.graph_objects as go
-
-# ==============================================================================
-# LOCAL ASSETS
-# ==============================================================================
-ASSET_DIR = Path(__file__).resolve().parent
-APP_LOGO_FILE = ASSET_DIR / "Gemini_Generated_Image_oxrwohoxrwohoxrw.jpeg"
-
-WEIGHT_SOUND_BIG_LOSS = ASSET_DIR / "bmw-check-oshibka.mp3"
-WEIGHT_SOUND_SMALL_LOSS = ASSET_DIR / "26f8b9_sonic_ring_sound_effect.mp3"
-WEIGHT_SOUND_GAIN = ASSET_DIR / "sonicded.mp3"
+from supabase import Client, create_client
 
 
-def play_hidden_local_audio(audio_path):
-    """Riproduce un MP3 locale senza mostrare un player nella UI."""
-    try:
-        audio_path = Path(audio_path)
-        if not audio_path.exists():
-            st.warning(f"File audio non trovato: {audio_path.name}")
-            return
+# ============================================================
+# CONFIGURAZIONE
+# ============================================================
 
-        audio_b64 = base64.b64encode(audio_path.read_bytes()).decode("ascii")
-        components.html(
-            f"""
-            <audio autoplay>
-                <source src="data:audio/mpeg;base64,{audio_b64}" type="audio/mpeg">
-            </audio>
-            """,
-            height=0,
-            width=0,
-        )
-    except Exception as e:
-        print(f"Weight sound error: {e}")
+st.set_page_config(page_title="RCD Escanyol Auction Center", page_icon="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Gemini_Generated_Image_sf4v3ssf4v3ssf4v.jpeg", layout="wide")
 
-
-def render_pending_weight_sound():
-    """Riproduce una sola volta il suono accodato dopo il salvataggio del peso."""
-    pending = st.session_state.pop("pending_weight_sound", None)
-    if pending:
-        play_hidden_local_audio(pending)
-
-
-# ==============================================================================
-# 1. SETUP INIZIALE E CONFIGURAZIONE PAGINA
-# ==============================================================================
-st.set_page_config(
-    page_title="SanoSync",
-    page_icon=str(APP_LOGO_FILE),
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ==============================================================================
-# STYLING CUSTOM (CSS) - CORRETTO PER LEGGIBILITÀ SIDEBAR
-# ==============================================================================
 st.markdown("""
-    <style>
-        /* Font globale */
-        @import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,100..900;1,100..900&display=swap');
-        html, body, [class*="css"] { font-family: 'Hanken Grotesk', sans-serif; color: #1A2942; }
+<style>
+/* ==========================================================
+   RCD ESCANYOL — PREMIUM HIGH-CONTRAST DASHBOARD
+   Pensato per restare leggibile anche con tema Streamlit Light.
+   ========================================================== */
 
-        /* Sidebar Blu Navy */
-        [data-testid="stSidebar"] { background-color: #1A2942; }
-        [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label { color: #FFFFFF !important; }
-
-        /* PULSANTI SIDEBAR INATTIVI (Bianco con testo Blu Navy ben visibile) */
-        [data-testid="stSidebar"] .stButton>button {
-            border-radius: 12px;
-            font-weight: 600;
-            background-color: #FFFFFF !important; 
-            color: #1A2942 !important;  /* Testo scuro */
-            border: 2px solid #FFFFFF;
-            padding: 10px 20px;
-            width: 100%;
-            transition: all 0.2s ease;
-        }
-        
-        /* Assicura che anche gli elementi interni al bottone ereditino il testo scuro */
-        [data-testid="stSidebar"] .stButton>button * {
-            color: #1A2942 !important;
-        }
-
-        /* PULSANTE ATTIVO / HOVER (Rosa Corallo con testo scuro) */
-        [data-testid="stSidebar"] .stButton>button[kind="primary"],
-        [data-testid="stSidebar"] .stButton>button:hover, 
-        [data-testid="stSidebar"] .stButton>button:focus {
-            background-color: #FF8B8B !important; /* Rosa Corallo */
-            border-color: #FF8B8B !important;
-            color: #1A2942 !important;
-        }
-        
-        [data-testid="stSidebar"] .stButton>button[kind="primary"] *,
-        [data-testid="stSidebar"] .stButton>button:hover * {
-            color: #1A2942 !important;
-        }
-
-        /* Pulsanti fuori dalla sidebar */
-        [data-testid="stAppViewContainer"] .stButton > button {
-            border-radius: 10px !important;
-            background-color: #FFFFFF !important;
-            color: #1A2942 !important;
-            border: 2px solid #FF8B8B !important;
-            font-weight: 600 !important;
-            transition: all .18s ease;
-        }
-        [data-testid="stAppViewContainer"] .stButton > button * {
-            color: #1A2942 !important;
-            font-weight: 600 !important;
-        }
-        [data-testid="stAppViewContainer"] .stButton > button:hover {
-            background-color: #FFF5F5 !important;
-            border-color: #FF8B8B !important;
-        }
-        [data-testid="stAppViewContainer"] .stButton > button[kind="primary"] {
-            background-color: #FF8B8B !important;
-            border-color: #FF8B8B !important;
-            color: #FFFFFF !important;
-            font-weight: 800 !important;
-        }
-        [data-testid="stAppViewContainer"] .stButton > button[kind="primary"] * {
-            color: #FFFFFF !important;
-            font-weight: 800 !important;
-        }
-
-        /* Metric Cards */
-        [data-testid="stMetric"] {
-            background-color: #FFFFFF;
-            border: 1px solid #FF8B8B;
-            padding: 15px;
-            border-radius: 14px;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# ==============================================================================
-# SUPABASE URL & KEY SETUP
-# ==============================================================================
-SUPABASE_URL = st.secrets["SUPABASE_URL"].rstrip("/")
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-APP_URL = str(st.secrets.get("APP_URL", "https://sanosync.streamlit.app")).rstrip("/")
-
-# Questo client NON deve mantenere una sessione propria in memoria.
-# La sessione persistente viene gestita esplicitamente dal cookie browser.
-if "supabase" not in st.session_state:
-    st.session_state["supabase"] = create_client(
-        SUPABASE_URL,
-        SUPABASE_KEY,
-        options=ClientOptions(
-            auto_refresh_token=False,
-            persist_session=False,
-        ),
-    )
-
-supabase = st.session_state["supabase"]
-
-# Manteniamo il componente cookie associato alla sessione Streamlit corrente.
-# Al refresh completo la lettura primaria avviene comunque tramite st.context.cookies.
-if "_cookie_controller" not in st.session_state:
-    st.session_state["_cookie_controller"] = CookieController()
-controller = st.session_state["_cookie_controller"]
-
-# ==============================================================================
-# 2. INITIALIZE SESSION STATE
-# ==============================================================================
-state_defaults = {
-    "user": None,
-    "m_name": "",
-    "m_cals": 0,
-    "m_prot": 0,
-    "m_carbs": 0,
-    "m_fat": 0,
-    "last_selected": "",
-    "form_version": 0,
-    "last_source": None,
-    "grams_val": 100.0,
-    "api_res": {},
-    "overview_date": date.today(),
-    "last_nav_page": None,
-    "selected_recipe": None,
-    "prod_select": "",
-    "recipe_builder_ingredients": [],
-    "selected_source_note": "",
-    "selected_source_category": "Casa",
-    "day_plan_type": "Lavoro da casa",
-    "day_plan_activity": "Riposo",
+:root {
+    --rcd-bg: #eef4ff;
+    --rcd-surface: #ffffff;
+    --rcd-surface-soft: #edf4ff;
+    --rcd-text: #172033;
+    --rcd-muted: #64748b;
+    --rcd-border: #dbe3ef;
+    --rcd-blue: #2563eb;
+    --rcd-blue-dark: #163c96;
+    --rcd-green: #15803d;
+    --rcd-red: #b91c1c;
+    --rcd-amber: #b45309;
 }
 
-for key, default in state_defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
-
-# ==============================================================================
-# 3. UTILITY FUNCTIONS
-# ==============================================================================
-def parse_birth_date(value):
-    """Converte birth_date dai metadata Supabase in datetime.date."""
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d").date()
-    except (TypeError, ValueError):
-        return None
-
-
-def calculate_age(birth_date_value, on_date=None):
-    """Età anagrafica completa alla data indicata (default: oggi)."""
-    birth_date = parse_birth_date(birth_date_value)
-    if birth_date is None:
-        return None
-
-    today = on_date or date.today()
-    return (
-        today.year
-        - birth_date.year
-        - (
-            (today.month, today.day)
-            < (birth_date.month, birth_date.day)
-        )
-    )
-
-
-def calculate_bmr(weight, height, birth_date_value, gender):
-    """
-    BMR secondo Mifflin-St Jeor.
-
-    Uomo:  10W + 6.25H - 5A + 5
-    Donna: 10W + 6.25H - 5A - 161
-
-    W = peso in kg, H = altezza in cm, A = età in anni.
-    """
-    age = calculate_age(birth_date_value)
-    if age is None:
-        return None
-
-    weight = float(weight)
-    height = float(height)
-
-    if gender in ["Uomo", "Male", "Man"]:
-        return int(round((10 * weight) + (6.25 * height) - (5 * age) + 5))
-
-    return int(round((10 * weight) + (6.25 * height) - (5 * age) - 161))
-
-def refresh_daily_logs(log_date):
-    pass
-
-def _safe_float(value):
-    try:
-        if value in (None, ""):
-            return 0.0
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-
-def info_badge(note, label="Note"):
-    """Icona informativa con tooltip HTML nativo."""
-    note = str(note or "").strip()
-    if not note:
-        return ""
-    safe_note = html.escape(note, quote=True)
-    safe_label = html.escape(label, quote=True)
-    return (
-        f'<span title="{safe_note}" aria-label="{safe_label}" '
-        f'style="cursor:help;font-size:1.05em;margin-left:5px;color:#1A2942;">ⓘ</span>'
-    )
-
-
-MEAL_CATEGORIES = ["Casa", "Lavoro", "Ristorante", "Una-tantum"]
-
-
-def infer_meal_category(row):
-    category = str(row.get("category") or "").strip()
-    if category in MEAL_CATEGORIES:
-        return category
-
-    label = (
-        row.get("base_name")
-        or _clean_meal_name(row.get("name"))
-        or ""
-    ).strip()
-    if label.casefold().startswith("adyen"):
-        return "Lavoro"
-    return "Casa"
-
-
-def closest_logged_meal(meal_type, target_calories, allowed_categories=None):
-    """Trova il meal replicabile più vicino al target rispettando contesto e categoria."""
-    try:
-        rows = (
-            supabase.table("meals")
-            .select("id,date,meal_type,name,base_name,calories,notes,category")
-            .eq("user_id", user_id)
-            .eq("meal_type", meal_type)
-            .execute().data
-            or []
-        )
-    except Exception:
-        rows = (
-            supabase.table("meals")
-            .select("id,date,meal_type,name,base_name,calories,notes")
-            .eq("user_id", user_id)
-            .eq("meal_type", meal_type)
-            .execute().data
-            or []
-        )
-
-    allowed = set(allowed_categories or MEAL_CATEGORIES)
-    candidates = []
-    seen = set()
-
-    for row in sorted(rows, key=lambda r: str(r.get("date", "")), reverse=True):
-        kcal = _safe_float(row.get("calories"))
-        if kcal <= 0:
-            continue
-
-        category = infer_meal_category(row)
-        if category == "Una-tantum":
-            continue
-        if meal_type == "Pranzo" and category == "Ristorante":
-            continue
-        if category not in allowed:
-            continue
-
-        label = (
-            row.get("base_name")
-            or _clean_meal_name(row.get("name"))
-            or "Pasto"
-        ).strip()
-        dedupe_key = (label.casefold(), category.casefold())
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-
-        candidates.append({
-            "name": label,
-            "calories": kcal,
-            "notes": row.get("notes") or "",
-            "category": category,
-            "difference": abs(kcal - float(target_calories)),
-        })
-
-    return min(candidates, key=lambda r: r["difference"]) if candidates else None
-
-
-def _open_food_facts_headers():
-    """
-    Open Food Facts richiede un User-Agent identificabile.
-    Consigliato nei secrets Streamlit:
-        OFF_USER_AGENT = "SanoSync/1.0 (tuamail@example.com)"
-    """
-    return {
-        "User-Agent": st.secrets.get("OFF_USER_AGENT", "SanoSync/1.0"),
-        "Accept": "application/json",
-    }
-
-
-def search_open_food_facts(query):
-    """Ricerca Open Food Facts robusta per barcode o testo libero.
-
-    - Barcode: API v2 /product/{barcode}
-    - Testo: endpoint full-text /cgi/search.pl, invocato solo su pulsante
-    - Usa sempre il database globale; i prodotti olandesi vengono favoriti
-      nell'ordinamento quando countries_tags contiene Netherlands.
-    """
-    query = str(query or "").strip()
-    if not query:
-        return {}
-
-    headers = _open_food_facts_headers()
-    fields = "code,product_name,product_name_nl,brands,nutriments,countries_tags"
-
-    try:
-        if query.isdigit():
-            response = requests.get(
-                f"https://world.openfoodfacts.org/api/v2/product/{query}",
-                params={"fields": fields},
-                headers=headers,
-                timeout=15,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get("status") != 1 or not payload.get("product"):
-                return {}
-            products = [payload["product"]]
-        else:
-            # OFF limita fortemente le search request: questa chiamata deve
-            # rimanere legata al pulsante Cerca, non a ogni battitura.
-            response = requests.get(
-                "https://world.openfoodfacts.org/cgi/search.pl",
-                params={
-                    "search_terms": query,
-                    "search_simple": 1,
-                    "action": "process",
-                    "json": 1,
-                    "page_size": 30,
-                    "fields": fields,
-                },
-                headers=headers,
-                timeout=15,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            products = payload.get("products") or []
-
-        normalized = []
-        for p in products:
-            if not isinstance(p, dict):
-                continue
-
-            product_name = (
-                p.get("product_name_nl")
-                or p.get("product_name")
-                or "Prodotto senza nome"
-            )
-            brands = p.get("brands") or ""
-            code = str(p.get("code") or "")
-            nutriments = p.get("nutriments") or {}
-
-            item = {
-                "name": product_name,
-                "brand": brands,
-                "code": code,
-                "calories": _safe_float(nutriments.get("energy-kcal_100g")),
-                "protein": _safe_float(nutriments.get("proteins_100g")),
-                "carbs": _safe_float(nutriments.get("carbohydrates_100g")),
-                "fat": _safe_float(nutriments.get("fat_100g")),
-                "countries": p.get("countries_tags") or [],
-            }
-
-            # Scarta record senza alcun dato nutrizionale utile.
-            if not any(item[k] for k in ("calories", "protein", "carbs", "fat")):
-                continue
-
-            countries = {str(x).lower() for x in item["countries"]}
-            item["nl_priority"] = 1 if (
-                "en:netherlands" in countries
-                or "nl:nederland" in countries
-                or "nl:netherlands" in countries
-            ) else 0
-            normalized.append(item)
-
-        # Favorisce il mercato NL senza escludere prodotti globali.
-        normalized.sort(key=lambda x: (-x["nl_priority"], x["brand"].lower(), x["name"].lower()))
-
-        results = {}
-        for item in normalized:
-            label = f"{item['brand']} - {item['name']}" if item["brand"] else item["name"]
-            if label in results and item["code"]:
-                label = f"{label} [{item['code']}]"
-            item.pop("nl_priority", None)
-            results[label] = item
-
-        return results
-
-    except requests.exceptions.Timeout:
-        st.warning("Open Food Facts non ha risposto in tempo. Riprova tra qualche secondo.")
-        return {}
-    except requests.exceptions.HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        if status in (429, 503):
-            st.warning("Open Food Facts sta limitando temporaneamente le richieste. Attendi qualche secondo e riprova.")
-        else:
-            st.warning(f"Errore HTTP Open Food Facts: {status or e}")
-        return {}
-    except requests.exceptions.RequestException as e:
-        st.warning(f"Errore di rete Open Food Facts: {e}")
-        return {}
-    except (ValueError, TypeError) as e:
-        st.warning(f"Risposta Open Food Facts non valida: {e}")
-        return {}
-    except Exception as e:
-        st.warning(f"Errore nella ricerca Open Food Facts: {e}")
-        return {}
-
-
-def _clean_meal_name(meal_name):
-    """Rimuove il suffisso quantità generato dall'app, se presente."""
-    clean_name = re.sub(
-        r"\s*\((?:[0-9]+(?:\.[0-9]+)?)\s*(?:g|porz\.)\)\s*$",
-        "",
-        str(meal_name or ""),
-    ).strip()
-    return clean_name or str(meal_name or "").strip()
-
-
-def get_quick_entries_from_meals():
-    """Restituisce le immissioni rapide direttamente da meals.
-
-    Le righe nuove usano i campi base_* per ricostruire valori per 100 g o
-    per porzione. Le righe legacy senza questi campi rimangono utilizzabili
-    come porzioni fisse usando i valori totali salvati nel meal.
-    """
-    try:
-        rows = (
-            supabase.table("meals")
-            .select(
-                "id,date,name,base_name,quantity,is_per_100g,"
-                "base_calories,base_protein,base_carbs,base_fat,"
-                "calories,protein,carbs,fat,notes,category,ingredients_json"
-            )
-            .eq("user_id", user_id)
-            .order("date", desc=True)
-            .execute().data
-            or []
-        )
-        enhanced_schema = True
-    except Exception:
-        # Compatibilità temporanea prima della migrazione SQL.
-        rows = (
-            supabase.table("meals")
-            .select("id,date,name,calories,protein,carbs,fat")
-            .eq("user_id", user_id)
-            .order("date", desc=True)
-            .execute().data
-            or []
-        )
-        enhanced_schema = False
-
-    quick = {}
-    for row in rows:
-        base_name = (row.get("base_name") if enhanced_schema else None) or _clean_meal_name(row.get("name"))
-        if not base_name:
-            continue
-
-        # Il record più recente per nome vince.
-        key = base_name.casefold()
-        if key in quick:
-            continue
-
-        has_base = enhanced_schema and row.get("base_calories") is not None
-        if has_base:
-            is_100g = bool(row.get("is_per_100g"))
-            quick[key] = {
-                "label": base_name,
-                "name": base_name,
-                "calories": _safe_float(row.get("base_calories")),
-                "protein": _safe_float(row.get("base_protein")),
-                "carbs": _safe_float(row.get("base_carbs")),
-                "fat": _safe_float(row.get("base_fat")),
-                "is_per_100g": is_100g,
-                "default_quantity": 100.0 if is_100g else 1.0,
-                "source_date": row.get("date"),
-                "notes": row.get("notes") or "",
-                "category": infer_meal_category(row),
-                "ingredients_json": row.get("ingredients_json"),
-            }
-        else:
-            # Legacy: valori totali del pasto, quindi porzione fissa.
-            quick[key] = {
-                "label": base_name,
-                "name": base_name,
-                "calories": _safe_float(row.get("calories")),
-                "protein": _safe_float(row.get("protein")),
-                "carbs": _safe_float(row.get("carbs")),
-                "fat": _safe_float(row.get("fat")),
-                "is_per_100g": False,
-                "default_quantity": 1.0,
-                "source_date": row.get("date"),
-                "notes": row.get("notes") or "",
-                "category": infer_meal_category(row),
-                "ingredients_json": row.get("ingredients_json") if enhanced_schema else None,
-            }
-
-    return sorted(quick.values(), key=lambda x: x["label"].lower())
-
-
-def insert_meal_with_base_data(*, log_date, meal_type, display_name, base_name,
-                               quantity, is_per_100g, calories, protein, carbs, fat,
-                               base_calories, base_protein, base_carbs, base_fat,
-                               notes="", category="Casa", ingredients_json=None):
-    """Inserisce un meal conservando sia il totale sia i dati base riutilizzabili."""
-    payload = {
-        "user_id": user_id,
-        "date": str(log_date),
-        "meal_type": meal_type,
-        "name": display_name,
-        "calories": int(round(calories)),
-        "protein": int(round(protein)),
-        "carbs": int(round(carbs)),
-        "fat": int(round(fat)),
-        "base_name": str(base_name).strip(),
-        "quantity": float(quantity),
-        "is_per_100g": bool(is_per_100g),
-        "base_calories": float(base_calories),
-        "base_protein": float(base_protein),
-        "base_carbs": float(base_carbs),
-        "base_fat": float(base_fat),
-        "notes": str(notes or "").strip(),
-        "category": category if category in MEAL_CATEGORIES else "Casa",
-        "ingredients_json": ingredients_json,
-    }
-    try:
-        return supabase.table("meals").insert(payload).execute()
-    except Exception as e:
-        # Fallback per consentire all'app di continuare a funzionare prima
-        # che venga applicata la migrazione dei campi base_*.
-        print(f"Inserimento meals con schema esteso fallito, fallback legacy: {e}")
-        legacy_payload = {
-            k: payload[k]
-            for k in ("user_id", "date", "meal_type", "name", "calories", "protein", "carbs", "fat")
-        }
-        return supabase.table("meals").insert(legacy_payload).execute()
-
-
-def calculate_recipe_totals(ingredients):
-    total_weight = sum(float(i.get("quantity_g", 0)) for i in ingredients)
-    totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
-    for i in ingredients:
-        factor = float(i.get("quantity_g", 0)) / 100.0
-        for key in totals:
-            totals[key] += float(i.get(f"{key}_per_100g", 0) or 0) * factor
-    per100 = {k: (v / total_weight * 100 if total_weight > 0 else 0) for k, v in totals.items()}
-    return total_weight, totals, per100
-
-# ==============================================================================
-# 4. AUTHENTICATION & SESSION MANAGEMENT
-# ==============================================================================
-# Autenticazione email/password con sessione persistente.
-#
-# Persistenza:
-# - nel browser salviamo soltanto il refresh token Supabase;
-# - a ogni refresh completo leggiamo prima st.context.cookies, che contiene i
-#   cookie arrivati con la richiesta iniziale;
-# - usiamo refresh_session(refresh_token) per ottenere una nuova sessione;
-# - se Supabase ruota il refresh token, riscriviamo subito il cookie aggiornato.
-#
-# Nota: streamlit-cookies-controller crea cookie accessibili dal browser e quindi
-# non HttpOnly. Per una futura versione con requisiti di sicurezza più elevati è
-# preferibile un backend che imposti cookie HttpOnly/Secure/SameSite.
-SESSION_COOKIE = "sanosync_refresh_token"
-SESSION_COOKIE_MAX_AGE = 10 * 365 * 24 * 60 * 60
-
-
-def _cookie_set(name, value, max_age):
-    controller.set(name, str(value), max_age=max_age)
-
-def _cookie_delete(name):
-    try:
-        controller.remove(name)
-    except Exception:
-        try:
-            controller.set(name, "", max_age=0)
-        except Exception:
-            pass
-
-def _read_refresh_token_cookie():
-    # Su un vero browser refresh questa è la lettura più affidabile perché
-    # Streamlit espone i cookie ricevuti nella richiesta iniziale.
-    try:
-        value = st.context.cookies.get(SESSION_COOKIE)
-        if value:
-            return str(value).strip().strip('"')
-    except Exception:
-        pass
-
-    # Fallback per rerun normali della stessa pagina.
-    try:
-        value = controller.get(SESSION_COOKIE)
-        if value:
-            return str(value).strip().strip('"')
-    except Exception:
-        pass
-    return None
-
-def save_authenticated_session(response):
-    session = getattr(response, "session", None)
-    user_obj = getattr(response, "user", None)
-
-    if session is None:
-        raise RuntimeError("Supabase non ha restituito una sessione valida.")
-    if user_obj is None:
-        user_obj = getattr(session, "user", None)
-    if user_obj is None:
-        raise RuntimeError("Supabase non ha restituito l'utente autenticato.")
-    if not getattr(session, "refresh_token", None):
-        raise RuntimeError("Supabase non ha restituito il refresh token.")
-
-    st.session_state["user"] = user_obj
-    _cookie_set(SESSION_COOKIE, session.refresh_token, SESSION_COOKIE_MAX_AGE)
-    return user_obj
-
-def restore_session_from_cookie():
-    refresh_token = _read_refresh_token_cookie()
-    if not refresh_token:
-        return False
-
-    try:
-        # refresh_session è più adatto qui di set_session: ci basta il refresh
-        # token persistente e riceviamo sempre token correnti.
-        response = supabase.auth.refresh_session(refresh_token)
-        if response and getattr(response, "session", None):
-            save_authenticated_session(response)
-            return True
-    except Exception as e:
-        print(f"Session restore error: {e}")
-
-    _cookie_delete(SESSION_COOKIE)
-    return False
-
-AUTH_FLOW_STATE_KEY = "auth_flow_id"
-
+/* Layout generale */
+.block-container {
+    padding-top: 4.4rem;
+    padding-bottom: 3rem;
+    max-width: 1500px;
+}
+
+[data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(circle at 92% 2%, rgba(37,99,235,.20), transparent 27%),
+        radial-gradient(circle at 5% 45%, rgba(59,130,246,.10), transparent 24%),
+        linear-gradient(180deg, #f4f8ff 0%, #eaf2ff 52%, #f5f8ff 100%);
+    color: var(--rcd-text);
+}
+
+/* Forza il contrasto del testo nel main */
+[data-testid="stMain"] h1,
+[data-testid="stMain"] h2,
+[data-testid="stMain"] h3,
+[data-testid="stMain"] h4,
+[data-testid="stMain"] p,
+[data-testid="stMain"] label,
+[data-testid="stMain"] span,
+[data-testid="stMain"] div {
+    color: var(--rcd-text);
+}
+
+/* Sidebar volutamente chiara e separata */
+[data-testid="stSidebar"] {
+    background:
+        linear-gradient(180deg, #f7faff 0%, #e7effc 100%);
+    border-right: 1px solid #c9d8ef;
+}
+[data-testid="stSidebar"] * {
+    color: #20283a;
+}
+
+/* Tabs: sticky, leggibili, mai sotto la toolbar */
+[data-testid="stTabs"] > div:first-child {
+    position: sticky;
+    top: 3.15rem;
+    z-index: 999;
+    padding: .45rem .55rem;
+    margin: 0 0 1rem 0;
+    border: 1px solid var(--rcd-border);
+    border-radius: 14px;
+    background: rgba(239,246,255,.97);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 8px 24px rgba(15,23,42,.08);
+}
+
+div[data-baseweb="tab-list"] {
+    gap: .45rem;
+}
+
+button[data-baseweb="tab"] {
+    min-height: 2.8rem;
+    padding-left: 1.05rem;
+    padding-right: 1.05rem;
+    border-radius: 10px;
+    font-weight: 800;
+}
+
+button[data-baseweb="tab"] p,
+button[data-baseweb="tab"] span {
+    color: #475569 !important;
+}
+
+button[data-baseweb="tab"][aria-selected="true"] {
+    background: linear-gradient(135deg, var(--rcd-blue-dark), var(--rcd-blue));
+    box-shadow: 0 6px 18px rgba(37,99,235,.22);
+}
+
+button[data-baseweb="tab"][aria-selected="true"] p,
+button[data-baseweb="tab"][aria-selected="true"] span {
+    color: #ffffff !important;
+}
+
+/* Hero */
+.rcd-hero {
+    border: 1px solid rgba(37,99,235,.22);
+    border-radius: 20px;
+    padding: 20px 24px;
+    margin: 3px 0 18px 0;
+    background:
+        radial-gradient(circle at 94% 5%, rgba(147,197,253,.32), transparent 30%),
+        linear-gradient(135deg, #102a62 0%, #1648a8 60%, #2563eb 100%);
+    box-shadow: 0 16px 38px rgba(30,64,175,.16);
+}
+
+.rcd-hero,
+.rcd-hero * {
+    color: #ffffff !important;
+}
+
+.rcd-hero-title {
+    font-size: 1.8rem;
+    line-height: 1.05;
+    font-weight: 900;
+    letter-spacing: -.025em;
+    margin-bottom: 3px;
+}
+
+.rcd-kicker {
+    font-size: .74rem;
+    font-weight: 850;
+    letter-spacing: .12em;
+    color: #bfdbfe !important;
+}
+
+.rcd-phase {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.30);
+    background: rgba(255,255,255,.13);
+    color: #ffffff !important;
+    font-size: .80rem;
+    font-weight: 800;
+}
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    border: 1px solid var(--rcd-border);
+    border-radius: 15px;
+    padding: .82rem .95rem;
+    background: linear-gradient(145deg, #ffffff 0%, #f0f6ff 100%);
+    box-shadow: 0 7px 20px rgba(30,64,175,.07);
+}
+
+[data-testid="stMetricLabel"] p,
+[data-testid="stMetricLabel"] {
+    color: var(--rcd-muted) !important;
+    font-size: .80rem;
+    font-weight: 700;
+}
+
+[data-testid="stMetricValue"] div,
+[data-testid="stMetricValue"] {
+    color: #172033 !important;
+    font-weight: 850;
+}
+
+[data-testid="stMetricDelta"] div {
+    color: #64748b !important;
+}
+
+/* Sezioni */
+.rcd-section {
+    color: #172033 !important;
+    font-size: 1.14rem;
+    font-weight: 900;
+    letter-spacing: -.015em;
+    margin: 1.25rem 0 .65rem 0;
+}
+
+.rcd-rolebar {
+    color: #334155 !important;
+    font-size: .88rem;
+    font-weight: 750;
+    padding: 9px 12px;
+    border: 1px solid #cfe0f8;
+    border-radius: 10px;
+    background: #edf5ff;
+    margin: 7px 0 12px 0;
+}
+
+/* Target */
+.rcd-target {
+    border: 1px solid #bbf7d0;
+    border-left: 5px solid #22c55e;
+    border-radius: 15px;
+    padding: 15px 17px;
+    background:
+        radial-gradient(circle at 95% 10%, rgba(34,197,94,.12), transparent 28%),
+        #f7fff9;
+    box-shadow: 0 8px 24px rgba(21,128,61,.06);
+    margin: 7px 0 11px 0;
+}
+
+.rcd-target *,
+.rcd-target-name,
+.rcd-target-meta {
+    color: #173526 !important;
+}
+
+.rcd-target .rcd-kicker {
+    color: #15803d !important;
+}
+
+.rcd-target-name {
+    font-size: 1.25rem;
+    font-weight: 900;
+}
+
+.rcd-target-meta {
+    margin-top: 4px;
+    color: #4b6354 !important;
+}
+
+/* Container, expander, form controls */
+div[data-testid="stExpander"] {
+    border-radius: 12px;
+    border: 1px solid #cfddf2;
+    background: rgba(245,249,255,.90);
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: #cfddf2 !important;
+    border-radius: 14px !important;
+    background: linear-gradient(145deg, #ffffff, #f3f7ff);
+}
+
+div[data-baseweb="select"] > div,
+[data-testid="stNumberInput"] input,
+[data-testid="stTextInput"] input {
+    background: #ffffff !important;
+    color: #172033 !important;
+    border-color: #cbd5e1 !important;
+}
+
+div[data-baseweb="select"] span,
+div[data-baseweb="select"] div {
+    color: #172033 !important;
+}
+
+.stButton > button {
+    border-radius: 10px;
+    min-height: 2.75rem;
+    font-weight: 800;
+}
+
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #1d4ed8, #2563eb);
+    border: none;
+    color: #ffffff !important;
+    box-shadow: 0 6px 16px rgba(37,99,235,.18);
+}
+
+.stButton > button[kind="primary"] * {
+    color: #ffffff !important;
+}
+
+/* Alert Streamlit più leggibili */
+[data-testid="stAlert"] {
+    border-radius: 12px;
+}
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] div {
+    color: #1e293b !important;
+}
+
+/* Dataframe: non alteriamo lo sfondo interno, ma titolo/contorno sì */
+[data-testid="stDataFrame"] {
+    border: 1px solid #dbe3ef;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #ffffff;
+}
+
+/* Caption */
+[data-testid="stCaptionContainer"] p {
+    color: #64748b !important;
+}
+
+/* Badge riutilizzabili */
+.rcd-badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: .72rem;
+    font-weight: 850;
+    margin-right: 5px;
+    border: 1px solid #dbe3ef;
+    background: #f8fafc;
+    color: #334155 !important;
+}
+.rcd-badge.good { color:#166534 !important; border-color:#bbf7d0; background:#f0fdf4; }
+.rcd-badge.warn { color:#92400e !important; border-color:#fde68a; background:#fffbeb; }
+.rcd-badge.bad  { color:#991b1b !important; border-color:#fecaca; background:#fef2f2; }
+
+/* Evita testi "invisibili" nei markdown custom */
+.rcd-league-card,
+.rcd-league-card *,
+.rcd-league-team {
+    color: #172033 !important;
+}
+
+/* Scroll più pulito */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }
+</style>
+""", unsafe_allow_html=True)
+
+ROLE_LIMITS: dict[str, int] = {
+    "P": 3,
+    "D": 8,
+    "C": 8,
+    "A": 6,
+}
+TOTAL_SLOTS_PER_TEAM = sum(ROLE_LIMITS.values())
+
+# Calibrazione finale per ruolo.
+# Derivata dai target richiesti:
+# P: 6.7 -> 9.0, D: 8.7 -> 9.2, C: 8.2 -> 8.5, A invariato.
+ROLE_RATING_MULTIPLIERS = {
+    "P": 9.0 / 6.7,
+    "D": 9.2 / 8.7,
+    "C": 8.5 / 8.2,
+    "A": 1.0,
+}
+
+
+# Valutazione rosa più "netta".
+# I giocatori TOP devono incidere più delle riserve/terze fasce.
+TEAM_PLAYER_WEIGHTS = {
+    "TOP": 2.40,          # >= 9.0
+    "PRIMA": 1.70,        # 8.0 - 8.9
+    "SECONDA": 1.20,      # 7.0 - 7.9
+    "TERZA": 0.85,        # 6.5 - 6.9
+    "SOTTO_SOGLIA": 0.55, # < 6.5
+}
+
+# Amplifica le differenze fra rose senza alterare i rating individuali.
+TEAM_RATING_CENTER = 6.70
+TEAM_RATING_SPREAD = 1.35
+TOP_PLAYER_BONUS = 0.16
+ELITE_PLAYER_BONUS = 0.08
+WEAK_PLAYER_PENALTY = 0.10
+TEAM_RATING_MIN = 4.0
+TEAM_RATING_MAX = 9.5
+
+
+# Calibrazione finale dei voti squadra.
+# Obiettivo empirico richiesto:
+# 4.5 -> ~5.5
+# 6.7 -> ~8.0
+TEAM_GRADE_CALIBRATION_X1 = 4.5
+TEAM_GRADE_CALIBRATION_Y1 = 5.5
+TEAM_GRADE_CALIBRATION_X2 = 6.7
+TEAM_GRADE_CALIBRATION_Y2 = 8.0
+
+# Stima iniziale usata solo quando non esistono ancora abbastanza
+# precedenti di asta nel database. Appena ci sono acquisti reali,
+# la stima viene sostituita dalla mediana dei moltiplicatori osservati.
+DEFAULT_AUCTION_MULTIPLIER = 2.5
+MIN_HISTORY_FOR_ROLE_ESTIMATE = 2
+
+DRAFT_ORDER = ("P", "D", "C", "A")
+ROLE_NAMES = {
+    "P": "Portieri",
+    "D": "Difensori",
+    "C": "Centrocampisti",
+    "A": "Attaccanti",
+}
+
+# Modificatore portieri:
+# tra le tre squadre dei portieri presenti nella rosa, la squadra
+# che ha subito meno gol prende +1.0, la seconda 0.0, la terza -1.0.
+GOALKEEPER_GOALS_CONCEDED_MODIFIERS = {
+    1: 1.0,
+    2: 0.0,
+    3: -1.0,
+}
+
+ROLE_LABELS = {
+    "Tutti i ruoli": "ALL",
+    "Portieri (P)": "P",
+    "Difensori (D)": "D",
+    "Centrocampisti (C)": "C",
+    "Attaccanti (A)": "A",
+}
+
+PLAYER_FIELDS = (
+    "id, name, role, team_nfl, list_price, status_titolarita, "
+    "rigorista, affidabilita_fisica, propensione_cartellini, "
+    "slot_fantacalcio, primo_anno_serie_a"
+)
+
+RATING_CONFIG = {
+    "base": 6.5,
+    "list_price_bonus": (
+        (30, 3.5),
+        (20, 2.5),
+        (10, 1.0),
+        (5, 0.5),
+    ),
+    "titolare": 1.5,
+    "riserva": -1.5,
+    "rigorista": 1.5,
+    "cartellini": -0.3,
+    "rookie": -0.2,
+    "preferito": 0.8,
+}
+
+TEAM_MAP = {
+    "Napoli": "NAP", "Juventus": "JUV", "Milan": "MIL", "Inter": "INT",
+    "Roma": "ROM", "Lazio": "LAZ", "Atalanta": "ATA", "Fiorentina": "FIO",
+    "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
+    "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
+    "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS",
+}
+
+DATA_DIR = Path(__file__).resolve().parent
+STATS_FILE = DATA_DIR / "player_aggregated_stats.csv"
+SEASON_FILE = DATA_DIR / "season-2526.csv"
+
+
+# Tab 4: modifiche manuali persistenti ai giocatori.
+# Richiede una tabella Supabase dedicata (SQL fornito sotto).
+CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
+
+# Nome della squadra dell'utente. Vengono tollerati anche i nomi usati
+# nelle versioni precedenti, così il codice non dipende da una singola
+# stringa hardcoded.
+MY_TEAM_NAME = "RCD Escanyol"
+MY_TEAM_ALIASES = (
+    "RCD Escanyol",
+    "Escanyol",
+    "RCD Escalnyol",
+)
+
+CUSTOM_MODIFIERS = {
+    "Nessuna modifica": {"key": None, "value": 0.0},
+    "⭐ Preferito (+0.5)": {"key": "preferito", "value": 0.5},
+    "🟢 Bonus extra +1.0": {"key": "bonus_1", "value": 1.0},
+    "🟢 Bonus extra +0.5": {"key": "bonus_05", "value": 0.5},
+    "🟢 Bonus extra +0.3": {"key": "bonus_03", "value": 0.3},
+    "🟡 Ballottaggio (-0.3)": {"key": "ballottaggio", "value": -0.3},
+    "🟠 Malus -0.5": {"key": "malus_05", "value": -0.5},
+    "🔴 Malus -1.0": {"key": "malus_1", "value": -1.0},
+    "🔴 Riserva (-1.5)": {"key": "riserva", "value": -1.5},
+}
+
+
+SOUND_URLS = {
+    "massive": "https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/johncenaprankcall_cutted.mp3",
+    "great": "https://www.myinstants.com/media/sounds/ta-da.mp3",
+    "normal": "https://www.myinstants.com/media/sounds/plop.mp3",
+}
+
+
+@dataclass
+class AuctionState:
+    bought_player_ids: set[Any]
+    team_role_totals: dict[str, dict[str, int]]
+    team_total_bought: dict[str, int]
+    team_players_map: dict[str, list[dict[str, Any]]]
+    team_purchases_map: dict[str, list[dict[str, Any]]]
+
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 @st.cache_resource
-def get_auth_flow_client(flow_id: str):
-    """
-    Client Supabase dedicato al singolo flusso OAuth.
-    Importante: viene creato NORMALMENTE, senza ClientOptions/storage custom.
-    """
+def get_supabase() -> Client:
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"],
     )
 
 
-def _oauth_response_url(response):
-    if response is None:
-        return ""
-    if isinstance(response, dict):
-        return str(response.get("url") or "")
-    return str(getattr(response, "url", "") or "")
+supabase = get_supabase()
 
 
-def get_public_app_url():
+# ============================================================
+# AUTENTICAZIONE — GOOGLE / FACEBOOK VIA SUPABASE AUTH
+# ============================================================
+
+AUTH_SESSION_KEYS = (
+    "auth_access_token",
+    "auth_refresh_token",
+    "auth_user",
+    "auth_flow_id",
+)
+
+
+def get_public_app_url() -> str:
+    """
+    URL pubblico dell'app usato come redirect OAuth.
+
+    In produzione è consigliato impostare in .streamlit/secrets.toml:
+    APP_URL = "https://nome-app.streamlit.app"
+    """
     configured = st.secrets.get("APP_URL")
     if configured:
         return str(configured).rstrip("/")
@@ -763,12 +554,163 @@ def get_public_app_url():
     return "http://localhost:8501"
 
 
-def build_google_login_url():
-    """
-    Genera il flusso PKCE usando direttamente supabase-py.
+@st.cache_resource
+def get_auth_flow_client(flow_id: str) -> Client:
+    """Client Supabase dedicato al flusso OAuth corrente."""
+    return create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"],
+    )
 
-    Ogni tentativo ha un flow_id dedicato. Il client associato viene recuperato
-    nel callback tramite lo stesso flow_id presente nella redirect URL.
+
+def _oauth_response_url(response: Any) -> str:
+    """Estrae l'URL OAuth sia da oggetti supabase-py sia da dict."""
+    if response is None:
+        return ""
+    if isinstance(response, dict):
+        return str(response.get("url") or "")
+    return str(getattr(response, "url", "") or "")
+
+
+def _minimal_user_dict(user: Any) -> dict[str, Any]:
+    if user is None:
+        return {}
+
+    metadata = getattr(user, "user_metadata", None) or {}
+    identities = getattr(user, "identities", None) or []
+
+    return {
+        "id": str(getattr(user, "id", "") or ""),
+        "email": str(getattr(user, "email", "") or ""),
+        "metadata": dict(metadata) if isinstance(metadata, dict) else {},
+        "identities": identities,
+    }
+
+
+def _auth_display_name(user: dict[str, Any]) -> str:
+    metadata = user.get("metadata") or {}
+    return str(
+        metadata.get("full_name")
+        or metadata.get("name")
+        or metadata.get("user_name")
+        or user.get("email")
+        or "Utente"
+    )
+
+
+def _auth_avatar_url(user: dict[str, Any]) -> str:
+    metadata = user.get("metadata") or {}
+    return str(
+        metadata.get("avatar_url")
+        or metadata.get("picture")
+        or ""
+    )
+
+
+def clear_auth_state() -> None:
+    for key in AUTH_SESSION_KEYS:
+        st.session_state.pop(key, None)
+
+
+def handle_oauth_callback() -> bool:
+    """Scambia il code PKCE restituito da Supabase con una sessione."""
+    code = st.query_params.get("code")
+    flow_id = st.query_params.get("auth_flow")
+
+    if not code or not flow_id:
+        return False
+
+    try:
+        auth_client = get_auth_flow_client(str(flow_id))
+        response = auth_client.auth.exchange_code_for_session(
+            {"auth_code": str(code)}
+        )
+
+        session = getattr(response, "session", None)
+        user = getattr(response, "user", None)
+
+        if session is None:
+            # Alcune versioni espongono la sessione locale dopo lo scambio.
+            session = auth_client.auth.get_session()
+
+        access_token = getattr(session, "access_token", None)
+        refresh_token = getattr(session, "refresh_token", None)
+
+        if not access_token or not refresh_token:
+            raise RuntimeError("Supabase non ha restituito una sessione valida.")
+
+        if user is None:
+            verified = auth_client.auth.get_user(access_token)
+            user = getattr(verified, "user", None)
+
+        st.session_state["auth_access_token"] = access_token
+        st.session_state["auth_refresh_token"] = refresh_token
+        st.session_state["auth_user"] = _minimal_user_dict(user)
+        st.session_state["auth_flow_id"] = str(flow_id)
+
+        # Rimuove code/verifier dalla barra URL appena terminato il login.
+        st.query_params.clear()
+        st.rerun()
+
+    except Exception as exc:
+        st.query_params.clear()
+        st.session_state["auth_callback_error"] = str(exc)
+        return False
+
+    return True
+
+
+def restore_and_verify_auth_session() -> dict[str, Any] | None:
+    """
+    Verifica il JWT con Supabase.
+
+    I token rimangono nello st.session_state della sessione Streamlit.
+    """
+    access_token = st.session_state.get("auth_access_token")
+    refresh_token = st.session_state.get("auth_refresh_token")
+
+    if not access_token or not refresh_token:
+        return None
+
+    try:
+        flow_id = st.session_state.get("auth_flow_id") or "restored-session"
+        auth_client = get_auth_flow_client(str(flow_id))
+        session_response = auth_client.auth.set_session(
+            access_token,
+            refresh_token,
+        )
+
+        session = getattr(session_response, "session", None)
+        if session is not None:
+            st.session_state["auth_access_token"] = getattr(
+                session, "access_token", access_token
+            )
+            st.session_state["auth_refresh_token"] = getattr(
+                session, "refresh_token", refresh_token
+            )
+
+        verified = auth_client.auth.get_user(
+            st.session_state["auth_access_token"]
+        )
+        user_obj = getattr(verified, "user", None)
+
+        if user_obj is None:
+            clear_auth_state()
+            return None
+
+        user = _minimal_user_dict(user_obj)
+        st.session_state["auth_user"] = user
+        return user
+
+    except Exception:
+        clear_auth_state()
+        return None
+
+
+def build_provider_login_url(provider: str) -> str:
+    """
+    Genera URL OAuth separato per provider.
+    Ogni provider usa un proprio verifier PKCE.
     """
     flow_id = uuid.uuid4().hex
     auth_client = get_auth_flow_client(flow_id)
@@ -778,2905 +720,4282 @@ def build_google_login_url():
         f"/?auth_callback=1&auth_flow={flow_id}"
     )
 
-    response = auth_client.auth.sign_in_with_oauth({
-        "provider": "google",
-        "options": {
-            "redirect_to": redirect_to,
-        },
-    })
-
-    oauth_url = _oauth_response_url(response)
-    if not oauth_url:
-        raise RuntimeError("Supabase non ha restituito la URL OAuth Google.")
-
-    return oauth_url
+    response = auth_client.auth.sign_in_with_oauth(
+        {
+            "provider": provider,
+            "options": {
+                "redirect_to": redirect_to,
+            },
+        }
+    )
+    return _oauth_response_url(response)
 
 
-def handle_google_oauth_callback():
-    """
-    Scambia il code PKCE restituito da Supabase con una sessione.
 
-    NOTA: exchange_code_for_session richiede un dict con auth_code,
-    non una stringa semplice.
-    """
-    code = st.query_params.get("code")
-    flow_id = st.query_params.get("auth_flow")
-
-    if not code or not flow_id:
-        return False
-
+def sign_in_with_email_password(email: str, password: str) -> tuple[bool, str]:
+    """Login classico Supabase con email/password."""
     try:
-        auth_client = get_auth_flow_client(str(flow_id))
-
-        response = auth_client.auth.exchange_code_for_session(
-            {"auth_code": str(code)}
+        auth_client = get_auth_flow_client("password-login")
+        response = auth_client.auth.sign_in_with_password(
+            {
+                "email": email.strip(),
+                "password": password,
+            }
         )
 
         session = getattr(response, "session", None)
-        user_obj = getattr(response, "user", None)
+        user = getattr(response, "user", None)
 
         if session is None:
-            session = auth_client.auth.get_session()
+            return False, "Supabase non ha restituito una sessione valida."
 
         access_token = getattr(session, "access_token", None)
         refresh_token = getattr(session, "refresh_token", None)
 
         if not access_token or not refresh_token:
-            raise RuntimeError(
-                "Supabase non ha restituito una sessione valida."
-            )
+            return False, "Token di sessione non disponibili."
 
-        if user_obj is None:
-            verified = auth_client.auth.get_user(access_token)
-            user_obj = getattr(verified, "user", None)
+        st.session_state["auth_access_token"] = access_token
+        st.session_state["auth_refresh_token"] = refresh_token
+        st.session_state["auth_user"] = _minimal_user_dict(user)
+        st.session_state["auth_flow_id"] = "password-login"
 
-        if user_obj is None:
-            raise RuntimeError(
-                "Supabase non ha restituito l'utente autenticato."
-            )
-
-        # Allineiamo anche il client principale dell'app.
-        main_response = supabase.auth.set_session(
-            access_token,
-            refresh_token,
-        )
-
-        # Riutilizziamo la persistenza già presente nell'app:
-        # salva utente e refresh token nel cookie persistente.
-        save_authenticated_session(main_response)
-
-        st.session_state[AUTH_FLOW_STATE_KEY] = str(flow_id)
-
-        # Il code OAuth è monouso: puliamo subito la barra URL.
-        st.query_params.clear()
-        st.rerun()
-        return True
+        return True, ""
 
     except Exception as exc:
-        st.query_params.clear()
-        st.session_state["auth_callback_error"] = str(exc)
-        return False
+        return False, str(exc)
 
 
-def show_login_page():
-    st.title("SanoSync")
-    st.caption("Accedi con Google oppure usa email e password.")
-
-    callback_error = st.session_state.pop("auth_callback_error", None)
-
+def sign_up_with_email_password(email: str, password: str) -> tuple[bool, str]:
+    """Registrazione classica Supabase con email/password."""
     try:
-        google_url = escape(build_google_login_url(), quote=True)
-
-        # Stringa HTML continua + target="_top":
-        # su mobile forziamo la navigazione dell'intero contesto browser verso
-        # Supabase/Google, evitando eventuali contenitori/frame intermedi.
-        google_html = (
-            '<a href="' + google_url + '" '
-            'target="_top" rel="external noopener" '
-            'style="display:flex;align-items:center;justify-content:center;gap:10px;'
-            'width:100%;box-sizing:border-box;padding:0.72rem 1rem;'
-            'border-radius:10px;border:2px solid #FF8B8B;'
-            'background:#FFFFFF;color:#1A2942;text-decoration:none;'
-            'font-weight:800;margin:6px 0 10px 0;'
-            'touch-action:manipulation;-webkit-tap-highlight-color:transparent;">'
-            '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">'
-            '<path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41z"/>'
-            '<path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.63-2.43l-3.24-2.54c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22z"/>'
-            '<path fill="#FBBC05" d="M6.39 13.86A6 6 0 0 1 6.08 12c0-.65.11-1.28.31-1.86V7.52H3.04A10 10 0 0 0 2 12c0 1.61.38 3.13 1.04 4.48l3.35-2.62z"/>'
-            '<path fill="#EA4335" d="M12 6.01c1.47 0 2.79.51 3.83 1.5l2.87-2.87A9.63 9.63 0 0 0 12 2a10 10 0 0 0-8.96 5.52l3.35 2.62C7.18 7.77 9.39 6.01 12 6.01z"/>'
-            '</svg>'
-            '<span>Continua con Google</span>'
-            '</a>'
+        auth_client = get_auth_flow_client("password-signup")
+        response = auth_client.auth.sign_up(
+            {
+                "email": email.strip(),
+                "password": password,
+            }
         )
 
-        st.markdown(google_html, unsafe_allow_html=True)
+        user = getattr(response, "user", None)
+        session = getattr(response, "session", None)
 
-        with st.expander("Problemi con Google su mobile?", expanded=False):
-            st.caption(
-                "Apri il link qui sotto direttamente nel browser. "
-                "Usa lo stesso flusso OAuth, senza modificare Supabase."
-            )
-            st.link_button(
-                "Apri Google in una nuova scheda",
-                google_url,
-                use_container_width=True,
-            )
+        if user is None:
+            return False, "Registrazione non completata."
+
+        # Se la conferma email è disattivata, Supabase restituisce subito la sessione.
+        if session is not None:
+            access_token = getattr(session, "access_token", None)
+            refresh_token = getattr(session, "refresh_token", None)
+            if access_token and refresh_token:
+                st.session_state["auth_access_token"] = access_token
+                st.session_state["auth_refresh_token"] = refresh_token
+                st.session_state["auth_user"] = _minimal_user_dict(user)
+                st.session_state["auth_flow_id"] = "password-signup"
+                return True, "signed_in"
+
+        return True, "check_email"
 
     except Exception as exc:
-        st.error(
-            "Non riesco a generare il link Google. "
-            "Controlla la configurazione Auth di Supabase."
-        )
-        st.caption(str(exc))
+        return False, str(exc)
 
-    if callback_error:
-        st.error(f"Login Google non completato: {callback_error}")
 
-    st.markdown("---")
-
-    auth_mode = st.radio(
-        "Account",
-        ["Login", "Registrazione"],
-        horizontal=True,
+def render_login_page() -> None:
+    """Pagina login RCD Escanyol con pulsanti Google/Facebook e loghi."""
+    st.markdown(
+        """
+<style>
+[data-testid="stSidebar"] { display: none; }
+.login-shell { max-width: 470px; margin: 5vh auto 0 auto; }
+.login-brand {
+    border-radius: 24px; padding: 30px 30px 26px;
+    background: radial-gradient(circle at 92% 4%, rgba(96,165,250,.42), transparent 31%),
+                linear-gradient(145deg, #102a62 0%, #1648a8 64%, #2563eb 100%);
+    box-shadow: 0 22px 55px rgba(30,64,175,.22);
+    text-align: center; margin-bottom: 16px;
+}
+.login-brand * { color: #fff !important; }
+.login-eyebrow { font-size:.74rem; font-weight:900; letter-spacing:.14em; color:#bfdbfe !important; }
+.login-title { font-size:2rem; font-weight:950; letter-spacing:-.04em; margin:7px 0 4px; }
+.login-subtitle { font-size:.95rem; color:#dbeafe !important; }
+.login-card {
+    border:1px solid #cbdcf5; border-radius:20px; padding:25px 24px;
+    background:rgba(255,255,255,.97); box-shadow:0 13px 38px rgba(15,23,42,.08);
+}
+.login-card-title { text-align:center; font-weight:900; font-size:1.08rem; color:#172033 !important; margin-bottom:15px; }
+.social-login {
+    height:52px; display:flex; align-items:center; justify-content:center; gap:12px;
+    width:100%; border-radius:12px; text-decoration:none !important;
+    font-size:.96rem; font-weight:850; margin:11px 0; box-sizing:border-box;
+}
+.social-login:hover { transform:translateY(-1px); text-decoration:none !important; }
+.social-login.google { color:#24324a !important; background:#fff; border:1px solid #cbd5e1; box-shadow:0 4px 12px rgba(15,23,42,.06); }
+.social-login.facebook { color:#fff !important; background:#1877F2; border:1px solid #1468d4; box-shadow:0 5px 14px rgba(24,119,242,.18); }
+.social-login.facebook span { color:#fff !important; }
+.social-login.google span { color:#24324a !important; }
+.social-logo { width:22px; height:22px; flex:0 0 22px; }
+.login-note { text-align:center; color:#64748b !important; font-size:.78rem; line-height:1.45; margin-top:16px; }
+        .login-shell + div { max-width: 470px; margin-left:auto; margin-right:auto; }
+        div[data-testid="stForm"] {
+            max-width: 470px;
+            margin-left: auto;
+            margin-right: auto;
+            border: 1px solid #cbdcf5;
+            border-radius: 18px;
+            background: rgba(255,255,255,.97);
+            padding: 18px 20px 20px;
+            box-shadow: 0 10px 28px rgba(15,23,42,.06);
+        }
+        div[data-testid="stRadio"] {
+            max-width: 470px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+</style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    with st.form("auth_form"):
-        email = st.text_input("Email")
+    error = st.session_state.pop("auth_callback_error", None)
+
+    try:
+        google_url = build_provider_login_url("google")
+        facebook_url = build_provider_login_url("facebook")
+    except Exception as exc:
+        st.error("Non riesco a generare i link di login. Controlla la configurazione Auth di Supabase.")
+        st.caption(str(exc))
+        st.stop()
+
+    google_url = escape(google_url, quote=True)
+    facebook_url = escape(facebook_url, quote=True)
+
+    # IMPORTANTE: l'HTML viene costruito senza righe vuote/interruzioni tra i tag.
+    # In questo modo il parser Markdown di Streamlit non spezza il blocco HTML
+    # trasformandone alcune parti in testo/codice visibile.
+    login_html = (
+        '<div class="login-shell">'
+        '<div class="login-brand">'
+        '<div class="login-eyebrow">RCD ESCANYOL</div>'
+        '<div class="login-title">⚽ Auction &amp; Season Center</div>'
+        '<div class="login-subtitle">Asta, rosa, formazione e campionato in un unico posto.</div>'
+        '</div>'
+        '<div class="login-card">'
+        '<div class="login-card-title">Accedi per continuare</div>'
+        f'<a class="social-login google" href="{google_url}" target="_self">'
+        '<svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">'
+        '<path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41z"/>'
+        '<path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.63-2.43l-3.24-2.54c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22z"/>'
+        '<path fill="#FBBC05" d="M6.39 13.86A6 6 0 0 1 6.08 12c0-.65.11-1.28.31-1.86V7.52H3.04A10 10 0 0 0 2 12c0 1.61.38 3.13 1.04 4.48l3.35-2.62z"/>'
+        '<path fill="#EA4335" d="M12 6.01c1.47 0 2.79.51 3.83 1.5l2.87-2.87A9.63 9.63 0 0 0 12 2a10 10 0 0 0-8.96 5.52l3.35 2.62C7.18 7.77 9.39 6.01 12 6.01z"/>'
+        '</svg>'
+        '<span>Continua con Google</span>'
+        '</a>'
+        f'<a class="social-login facebook" href="{facebook_url}" target="_self">'
+        '<svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">'
+        '<circle cx="12" cy="12" r="12" fill="#ffffff"/>'
+        '<path fill="#1877F2" d="M13.52 20v-7h2.35l.35-2.73h-2.7V8.53c0-.79.22-1.33 1.35-1.33h1.44V4.76c-.25-.03-1.1-.1-2.1-.1-2.08 0-3.5 1.27-3.5 3.6v2.01H8.36V13h2.35v7h2.81z"/>'
+        '</svg>'
+        '<span>Continua con Facebook</span>'
+        '</a>'
+        '<div class="login-note">L’autenticazione viene gestita da Supabase Auth. '
+        'La password del tuo account Google o Facebook non viene gestita dall’app.</div>'
+        '</div>'
+        '</div>'
+    )
+
+    st.markdown(login_html, unsafe_allow_html=True)
+
+    if error:
+        st.error(f"Login non completato: {error}")
+
+    st.markdown(
+        """
+        <div style="
+            max-width:470px;
+            margin:14px auto 0 auto;
+            text-align:center;
+            color:#64748b;
+            font-size:.82rem;
+            font-weight:700;
+        ">
+            oppure accedi con email e password
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    login_mode = st.radio(
+        "Modalità",
+        ["Accedi", "Registrati"],
+        horizontal=True,
+        key="password_auth_mode",
+        label_visibility="collapsed",
+    )
+
+    with st.form("password_auth_form", clear_on_submit=False):
+        email = st.text_input(
+            "Email",
+            placeholder="nome@email.com",
+            key="password_auth_email",
+        )
         password = st.text_input(
-            "Password (min. 6 caratteri)",
+            "Password",
             type="password",
+            placeholder="••••••••",
+            key="password_auth_password",
         )
 
-        display_name_input = ""
-        target_weight = None
-        height = None
-        current_weight = None
-        gender = None
-        birth_date_input = None
-
-        if auth_mode == "Registrazione":
-            st.markdown("#### 📋 Parametri Fisici Iniziali")
-            display_name_input = st.text_input("Display Name", value="")
-            gender = st.selectbox(
-                "Genere",
-                ["Uomo", "Donna"],
-                index=None,
-                placeholder="Seleziona genere...",
-            )
-            birth_date_input = st.date_input(
-                "Data di nascita",
-                value=date(1990, 1, 1),
-                min_value=date(1900, 1, 1),
-                max_value=date.today(),
-            )
-            height = st.number_input(
-                "Altezza (cm)",
-                value=175.0,
-                min_value=100.0,
-                max_value=250.0,
-                step=1.0,
-            )
-            current_weight = st.number_input(
-                "Peso Attuale (kg)",
-                value=80.0,
-                min_value=20.0,
-                max_value=300.0,
-                step=0.5,
-            )
-            target_weight = st.number_input(
-                "Peso Obiettivo (kg)",
-                value=75.0,
-                min_value=20.0,
-                max_value=300.0,
-                step=0.5,
-            )
-
-        submit_label = "Accedi" if auth_mode == "Login" else "Registrati"
+        submit_label = "Accedi" if login_mode == "Accedi" else "Crea account"
         submitted = st.form_submit_button(
             submit_label,
+            type="primary",
             use_container_width=True,
         )
 
         if submitted:
-            try:
-                if auth_mode == "Login":
-                    if not email.strip() or not password:
-                        st.warning("Inserisci email e password.")
-                    else:
-                        response = supabase.auth.sign_in_with_password({
-                            "email": email.strip(),
-                            "password": password,
-                        })
-
-                        if response and response.session:
-                            save_authenticated_session(response)
-                            st.success("✅ Login effettuato.")
-                            st.rerun()
-                        else:
-                            st.error("Credenziali non valide.")
-
+            if not email.strip() or not password:
+                st.error("Inserisci email e password.")
+            elif len(password) < 6:
+                st.error("La password deve contenere almeno 6 caratteri.")
+            elif login_mode == "Accedi":
+                ok, message = sign_in_with_email_password(email, password)
+                if ok:
+                    st.rerun()
                 else:
-                    if not email.strip() or len(password) < 6:
-                        st.warning(
-                            "Inserisci una email valida e una password "
-                            "di almeno 6 caratteri."
-                        )
-                    elif not height or not current_weight or not target_weight or not gender or not birth_date_input:
-                        st.warning("Compila tutti i parametri fisici.")
-                    else:
-                        response = supabase.auth.sign_up({
-                            "email": email.strip(),
-                            "password": password,
-                            "options": {
-                                "data": {
-                                    "display_name": (
-                                        display_name_input
-                                        or email.split("@")[0]
-                                    ),
-                                    "target_weight": float(target_weight),
-                                    "current_weight": float(current_weight),
-                                    "birth_date": str(birth_date_input),
-                                    "height": float(height),
-                                    "gender": gender,
-                                }
-                            },
-                        })
-
-                        # Se la conferma email è disabilitata, Supabase può già
-                        # restituire una sessione.
-                        if response and getattr(response, "session", None):
-                            save_authenticated_session(response)
-                            st.success(
-                                "✅ Account creato e accesso effettuato."
-                            )
-                            st.rerun()
-                        else:
-                            st.success(
-                                "✅ Account creato. Controlla l'email se è "
-                                "richiesta la conferma, poi effettua il login."
-                            )
-
-            except Exception as e:
-                st.error(
-                    f"Errore durante l'autenticazione: {str(e)}"
-                )
-                print(traceback.format_exc())
+                    st.error(f"Login non riuscito: {message}")
+            else:
+                ok, message = sign_up_with_email_password(email, password)
+                if not ok:
+                    st.error(f"Registrazione non riuscita: {message}")
+                elif message == "signed_in":
+                    st.success("Account creato. Accesso effettuato.")
+                    st.rerun()
+                else:
+                    st.success(
+                        "Account creato. Controlla la tua email per confermare "
+                        "l'indirizzo, poi torna qui e accedi."
+                    )
 
 
-# ==============================================================================
-# 5. RESTORE SESSION / GOOGLE CALLBACK
-# ==============================================================================
-# Gestiamo prima il callback PKCE Google, perché il code OAuth è monouso.
-if (
-    st.session_state.get("user") is None
-    and st.query_params.get("code")
-    and st.query_params.get("auth_flow")
-):
-    handle_google_oauth_callback()
+def _first_name_from_user(user: dict[str, Any]) -> str:
+    """Ricava solo il nome, senza cognome, dai metadata Google/Facebook."""
+    metadata = user.get("metadata") or {}
 
-# Poi proviamo il restore persistente dal refresh-token cookie.
-if st.session_state.get("user") is None:
-    restore_session_from_cookie()
-
-if st.session_state.get("user") is None:
-    show_login_page()
-    st.stop()
-
-# 6. USER DATA RETRIEVAL
-# ==============================================================================
-user = st.session_state["user"]
-user_id = user.id
-u_meta = user.user_metadata or {}
-
-
-def get_logged_user_identity(user_obj):
-    """Nome, email e avatar dai metadata Supabase (Google incluso)."""
-    metadata = getattr(user_obj, "user_metadata", None) or {}
-    email = str(getattr(user_obj, "email", "") or "")
-
-    display = str(
-        metadata.get("full_name")
-        or metadata.get("name")
-        or metadata.get("display_name")
-        or (email.split("@")[0] if email else "Utente")
-    )
-
-    avatar = str(
-        metadata.get("avatar_url")
-        or metadata.get("picture")
+    first_name = (
+        metadata.get("given_name")
+        or metadata.get("first_name")
         or ""
     )
+    if first_name:
+        return str(first_name).strip().split()[0]
 
-    return display, email, avatar
+    full_name = str(
+        metadata.get("full_name")
+        or metadata.get("name")
+        or ""
+    ).strip()
+    if full_name:
+        return full_name.split()[0]
+
+    email = str(user.get("email") or "").strip()
+    if email:
+        candidate = email.split("@")[0]
+        candidate = candidate.replace(".", " ").replace("_", " ").replace("-", " ")
+        if candidate.strip():
+            return candidate.strip().split()[0].capitalize()
+
+    return "Mister"
 
 
-logged_name, logged_email, logged_avatar = get_logged_user_identity(user)
+def _dynamic_greeting() -> str:
+    """Saluto in base all'ora italiana."""
+    try:
+        hour = datetime.now(ZoneInfo("Europe/Rome")).hour
+    except Exception:
+        hour = datetime.now().hour
+
+    if 5 <= hour < 12:
+        return "Buongiorno"
+    if 12 <= hour < 18:
+        return "Buon pomeriggio"
+    return "Buonasera"
 
 
-display_name = u_meta.get("display_name") or user.email.split("@")[0] or "User"
-user_target_weight = u_meta.get("target_weight")
-user_height = u_meta.get("height")
-user_gender = u_meta.get("gender")
-user_birth_date = u_meta.get("birth_date")
+def render_app_logo() -> None:
+    """Logo nella parte più alta della sidebar."""
+    st.sidebar.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            padding-top: .45rem;
+        }
+        .rcd-sidebar-logo-wrap {
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            width:100%;
+            padding:.10rem .20rem .70rem .20rem;
+            margin:0;
+        }
+        .rcd-sidebar-logo {
+            display:block;
+            width:100%;
+            max-width:245px;
+            max-height:92px;
+            height:auto;
+            object-fit:contain;
+            object-position:center;
+        }
+        @media (max-width: 720px) {
+            .rcd-sidebar-logo {
+                max-width:205px;
+                max-height:76px;
+            }
+        }
+        </style>
+        <div class="rcd-sidebar-logo-wrap">
+            <img
+                class="rcd-sidebar-logo"
+                src="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Screenshot%202026-08-18%20at%2020.11.38.png"
+                alt="Fantahelper"
+            >
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# Il BMR viene calcolato dinamicamente usando l'ultimo peso registrato.
-latest_weight_row = None
-try:
-    latest_weight_data = (
-        supabase.table("daily_logs")
-        .select("weight,date")
-        .eq("user_id", user_id)
-        .not_.is_("weight", "null")
-        .order("date", desc=True)
-        .limit(1)
+
+
+def render_authenticated_user_header(user: dict[str, Any]) -> None:
+    """Profilo minimale in alto a destra: saluto + avatar."""
+    first_name = escape(_first_name_from_user(user))
+    greeting = escape(_dynamic_greeting())
+    avatar = escape(_auth_avatar_url(user), quote=True)
+
+    avatar_html = (
+        f'<img class="rcd-profile-avatar" src="{avatar}" alt="Profilo">'
+        if avatar
+        else '<div class="rcd-profile-fallback">⚽</div>'
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        .rcd-user-topbar {{
+            display:flex;
+            align-items:center;
+            justify-content:flex-end;
+            gap:12px;
+            margin:.35rem 0 .75rem 0;
+            padding-right:.15rem;
+            min-height:54px;
+        }}
+        .rcd-user-greeting {{
+            display:flex;
+            align-items:center;
+            gap:8px;
+            font-size:1.02rem;
+            line-height:1;
+            font-weight:900;
+            color:#17325f !important;
+            white-space:nowrap;
+        }}
+        .rcd-user-ball {{
+            font-size:1.25rem;
+        }}
+        .rcd-profile-avatar,
+        .rcd-profile-fallback {{
+            width:46px;
+            height:46px;
+            border-radius:50%;
+            object-fit:cover;
+            border:3px solid #ffffff;
+            box-shadow:0 5px 16px rgba(30,64,175,.20);
+            background:#dbeafe;
+        }}
+        .rcd-profile-fallback {{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:1.25rem;
+        }}
+        @media (max-width: 720px) {{
+            .rcd-user-topbar {{
+                margin:.25rem 0 .65rem 0;
+            }}
+            .rcd-user-greeting {{
+                font-size:.90rem;
+            }}
+            .rcd-profile-avatar,
+            .rcd-profile-fallback {{
+                width:40px;
+                height:40px;
+            }}
+        }}
+        </style>
+        <div class="rcd-user-topbar">
+            <div class="rcd-user-greeting">
+                <span class="rcd-user-ball">⚽</span>
+                <span>{greeting} {first_name}!</span>
+            </div>
+            {avatar_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_logout_sidebar() -> None:
+    """Solo pulsante logout, senza Account/nome/email/avatar nella sidebar."""
+    st.sidebar.markdown("---")
+    if st.sidebar.button(
+        "↪ Esci",
+        key="auth_logout",
+        use_container_width=True,
+    ):
+        try:
+            flow_id = st.session_state.get("auth_flow_id") or "restored-session"
+            auth_client = get_auth_flow_client(str(flow_id))
+
+            access = st.session_state.get("auth_access_token")
+            refresh = st.session_state.get("auth_refresh_token")
+            if access and refresh:
+                auth_client.auth.set_session(access, refresh)
+            auth_client.auth.sign_out()
+        except Exception:
+            pass
+
+        clear_auth_state()
+        st.rerun()
+
+
+
+def require_authentication() -> dict[str, Any]:
+    """Gate dell'intera applicazione."""
+    handle_oauth_callback()
+
+    user = restore_and_verify_auth_session()
+    if user:
+        return user
+
+    render_login_page()
+    st.stop()
+    return {}
+
+
+@st.cache_data(ttl=5)
+def load_teams() -> list[dict[str, Any]]:
+    return (
+        supabase.table("teams")
+        .select("id, name, remaining_budget, initial_budget")
         .execute()
         .data
-        or []
-    )
-    if latest_weight_data:
-        latest_weight_row = latest_weight_data[0]
-except Exception as e:
-    print(f"Latest weight lookup error: {e}")
-
-if latest_weight_row and latest_weight_row.get("weight") is not None:
-    user_current_weight = float(latest_weight_row["weight"])
-else:
-    metadata_weight = u_meta.get("current_weight")
-    user_current_weight = (
-        float(metadata_weight)
-        if metadata_weight not in (None, "")
-        else None
     )
 
-user_bmr = None
-if (
-    user_current_weight is not None
-    and user_height is not None
-    and user_gender is not None
-    and user_birth_date
-):
-    user_bmr = calculate_bmr(
-        user_current_weight,
-        float(user_height),
-        user_birth_date,
-        user_gender,
+
+@st.cache_data(ttl=5)
+def load_rosters() -> list[dict[str, Any]]:
+    """Carica le rose usando gli FK espliciti e ricostruisce le relazioni.
+
+    Non dipendiamo da `teams(name)` / `players(...)` nella query di rosters:
+    se Supabase non espone correttamente una relazione, la vecchia versione
+    riceveva `teams=None` o `players=None` e la rosa risultava vuota nella UI
+    pur avendo righe reali nella tabella `rosters`.
+    """
+    roster_rows = (
+        supabase.table("rosters")
+        .select("id, team_id, player_id, purchase_price")
+        .execute()
+        .data
     )
 
-# ==============================================================================
-# 7. PROFILE COMPLETION CHECK
-# ==============================================================================
-profile_incomplete = (
-    user_target_weight is None
-    or user_height is None
-    or user_gender is None
-    or not user_birth_date
-    or user_current_weight is None
-    or user_bmr is None
-)
+    if not roster_rows:
+        return []
 
-if profile_incomplete:
-    st.warning("⚠️ Per iniziare, configura i tuoi dati.")
-    with st.form("missing_data_form"):
-        st.subheader("📋 Configurazione Profilo")
+    team_ids = {row.get("team_id") for row in roster_rows if row.get("team_id") is not None}
+    player_ids = {row.get("player_id") for row in roster_rows if row.get("player_id") is not None}
 
-        gen_index = 0 if user_gender is None else (0 if user_gender == "Uomo" else 1)
-        gen = st.selectbox(
-            "Genere",
-            ["Uomo", "Donna"],
-            index=gen_index,
+    teams_rows = (
+        supabase.table("teams")
+        .select("id, name, remaining_budget, initial_budget")
+        .in_("id", list(team_ids))
+        .execute()
+        .data
+    ) if team_ids else []
+
+    players_rows = (
+        supabase.table("players")
+        .select(PLAYER_FIELDS)
+        .in_("id", list(player_ids))
+        .execute()
+        .data
+    ) if player_ids else []
+
+    team_by_id = {row["id"]: row for row in teams_rows}
+    player_by_id = {row["id"]: row for row in players_rows}
+
+    hydrated = []
+    for row in roster_rows:
+        hydrated.append({
+            "id": row.get("id"),
+            "purchase_price": row.get("purchase_price", 0),
+            "team_id": row.get("team_id"),
+            "player_id": row.get("player_id"),
+            "teams": team_by_id.get(row.get("team_id")),
+            "players": player_by_id.get(row.get("player_id")),
+        })
+
+    return hydrated
+
+
+@st.cache_data(ttl=5)
+def load_players(
+    role: str = "ALL",
+    team_nfl: str = "ALL",
+) -> list[dict[str, Any]]:
+    query = supabase.table("players").select(PLAYER_FIELDS)
+
+    if role != "ALL":
+        query = query.eq("role", role)
+
+    if team_nfl != "ALL":
+        query = query.eq("team_nfl", team_nfl)
+
+    return query.order("name").execute().data
+
+
+@st.cache_data(ttl=5)
+def load_custom_modifiers() -> dict[Any, dict[str, Any]]:
+    """Carica le modifiche manuali persistenti dal database."""
+    try:
+        rows = (
+            supabase.table(CUSTOM_MODIFIER_TABLE)
+            .select("player_id, modifier_key, modifier_label, modifier_value")
+            .execute()
+            .data
+        )
+    except Exception:
+        # Se la tabella non è stata ancora creata, l'app continua a funzionare
+        # usando il rating standard.
+        return {}
+
+    return {
+        row["player_id"]: row
+        for row in rows
+        if row.get("player_id") is not None
+    }
+
+
+def save_custom_modifier(
+    player_id: Any,
+    modifier_label: str,
+) -> tuple[bool, str]:
+    """Salva/sostituisce la modifica manuale di un giocatore."""
+    config = CUSTOM_MODIFIERS[modifier_label]
+
+    try:
+        (
+            supabase.table(CUSTOM_MODIFIER_TABLE)
+            .delete()
+            .eq("player_id", player_id)
+            .execute()
         )
 
-        existing_birth_date = parse_birth_date(user_birth_date)
-        birth_val = st.date_input(
-            "Data di nascita",
-            value=existing_birth_date or date(1990, 1, 1),
-            min_value=date(1900, 1, 1),
-            max_value=date.today(),
-        )
-
-        h_val = st.number_input(
-            "Altezza (cm)",
-            value=float(user_height) if user_height else 175.0,
-            min_value=100.0,
-            max_value=250.0,
-            step=1.0,
-        )
-
-        w_val = st.number_input(
-            "Peso Attuale (kg)",
-            value=float(user_current_weight) if user_current_weight is not None else 80.0,
-            min_value=20.0,
-            max_value=300.0,
-            step=0.5,
-        )
-
-        t_val = st.number_input(
-            "Peso Obiettivo (kg)",
-            value=float(user_target_weight) if user_target_weight else 75.0,
-            min_value=20.0,
-            max_value=300.0,
-            step=0.5,
-        )
-
-        calculated_preview_bmr = calculate_bmr(
-            w_val,
-            h_val,
-            birth_val,
-            gen,
-        )
-        calculated_age = calculate_age(birth_val)
-
-        if calculated_preview_bmr is not None:
-            st.caption(
-                f"Età: {calculated_age} anni · "
-                f"BMR stimato: {calculated_preview_bmr} kcal/giorno"
+        if config["key"] is not None:
+            (
+                supabase.table(CUSTOM_MODIFIER_TABLE)
+                .insert(
+                    {
+                        "player_id": player_id,
+                        "modifier_key": config["key"],
+                        "modifier_label": modifier_label,
+                        "modifier_value": config["value"],
+                    }
+                )
+                .execute()
             )
 
-        if st.form_submit_button("Salva e Inizia"):
-            try:
-                res = supabase.auth.update_user({
-                    "data": {
-                        "target_weight": float(t_val),
-                        "current_weight": float(w_val),
-                        "birth_date": str(birth_val),
-                        "height": float(h_val),
-                        "gender": gen,
-                    }
-                })
+        load_custom_modifiers.clear()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
 
-                # Salviamo anche il peso nello storico: da questo momento il BMR
-                # seguirà automaticamente l'ultimo peso registrato.
-                supabase.table("daily_logs").upsert(
-                    {
-                        "user_id": user_id,
-                        "date": str(date.today()),
-                        "weight": float(w_val),
-                    },
-                    on_conflict="user_id,date",
-                ).execute()
 
-                if hasattr(res, "user") and res.user:
-                    st.session_state["user"] = res.user
+def reset_custom_modifier(player_id: Any) -> tuple[bool, str]:
+    try:
+        (
+            supabase.table(CUSTOM_MODIFIER_TABLE)
+            .delete()
+            .eq("player_id", player_id)
+            .execute()
+        )
+        load_custom_modifiers.clear()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
 
-                st.success(
-                    f"✅ Profilo aggiornato! BMR attuale: "
-                    f"{calculated_preview_bmr} kcal/giorno."
+
+def invalidate_data_cache() -> None:
+    load_teams.clear()
+    load_rosters.clear()
+    load_players.clear()
+    load_external_data.clear()
+    load_custom_modifiers.clear()
+
+
+# ============================================================
+# UI / AUDIO
+# ============================================================
+
+def play_sound(sound_url: str) -> None:
+    components.html(
+        f"""
+        <audio autoplay>
+            <source src="{sound_url}" type="audio/mp3">
+        </audio>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def resolve_my_team_name(team_names: list[str]) -> str | None:
+    """Trova RCD Escanyol anche con piccole differenze di formattazione."""
+    normalized = {normalize_string(name): name for name in team_names if isinstance(name, str)}
+    for candidate in (MY_TEAM_NAME, *MY_TEAM_ALIASES):
+        hit = normalized.get(normalize_string(candidate))
+        if hit:
+            return hit
+    return None
+
+
+def is_my_team(team_name: str | None) -> bool:
+    if not team_name:
+        return False
+    return normalize_string(team_name) == normalize_string(MY_TEAM_NAME) or normalize_string(team_name) in {
+        normalize_string(alias) for alias in MY_TEAM_ALIASES
+    }
+
+
+def default_team_index(
+    team_names: list[str],
+    preferred: str = MY_TEAM_NAME,
+) -> int:
+    if not team_names:
+        return 0
+
+    # Prima prova il nome canonico, poi gli alias storici.
+    for name in (preferred, *MY_TEAM_ALIASES):
+        if name in team_names:
+            return team_names.index(name)
+    return 0
+
+
+def queue_purchase_banner(
+    team_name: str,
+    player_name: str,
+    rating: float,
+    purchase_price: int,
+) -> None:
+    """Memorizza il banner prima di st.rerun(), che interrompe subito il run."""
+    if not is_my_team(team_name):
+        st.session_state.pop("pending_purchase_banner", None)
+        return
+
+    if rating >= 9.0:
+        level = "massive"
+        title = "🏆 COLPO TOP!"
+        message = (
+            f"**{player_name}** entra nella rosa RCD Escanyol · "
+            f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
+        )
+    elif rating >= 8.0:
+        level = "great"
+        title = "✨ PRIMA FASCIA!"
+        message = (
+            f"Acquistato **{player_name}** · Rating **{rating:.1f}** · "
+            f"Prezzo **{purchase_price} cr**. Innesto di livello."
+        )
+    else:
+        level = "normal"
+        title = "✅ ACQUISTO COMPLETATO"
+        message = (
+            f"**{player_name}** è un nuovo giocatore RCD Escanyol · "
+            f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
+        )
+
+    st.session_state["pending_purchase_banner"] = {
+        "level": level,
+        "title": title,
+        "message": message,
+    }
+
+
+def render_pending_purchase_banner() -> None:
+    """Mostra il banner dell'ultimo acquisto dopo il rerun."""
+    banner = st.session_state.get("pending_purchase_banner")
+    if not banner:
+        return
+
+    # Evita che il banner venga riprodotto ad ogni rerun, ma lo mantiene
+    # abbastanza a lungo da poter essere visualizzato anche se la pagina
+    # ricostruisce più volte la UI.
+    st.session_state.pop("pending_purchase_banner", None)
+    level = banner["level"]
+    text = f"**{banner['title']}** — {banner['message']}"
+
+    # Banner visivo indipendente dai widget di Streamlit: rimane visibile
+    # anche se il browser blocca l'autoplay dell'audio.
+    banner_class = {
+        "massive": "massive",
+        "great": "great",
+        "normal": "normal",
+    }.get(level, "normal")
+    st.markdown(
+        f"""
+        <div class=\"auction-banner {banner_class}\">
+            <div class=\"auction-banner-title\">{banner['title']}</div>
+            <div class=\"auction-banner-text\">{banner['message']}</div>
+        </div>
+        <style>
+        .auction-banner {{
+            padding: 22px 28px; margin: 12px 0 22px; border-radius: 18px;
+            text-align: center; font-size: 1.15rem;
+            border: 2px solid rgba(255,255,255,.55);
+            box-shadow: 0 10px 30px rgba(0,0,0,.16);
+            animation: auctionPulse 1.1s ease-in-out 2;
+        }}
+        .auction-banner.massive {{
+            background: radial-gradient(circle at 90% 10%, rgba(250,204,21,.35), transparent 28%),
+                        linear-gradient(135deg,#4c1d95,#1e3a8a);
+            color:white;
+        }}
+        .auction-banner.great {{
+            background: radial-gradient(circle at 90% 10%, rgba(74,222,128,.30), transparent 30%),
+                        linear-gradient(135deg,#064e3b,#0f766e);
+            color:white;
+        }}
+        .auction-banner.normal {{
+            background: linear-gradient(135deg,#1e3a8a,#0f172a);
+            color:white;
+        }}
+        .auction-banner,
+        .auction-banner *,
+        .auction-banner-title,
+        .auction-banner-text {{
+            color: #ffffff !important;
+        }}
+        .auction-banner-title {{
+            font-size: 1.8rem;
+            font-weight: 900;
+            margin-bottom: 6px;
+            letter-spacing:.02em;
+        }}
+        .auction-banner-text {{
+            font-weight: 650;
+            color: #ffffff !important;
+        }}
+        @keyframes auctionPulse {{
+            0%,100% {{ transform: scale(1); }}
+            50% {{ transform: scale(1.025); }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if level == "massive":
+        st.balloons()
+        play_sound(SOUND_URLS["massive"])
+    elif level == "great":
+        st.balloons()
+        play_sound(SOUND_URLS["great"])
+    else:
+        play_sound(SOUND_URLS["normal"])
+
+
+# ============================================================
+# DATI ESTERNI / NORMALIZZAZIONE
+# ============================================================
+
+def normalize_string(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(c for c in value if not unicodedata.combining(c))
+    value = re.sub(r"[^a-zA-Z0-9\s]", "", value)
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+@st.cache_data(ttl=300)
+def load_external_data() -> tuple[pd.DataFrame, dict[str, dict[str, float]], dict[str, float]]:
+    stats = pd.DataFrame()
+    mods: dict[str, dict[str, float]] = {}
+    goals_conceded: dict[str, float] = {}
+
+    if STATS_FILE.exists():
+        try:
+            stats = pd.read_csv(STATS_FILE)
+            if "clean_name" not in stats.columns and "name" in stats.columns:
+                stats["clean_name"] = stats["name"].map(normalize_string)
+            elif "clean_name" in stats.columns:
+                stats["clean_name"] = stats["clean_name"].map(normalize_string)
+        except (OSError, pd.errors.ParserError) as exc:
+            st.warning(f"Impossibile leggere {STATS_FILE.name}: {exc}")
+
+    if not SEASON_FILE.exists():
+        return stats, mods, goals_conceded
+
+    try:
+        df = pd.read_csv(SEASON_FILE)
+        required = {"HomeTeam", "AwayTeam", "FTHG", "FTAG"}
+        if not required.issubset(df.columns):
+            return stats, mods, goals_conceded
+
+        home = (
+            df.groupby("HomeTeam")
+            .agg(GF=("FTHG", "sum"), GA=("FTAG", "sum"), M=("FTHG", "count"))
+            .reset_index()
+            .rename(columns={"HomeTeam": "Team"})
+        )
+        away = (
+            df.groupby("AwayTeam")
+            .agg(GF=("FTAG", "sum"), GA=("FTHG", "sum"), M=("FTAG", "count"))
+            .reset_index()
+            .rename(columns={"AwayTeam": "Team"})
+        )
+        ts = pd.merge(home, away, on="Team", how="outer").fillna(0)
+        ts["Matches"] = ts["M_x"] + ts["M_y"]
+        ts["TotalGF"] = ts["GF_x"] + ts["GF_y"]
+        ts["TotalGA"] = ts["GA_x"] + ts["GA_y"]
+
+        # Memorizziamo i gol subiti per ogni club/codice Serie A.
+        for _, row in ts.iterrows():
+            if row["Matches"] > 0:
+                code = TEAM_MAP.get(
+                    str(row["Team"]),
+                    str(row["Team"]).upper()[:3],
                 )
+                goals_conceded[code] = float(row["TotalGA"])
+
+        total_matches = ts["Matches"].sum()
+        if total_matches <= 0:
+            return stats, mods, goals_conceded
+
+        avg_gf = ts["TotalGF"].sum() / total_matches
+        avg_ga = ts["TotalGA"].sum() / total_matches
+
+        for _, row in ts.iterrows():
+            if row["Matches"] <= 0:
+                continue
+            code = TEAM_MAP.get(str(row["Team"]), str(row["Team"]).upper()[:3])
+            mods[code] = {
+                "att": round(((row["TotalGF"] / row["Matches"]) - avg_gf) * 0.8, 2),
+                "def": round((avg_ga - (row["TotalGA"] / row["Matches"])) * 0.9, 2),
+            }
+    except (OSError, pd.errors.ParserError, KeyError, ZeroDivisionError) as exc:
+        st.warning(f"Impossibile elaborare {SEASON_FILE.name}: {exc}")
+
+    return stats, mods, goals_conceded
+
+
+STATS, MODS, GOALS_CONCEDED = load_external_data()
+
+
+def get_goalkeeper_ranking_for_teams(
+    team_codes: set[str],
+) -> dict[str, int]:
+    """
+    Classifica SOLO le squadre dei portieri presenti nella rosa.
+
+    1 = meno gol subiti -> +1.0
+    2 = seconda -> 0.0
+    3 = più gol subiti -> -1.0
+
+    Se sono presenti meno di tre squadre, vengono classificate solo
+    quelle disponibili.
+    """
+    if not team_codes:
+        return {}
+
+    rows = [
+        (code, GOALS_CONCEDED.get(code))
+        for code in team_codes
+        if GOALS_CONCEDED.get(code) is not None
+    ]
+    rows.sort(key=lambda item: (item[1], item[0]))
+
+    return {
+        code: position
+        for position, (code, _) in enumerate(rows[:3], start=1)
+    }
+
+
+def get_goalkeeper_modifier(
+    player: dict[str, Any],
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> tuple[float, int | None]:
+    """Restituisce modificatore e posizione della squadra del portiere."""
+    if player.get("role") != "P" or not goalkeeper_ranking:
+        return 0.0, None
+
+    position = goalkeeper_ranking.get(player.get("team_nfl"))
+    if position is None:
+        return 0.0, None
+
+    return (
+        GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0),
+        position,
+    )
+
+
+ALL_GOALKEEPER_RANKING = get_goalkeeper_ranking_for_teams(set(GOALS_CONCEDED))
+
+
+def get_my_team_name_from_state(state: "AuctionState") -> str | None:
+    return resolve_my_team_name(list(state.team_players_map))
+
+
+def get_my_team_players_and_purchases(
+    state: "AuctionState",
+) -> tuple[str | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return None, [], []
+    return (
+        team_name,
+        state.team_players_map.get(team_name, []),
+        state.team_purchases_map.get(team_name, []),
+    )
+
+
+def get_my_team_draft_role(state: "AuctionState") -> str | None:
+    """Restituisce il prossimo ruolo della rosa RCD Escanyol secondo PDCA."""
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return "P"
+
+    # Una rosa da 25 giocatori è definitivamente chiusa:
+    # non generiamo più consigli anche se i conteggi ruolo risultano anomali.
+    total_bought = state.team_total_bought.get(team_name, 0)
+    actual_players = len(state.team_players_map.get(team_name, []))
+    if max(total_bought, actual_players) >= TOTAL_SLOTS_PER_TEAM:
+        return None
+
+    counts = state.team_role_totals.get(team_name, {})
+    for role in DRAFT_ORDER:
+        if counts.get(role, 0) < ROLE_LIMITS[role]:
+            return role
+    return None
+
+
+def role_label(role: str) -> str:
+    return {
+        "P": "Portieri (P)",
+        "D": "Difensori (D)",
+        "C": "Centrocampisti (C)",
+        "A": "Attaccanti (A)",
+    }.get(role, "Tutti i ruoli")
+
+
+def auction_history_ratios(
+    rosters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Estrae i moltiplicatori prezzo pagato/listino dagli acquisti reali."""
+    history = []
+    for roster in rosters:
+        player = roster.get("players") or {}
+        list_price = float(player.get("list_price") or 0)
+        paid = float(roster.get("purchase_price") or 0)
+        if list_price <= 0 or paid <= 0:
+            continue
+        ratio = paid / list_price
+        # Evitiamo che un errore/outlier renda inutile la mediana.
+        ratio = max(0.5, min(8.0, ratio))
+        history.append({
+            "role": player.get("role"),
+            "list_price": list_price,
+            "paid": paid,
+            "ratio": ratio,
+            "name": player.get("name", ""),
+        })
+    return history
+
+
+def estimate_auction_price(
+    player: dict[str, Any],
+    rosters: list[dict[str, Any]],
+    budget: int | None = None,
+    slots_left_after_purchase: int = 0,
+) -> dict[str, Any]:
+    """Stima il prezzo d'asta usando i moltiplicatori osservati nel draft."""
+    history = auction_history_ratios(rosters)
+    role = player.get("role")
+    list_price = float(player.get("list_price") or 1)
+
+    role_history = [h for h in history if h["role"] == role]
+    similar_history = [
+        h for h in role_history
+        if 0.5 * list_price <= h["list_price"] <= 1.5 * list_price
+    ]
+
+    if len(similar_history) >= MIN_HISTORY_FOR_ROLE_ESTIMATE:
+        sample = similar_history
+        source = "precedenti dello stesso ruolo e fascia di listino"
+    elif len(role_history) >= MIN_HISTORY_FOR_ROLE_ESTIMATE:
+        sample = role_history
+        source = "precedenti dello stesso ruolo"
+    elif len(history) >= MIN_HISTORY_FOR_ROLE_ESTIMATE:
+        sample = history
+        source = "precedenti generali dell'asta"
+    else:
+        sample = []
+        source = "baseline: non ci sono ancora abbastanza precedenti"
+
+    if sample:
+        ratios = sorted(h["ratio"] for h in sample)
+        multiplier = float(pd.Series(ratios).median())
+    else:
+        multiplier = DEFAULT_AUCTION_MULTIPLIER
+
+    estimated = max(1, int(round(list_price * multiplier)))
+    feasible = True
+    budget_note = ""
+    max_bid = None
+
+    if budget is not None:
+        reserve = max(0, int(slots_left_after_purchase))
+        max_bid = max(1, int(budget) - reserve)
+        if estimated > max_bid:
+            feasible = False
+            budget_note = (
+                f"Budget massimo sostenibile: {max_bid} cr; "
+                f"la stima di mercato è {estimated} cr."
+            )
+
+    return {
+        "multiplier": round(multiplier, 2),
+        "estimated_price": estimated,
+        "source": source,
+        "sample_size": len(sample),
+        "feasible": feasible,
+        "budget_note": budget_note,
+        "max_bid": max_bid,
+    }
+
+
+RECOMMENDATION_TIERS = {
+    "TOP": {"min_rating": 9.0, "max_rating": 10.0},
+    "Prima Fascia": {"min_rating": 8.0, "max_rating": 8.9},
+    "Seconda Fascia": {"min_rating": 7.0, "max_rating": 7.9},
+    "Terza Fascia": {"min_rating": 6.5, "max_rating": 6.9},
+}
+RECOMMENDATION_TIER_OPTIONS = list(RECOMMENDATION_TIERS.keys())
+
+def get_recommendation_tier(rating: float) -> str | None:
+    r = float(rating)
+    if r >= 9.0: return "TOP"
+    if r >= 8.0: return "Prima Fascia"
+    if r >= 7.0: return "Seconda Fascia"
+    if r >= 6.5: return "Terza Fascia"
+    return None
+
+def get_roster_tier(rating: float) -> str:
+    tier = get_recommendation_tier(rating)
+    return tier if tier is not None else "Scommessa"
+
+
+def get_price_value_score(rating: float, estimated_price: int, list_price: int) -> float:
+    """Punteggio qualità/prezzo: privilegia rating alto a costo d'asta contenuto."""
+    price=max(1.0,float(estimated_price)); lp=max(1.0,float(list_price)); r=float(rating)
+    rating_per_100=(r/price)*100.0
+    list_efficiency=lp/price
+    quality_bonus=max(0.0,r-7.0)
+    return round(rating_per_100*0.68 + list_efficiency*4.0 + quality_bonus*0.90,3)
+
+def calculate_value_per_credit(rating: float, estimated_price: int) -> float:
+    """Rating ottenibile ogni 10 crediti stimati."""
+    return round((float(rating)/max(1,estimated_price))*10.0,3)
+
+
+def build_next_player_recommendations(
+    state: "AuctionState",
+    rosters: list[dict[str, Any]],
+    preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]],
+    role: str | None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Restituisce i migliori obiettivi acquistabili nel ruolo corrente."""
+    if not role:
+        return []
+
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return []
+
+    # Il consiglio è costruito sul budget RCD e sugli slot ancora disponibili.
+    # Cerchiamo il budget nello stato tramite le rose/teams in main e lo passiamo
+    # indirettamente in una variabile di sessione, se presente.
+    budget = st.session_state.get("my_team_budget")
+    role_count = state.team_role_totals.get(team_name, {}).get(role, 0)
+    total_count = state.team_total_bought.get(team_name, 0)
+    # Dopo questo acquisto bisogna comunque conservare almeno 1 credito
+    # per ogni slot della rosa che resterà da completare, indipendentemente dal ruolo.
+    slots_after = max(0, TOTAL_SLOTS_PER_TEAM - total_count - 1)
+
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+    candidates = [
+        player for player in load_players(role=role)
+        if player.get("id") not in state.bought_player_ids
+    ]
+
+    selected_tier = st.session_state.get("recommendation_tier", "TOP")
+    rows = []
+    for player in candidates:
+        details = calculate_player_rating_detailed(
+            player, preferred_players, custom_modifiers, goalkeeper_ranking
+        )
+        rating = float(details["final_rating"])
+        tier = get_recommendation_tier(rating)
+        if tier is None or tier != selected_tier:
+            continue
+        estimate = estimate_auction_price(
+            player, rosters, budget=budget,
+            slots_left_after_purchase=slots_after,
+        )
+        list_price = int(player.get("list_price") or 1)
+        score = get_price_value_score(
+            rating, estimate["estimated_price"], list_price
+        )
+        rows.append({
+            "player": player,
+            "details": details,
+            "estimate": estimate,
+            "score": score,
+            "tier": tier,
+            "rating_per_10_cr": calculate_value_per_credit(
+                rating, estimate["estimated_price"]
+            ),
+        })
+
+    feasible_rows = [row for row in rows if row["estimate"]["feasible"]]
+    if feasible_rows:
+        rows = feasible_rows
+
+    # Il rating determina la fascia; il prezzo determina il miglior affare
+    # SOLO all'interno della fascia selezionata.
+    rows.sort(
+        key=lambda row: (
+            row["score"],
+            row["details"]["final_rating"],
+            -row["estimate"]["estimated_price"],
+        ),
+        reverse=True,
+    )
+    return rows[:limit]
+
+
+
+def describe_goalkeeper_strategy(players: list[dict[str, Any]]) -> str:
+    """Valuta la strategia P senza chiedere di correggere un reparto già chiuso."""
+    keepers=[p for p in players if p.get("role")=="P"]
+    if not keepers: return ""
+    clubs=[p.get("team_nfl") for p in keepers if p.get("team_nfl")]
+    unique_clubs=list(dict.fromkeys(clubs))
+    club_goal_data=[(c,GOALS_CONCEDED.get(c)) for c in unique_clubs if GOALS_CONCEDED.get(c) is not None]
+    ranking=build_current_goalkeeper_ranking_from_players(keepers)
+    details=[calculate_player_rating_detailed(p,st.session_state.preferred_players,load_custom_modifiers(),ranking) for p in keepers]
+    avg_rating=sum(d["final_rating"] for d in details)/len(details)
+    if len(unique_clubs)==1:
+        diversification=f"Hai scelto {len(keepers)}/{len(keepers)} portieri della stessa squadra ({unique_clubs[0]}): strategia molto concentrata, ma non è un difetto in sé se la difesa è affidabile."
+    elif len(unique_clubs)==len(keepers):
+        diversification=f"Hai scelto {len(keepers)} portieri di {len(unique_clubs)} squadre diverse: ottima diversificazione e minore dipendenza da una singola difesa."
+    else:
+        diversification=f"Hai {len(keepers)} portieri distribuiti su {len(unique_clubs)} squadre: diversificazione parziale."
+    if club_goal_data:
+        avg_ga=sum(v for _,v in club_goal_data)/len(club_goal_data)
+        vals=list(GOALS_CONCEDED.values()); median=float(pd.Series(vals).median()) if vals else avg_ga
+        if avg_ga <= median-4: defense="Le squadre scelte prendono pochi gol: la scelta è particolarmente solida."
+        elif avg_ga >= median+4: defense="Le squadre scelte prendono molti gol: hai accettato un rischio che va compensato soprattutto nei difensori."
+        else: defense="Le squadre scelte sono nella fascia media per gol subiti."
+    else: defense="Non ho abbastanza dati sui gol subiti per giudicare le difese."
+    quality=(f"Rating medio portieri {avg_rating:.1f}: reparto di alto livello." if avg_rating>=8 else f"Rating medio portieri {avg_rating:.1f}: reparto competitivo." if avg_rating>=7 else f"Rating medio portieri {avg_rating:.1f}: reparto sotto il livello ideale.")
+    if len(keepers)>=ROLE_LIMITS["P"]:
+        return f"{diversification} {defense} {quality} Portieri completati: non c'è nulla da correggere qui. Ora sposterei attenzione e budget sui difensori."
+    return f"{diversification} {defense} {quality} Finché il reparto non è completo, privilegia il valore per credito e non il solo rating."
+
+
+def build_current_goalkeeper_ranking_from_players(
+    players: list[dict[str, Any]],
+) -> dict[str, int]:
+    clubs = {p.get("team_nfl") for p in players if p.get("team_nfl")}
+    return get_goalkeeper_ranking_for_teams(clubs)
+
+
+def build_draft_strategy_text(
+    state: "AuctionState",
+    rosters: list[dict[str, Any]],
+    teams_df: pd.DataFrame,
+    ratings: dict[str, float],
+) -> tuple[str, str, str]:
+    """Valutazione progressiva; a draft chiuso solo resoconto finale."""
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    if team_name is None or not players:
+        return "", "", ""
+
+    counts = state.team_role_totals.get(team_name, {})
+    current_role = get_my_team_draft_role(state)
+    # Consideriamo conclusa l'asta della squadra appena la rosa ha 25 elementi.
+    # Questo evita consigli impossibili nel caso in cui i conteggi ruolo del DB
+    # non coincidano perfettamente con 3/8/8/6.
+    draft_complete = (
+        len(players) >= TOTAL_SLOTS_PER_TEAM
+        or state.team_total_bought.get(team_name, 0) >= TOTAL_SLOTS_PER_TEAM
+    )
+
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+
+    def role_avg(role: str) -> float:
+        role_players = [p for p in players if p.get("role") == role]
+        if not role_players:
+            return 0.0
+        values = [
+            calculate_player_rating_detailed(
+                p,
+                st.session_state.preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            )["final_rating"]
+            for p in role_players
+        ]
+        return sum(values) / len(values)
+
+    sections = []
+
+    if draft_complete:
+        keepers = [p for p in players if p.get("role") == "P"]
+        if keepers:
+            p_avg = role_avg("P")
+            clubs = [p.get("team_nfl") for p in keepers if p.get("team_nfl")]
+            unique_clubs = len(set(clubs))
+            structure = (
+                "tre portieri della stessa squadra"
+                if unique_clubs == 1
+                else "portieri distribuiti su due squadre"
+                if unique_clubs == 2
+                else "tre portieri di tre squadre diverse"
+            )
+            selected_ga = [
+                GOALS_CONCEDED.get(code)
+                for code in set(clubs)
+                if GOALS_CONCEDED.get(code) is not None
+            ]
+            if selected_ga:
+                league_values = list(GOALS_CONCEDED.values())
+                league_median = float(pd.Series(league_values).median()) if league_values else 0
+                avg_ga = sum(selected_ga) / len(selected_ga)
+                defensive_quality = (
+                    "difese che concedono pochi gol"
+                    if avg_ga <= league_median
+                    else "difese che concedono molti gol"
+                )
+            else:
+                defensive_quality = "difese senza dati sufficienti sui gol subiti"
+            p_level = "alto livello" if p_avg >= 8.0 else "solido" if p_avg >= 6.5 else "debole"
+            sections.append(
+                f"**Portieri:** {structure}, su {defensive_quality}. "
+                f"Rating medio {p_avg:.1f}: reparto {p_level}."
+            )
+
+        d_avg = role_avg("D")
+        c_avg = role_avg("C")
+        a_avg = role_avg("A")
+        d_level = "alto livello" if d_avg >= 8 else "buona" if d_avg >= 7 else "discreta" if d_avg >= 6 else "debole"
+        c_level = "alto livello" if c_avg >= 8 else "buono" if c_avg >= 7 else "discreto" if c_avg >= 6 else "debole"
+        a_level = "alto livello" if a_avg >= 8 else "buono" if a_avg >= 7 else "discreto" if a_avg >= 6 else "debole"
+
+        sections.append(f"**Difesa:** rating medio {d_avg:.1f}: difesa {d_level}.")
+        sections.append(f"**Centrocampo:** rating medio {c_avg:.1f}: centrocampo {c_level}.")
+        sections.append(f"**Attacco:** rating medio {a_avg:.1f}: attacco {a_level}.")
+
+        team_rating = ratings.get(team_name, 0.0)
+        overall = "rosa forte" if team_rating >= 6.5 else "rosa scarsa"
+        return (
+            "🏁 **Asta conclusa — valutazione finale**",
+            " ".join(sections) + f" **Giudizio complessivo:** {overall}.",
+            "",
+        )
+
+    if counts.get("P", 0) > 0:
+        sections.append("**Portieri:** " + describe_goalkeeper_strategy(players))
+
+    if counts.get("D", 0) > 0:
+        d_avg = role_avg("D")
+        if d_avg >= 8.0:
+            d_text = "Difesa molto forte: hai già una base di alto livello."
+        elif d_avg >= 7.0:
+            d_text = "Difesa competitiva, ma puoi ancora alzare il livello con 1-2 profili forti."
+        else:
+            d_text = "Difesa sotto il livello desiderabile: spingerei di più sui prossimi difensori."
+        sections.append(f"**Difesa:** rating medio {d_avg:.1f}. {d_text}")
+
+    if counts.get("C", 0) > 0:
+        midfielders = [p for p in players if p.get("role") == "C"]
+        c_avg = role_avg("C")
+        bonus_flags = sum(
+            bool(p.get("rigorista")) or bool((p.get("list_price") or 0) >= 25)
+            for p in midfielders
+        )
+        if bonus_flags < max(1, len(midfielders) // 3):
+            c_text = "Hai pochi profili ad alto potenziale bonus: qui conviene spingere."
+        elif c_avg >= 8.0:
+            c_text = "Centrocampo molto forte e con buon potenziale bonus."
+        else:
+            c_text = "Centrocampo discreto: cerca ancora qualità e giocatori con bonus."
+        sections.append(f"**Centrocampo:** rating medio {c_avg:.1f}. {c_text}")
+
+    if counts.get("A", 0) > 0:
+        a_avg = role_avg("A")
+        if a_avg >= 8.0:
+            a_text = "Attacco di livello alto: la fase offensiva è una forza della rosa."
+        elif a_avg >= 7.0:
+            a_text = "Attacco competitivo: manca ancora un profilo che faccia davvero la differenza."
+        else:
+            a_text = "Attacco debole: qui va concentrata una parte importante del budget."
+        sections.append(f"**Attacco:** rating medio {a_avg:.1f}. {a_text}")
+
+    next_name = ROLE_NAMES[current_role]
+    if current_role == "P":
+        advice = "Stai costruendo i portieri: privilegia il rapporto rating/costo e, a parità di valore, preferisci squadre che concedono pochi gol."
+    elif current_role == "D":
+        advice = "I portieri sono chiusi: ora cerca difensori con rating alto ma soprattutto con buon rapporto rating/costo."
+    elif current_role == "C":
+        advice = "Portieri e difensori sono acquisiti: cerca centrocampisti ad alto valore per credito, con titolarità, rigoristi e potenziale bonus."
+    else:
+        advice = "Sugli attaccanti puoi concentrare più budget sui profili forti, ma continua a confrontare rating, stima d'asta e crediti residui."
+
+    phase = f"Fase draft: **{next_name}** ({counts.get(current_role, 0)}/{ROLE_LIMITS[current_role]})."
+    return phase, " ".join(sections), advice
+
+
+# ============================================================
+# RATING
+# ============================================================
+
+def calculate_player_rating_detailed(
+    player: dict[str, Any],
+    preferred_players: set[Any] | None = None,
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    preferred_players = preferred_players or set()
+    if custom_modifiers is None:
+        custom_modifiers = load_custom_modifiers()
+    role = player.get("role", "D")
+    player_name = normalize_string(player.get("name", ""))
+
+    base = 5.0
+    real_stats = False
+    goals = assists = matches = 0
+
+    if not STATS.empty and player_name and "clean_name" in STATS.columns:
+        exact = STATS[STATS["clean_name"] == player_name]
+        match = exact
+        if match.empty:
+            escaped = re.escape(player_name)
+            match = STATS[STATS["clean_name"].str.contains(escaped, na=False, regex=True)]
+        if not match.empty:
+            row = match.iloc[0]
+            goals = int(row.get("goals", 0) or 0)
+            assists = int(row.get("assists", 0) or 0)
+            matches = int(row.get("matches", 0) or 0)
+            if matches > 3:
+                base = float(row.get("avg_vote", 6.0) or 6.0)
+                if role in {"A", "C"}:
+                    base += goals * 0.12 + assists * 0.08
+                else:
+                    base += goals * 0.15 + assists * 0.10
+                real_stats = True
+
+    if not real_stats:
+        fallback = {"A": 5.0, "P": 5.0, "C": 4.8, "D": 4.5}.get(role, 4.5)
+        base = fallback + (float(player.get("list_price") or 1) * 0.04)
+
+    titolarita_mod = {
+        "Titolare": 0.4,
+        "Ballottaggio": -0.3,
+        "Riserva": -1.5,
+    }.get(player.get("status_titolarita"), 0.0)
+
+    team_mods = MODS.get(player.get("team_nfl"), {"att": 0.0, "def": 0.0})
+
+    # Portieri: il modificatore difensivo standard viene sostituito
+    # dal criterio richiesto basato sui gol subiti delle tre squadre.
+    goalkeeper_mod, goalkeeper_rank = get_goalkeeper_modifier(
+        player,
+        goalkeeper_ranking,
+    )
+    team_mod = (
+        goalkeeper_mod
+        if role == "P"
+        else team_mods["att"]
+        if role in {"A", "C"}
+        else team_mods["def"]
+    )
+
+    rigorista_mod = 0.8 if player.get("rigorista") else 0.0
+    cartellini_mod = -0.3 if player.get("propensione_cartellini") == "A rischio malus" else 0.0
+    rookie_mod = -0.3 if player.get("primo_anno_serie_a") else 0.0
+    # Il preferito proveniente dalla sessione resta compatibile.
+    # Se il preferito è salvato nella nuova tabella, viene letto da lì.
+    db_modifier = custom_modifiers.get(player.get("id"), {})
+    custom_mod = float(db_modifier.get("modifier_value") or 0.0)
+    db_modifier_key = db_modifier.get("modifier_key")
+
+    preferred_mod = (
+        0.5
+        if (
+            player.get("id") in preferred_players
+            and db_modifier_key != "preferito"
+        )
+        else 0.0
+    )
+
+    # Rating grezzo prima della calibrazione per ruolo.
+    raw_rating = (
+        base
+        + titolarita_mod
+        + team_mod
+        + rigorista_mod
+        + cartellini_mod
+        + rookie_mod
+        + preferred_mod
+        + custom_mod
+    )
+
+    # Calibrazione richiesta per rendere confrontabili i ruoli senza
+    # penalizzare portieri, difensori e centrocampisti rispetto agli attaccanti.
+    role_multiplier = ROLE_RATING_MULTIPLIERS.get(role, 1.0)
+    calibrated_rating = raw_rating * role_multiplier
+
+    final = round(
+        max(1.0, min(10.0, calibrated_rating)),
+        1,
+    )
+
+    if (
+        (cartellini_mod < 0 or rookie_mod < 0 or player.get("status_titolarita") in {"Ballottaggio", "Riserva"})
+        and final >= 10.0
+    ):
+        final = 9.0
+
+    return {
+        "final_rating": final,
+        "raw_rating": round(raw_rating, 2),
+        "role_multiplier": round(role_multiplier, 3),
+        "calibrated_rating": round(calibrated_rating, 2),
+        "base": round(base, 2),
+        "team_mod": team_mod,
+        "goalkeeper_mod": goalkeeper_mod,
+        "goalkeeper_rank": goalkeeper_rank,
+        "tit": titolarita_mod,
+        "rig": rigorista_mod,
+        "cart": cartellini_mod,
+        "rook": rookie_mod,
+        "pref": preferred_mod,
+        "custom_mod": custom_mod,
+        "custom_label": db_modifier.get("modifier_label", "Nessuna modifica"),
+        "g": goals,
+        "a": assists,
+        "m": matches,
+    }
+
+
+def calculate_player_rating(
+    player: dict[str, Any],
+    preferred_players: set[Any] | None = None,
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> float:
+    return calculate_player_rating_detailed(
+        player,
+        preferred_players,
+        custom_modifiers,
+        goalkeeper_ranking,
+    )["final_rating"]
+
+
+
+def build_current_goalkeeper_ranking(
+    state: "AuctionState",
+) -> dict[str, int]:
+    """Classifica le squadre dei portieri attualmente presenti nelle rose."""
+    goalkeeper_teams: set[str] = set()
+
+    for players in state.team_players_map.values():
+        for player in players:
+            if player.get("role") == "P" and player.get("team_nfl"):
+                goalkeeper_teams.add(player["team_nfl"])
+
+    return get_goalkeeper_ranking_for_teams(goalkeeper_teams)
+
+
+# ============================================================
+# STATO ASTA
+# ============================================================
+
+def build_auction_state(
+    teams: list[dict[str, Any]],
+    rosters: list[dict[str, Any]],
+) -> AuctionState:
+    bought_player_ids: set[Any] = set()
+    team_role_totals = {
+        team["name"]: {role: 0 for role in ROLE_LIMITS}
+        for team in teams
+    }
+    team_total_bought = {team["name"]: 0 for team in teams}
+    team_players_map = {team["name"]: [] for team in teams}
+    team_purchases_map = {team["name"]: [] for team in teams}
+
+    for roster in rosters:
+        player = roster.get("players")
+        team = roster.get("teams")
+
+        if not player or not team:
+            continue
+
+        player_id = player.get("id")
+        team_name = team.get("name")
+        role = player.get("role")
+
+        if player_id is not None:
+            bought_player_ids.add(player_id)
+
+        if team_name not in team_players_map:
+            continue
+
+        team_players_map[team_name].append(player)
+        team_purchases_map[team_name].append(roster)
+
+        if role in ROLE_LIMITS:
+            team_role_totals[team_name][role] += 1
+            team_total_bought[team_name] += 1
+
+    return AuctionState(
+        bought_player_ids=bought_player_ids,
+        team_role_totals=team_role_totals,
+        team_total_bought=team_total_bought,
+        team_players_map=team_players_map,
+        team_purchases_map=team_purchases_map,
+    )
+
+
+def player_team_weight(rating: float) -> float:
+    """Peso del giocatore nella valutazione della rosa."""
+    if rating >= 9.0:
+        return TEAM_PLAYER_WEIGHTS["TOP"]
+    if rating >= 8.0:
+        return TEAM_PLAYER_WEIGHTS["PRIMA"]
+    if rating >= 7.0:
+        return TEAM_PLAYER_WEIGHTS["SECONDA"]
+    if rating >= 6.5:
+        return TEAM_PLAYER_WEIGHTS["TERZA"]
+    return TEAM_PLAYER_WEIGHTS["SOTTO_SOGLIA"]
+
+
+def calculate_single_team_rating(
+    players: list[dict[str, Any]],
+    preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> float:
+    """
+    Rating rosa non lineare.
+
+    - I TOP pesano molto più degli altri.
+    - I giocatori sotto 6.5 incidono negativamente.
+    - Le differenze attorno alla fascia media vengono amplificate.
+    """
+    if not players:
+        return 0.0
+
+    player_ratings = [
+        calculate_player_rating(
+            player,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        for player in players
+    ]
+
+    weights = [player_team_weight(rating) for rating in player_ratings]
+    weighted_avg = sum(
+        rating * weight
+        for rating, weight in zip(player_ratings, weights)
+    ) / max(0.001, sum(weights))
+
+    top_count = sum(rating >= 9.0 for rating in player_ratings)
+    elite_count = sum(8.5 <= rating < 9.0 for rating in player_ratings)
+    weak_count = sum(rating < 6.5 for rating in player_ratings)
+
+    # Amplificazione attorno al centro: due rose simili non finiscono
+    # automaticamente tutte nello stesso intervallo 5.5-5.9.
+    amplified = (
+        TEAM_RATING_CENTER
+        + (weighted_avg - TEAM_RATING_CENTER) * TEAM_RATING_SPREAD
+    )
+
+    # La presenza di veri TOP cambia il potenziale di una rosa.
+    star_bonus = min(
+        1.10,
+        top_count * TOP_PLAYER_BONUS
+        + elite_count * ELITE_PLAYER_BONUS,
+    )
+
+    # Profili deboli continuano a pesare, ma meno dei TOP in positivo.
+    weak_penalty = min(1.20, weak_count * WEAK_PLAYER_PENALTY)
+
+    final = amplified + star_bonus - weak_penalty
+
+    return round(
+        max(TEAM_RATING_MIN, min(TEAM_RATING_MAX, final)),
+        1,
+    )
+
+
+def calculate_team_ratings(
+    state: AuctionState,
+    preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> dict[str, float]:
+    return {
+        team_name: calculate_single_team_rating(
+            players,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        for team_name, players in state.team_players_map.items()
+    }
+
+
+def calculate_completed_roles(
+    state: AuctionState,
+) -> list[str]:
+    completed = []
+
+    for role, limit in ROLE_LIMITS.items():
+        if all(
+            counts[role] >= limit
+            for counts in state.team_role_totals.values()
+        ):
+            completed.append(role)
+
+    return completed
+
+
+def is_auction_finished(state: AuctionState) -> bool:
+    return all(
+        bought >= TOTAL_SLOTS_PER_TEAM
+        for bought in state.team_total_bought.values()
+    )
+
+
+# ============================================================
+# ANALISI SQUADRA
+# ============================================================
+
+def get_credit_rank(
+    teams_df: pd.DataFrame,
+    team_name: str,
+) -> tuple[int, int]:
+    sorted_df = (
+        teams_df.sort_values("remaining_budget", ascending=False)
+        .reset_index(drop=True)
+    )
+    row = sorted_df[sorted_df["name"] == team_name]
+
+    if row.empty:
+        return 0, 0
+
+    return int(row.index[0] + 1), int(row.iloc[0]["remaining_budget"])
+
+
+def get_team_risk_counts(players: list[dict[str, Any]]) -> dict[str, int]:
+    movement_players = [
+        player for player in players
+        if player.get("role") != "P"
+    ]
+
+    club_counts: dict[str, int] = {}
+    for player in movement_players:
+        club = player.get("team_nfl")
+        if club:
+            club_counts[club] = club_counts.get(club, 0) + 1
+
+    return {
+        "max_block": max(club_counts.values(), default=0),
+        "ballottaggio": sum(
+            player.get("status_titolarita") == "Ballottaggio"
+            for player in players
+        ),
+        "cartellini": sum(
+            player.get("propensione_cartellini") == "A rischio malus"
+            for player in players
+        ),
+        "rookie": sum(
+            bool(player.get("primo_anno_serie_a"))
+            for player in players
+        ),
+    }
+
+
+def risk_label(
+    count: int,
+    good_threshold: int,
+    warning_threshold: int,
+    good: str,
+    warning: str,
+    bad: str,
+) -> str:
+    if count < good_threshold:
+        return good
+    if count < warning_threshold:
+        return warning
+    return bad
+
+
+def render_team_analysis(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> None:
+    st.sidebar.divider()
+    st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
+
+    team_names = teams_df["name"].tolist()
+    if not team_names:
+        st.sidebar.info("Nessuna squadra configurata.")
+        return
+
+    selected_team = st.sidebar.selectbox(
+        "Analizza squadra",
+        team_names,
+        index=default_team_index(team_names),
+        key="sidebar_team_analysis",
+    )
+
+    players = state.team_players_map.get(selected_team, [])
+    bought_count = len(players)
+    credit_rank, budget = get_credit_rank(teams_df, selected_team)
+    slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought_count)
+
+    if players:
+        avg_score = ratings[selected_team]
+        rating_position = sorted(
+            ratings,
+            key=ratings.get,
+            reverse=True,
+        ).index(selected_team) + 1
+
+        st.sidebar.metric(
+            "Rating Rosa",
+            f"{avg_score:.1f} / 10.0",
+            delta=f"Posizione: {rating_position}/{len(ratings)}",
+            delta_color="off",
+        )
+
+        if state.team_total_bought.get(selected_team, 0) >= TOTAL_SLOTS_PER_TEAM:
+            if avg_score >= 6.5:
+                st.sidebar.success("Rosa forte.")
+            else:
+                st.sidebar.warning("Rosa scarsa.")
+        else:
+            if avg_score >= 8:
+                st.sidebar.success("Rosa da Scudetto!")
+            elif avg_score >= 6.5:
+                st.sidebar.info("Rosa competitiva.")
+            else:
+                st.sidebar.warning("Rosa da rinforzare.")
+    else:
+        st.sidebar.metric("Rating Rosa", "N/D")
+        st.sidebar.info("Assegna giocatori per calcolare il rating.")
+
+    st.sidebar.markdown(
+        f"💰 **Posizione Crediti:** {credit_rank}° su {len(team_names)} "
+        f"({budget} cr residui)"
+    )
+
+    if slots_left:
+        avg_spendable = budget / slots_left
+        st.sidebar.caption(
+            f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** "
+            f"({slots_left} slot liberi)"
+        )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**📊 Cruscotto Rischi Rosa:**")
+
+    risks = get_team_risk_counts(players)
+
+    block_status = (
+        "👍 Ottimale" if risks["max_block"] < 4
+        else "👎 Rischio Blocco"
+    )
+    st.sidebar.write(
+        f"🚨 **Blocco Squadra:** {risks['max_block']} max | {block_status}"
+    )
+
+    ballot_status = risk_label(
+        risks["ballottaggio"], 3, 6,
+        "👍 Ottimale", "🟡 Moderato", "👎 Troppi",
+    )
+    st.sidebar.write(
+        f"⚠️ **Ballottaggi:** {risks['ballottaggio']} giocatori | "
+        f"{ballot_status}"
+    )
+
+    card_status = risk_label(
+        risks["cartellini"], 2, 4,
+        "👍 Pulita", "🟡 Attenzione", "👎 Troppi Malus",
+    )
+    st.sidebar.write(
+        f"🟨 **A rischio malus:** {risks['cartellini']} | {card_status}"
+    )
+
+    rookie_status = risk_label(
+        risks["rookie"], 2, 4,
+        "👍 Esperti", "🟡 Equilibrato", "👎 Troppi Rookie",
+    )
+    st.sidebar.write(
+        f"👶 **Primo anno in A:** {risks['rookie']} | {rookie_status}"
+    )
+
+
+# ============================================================
+# TOP 5
+# ============================================================
+
+def render_top5(
+    role: str,
+    bought_player_ids: set[Any],
+    preferred_players: set[Any],
+    state: AuctionState | None = None,
+) -> None:
+    st.sidebar.subheader("🔥 Top 5 Liberi (Ranking)")
+
+    players = load_players(role=role)
+
+    available = [
+        player for player in players
+        if player["id"] not in bought_player_ids
+    ]
+
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state) if state else ALL_GOALKEEPER_RANKING
+    custom_modifiers = load_custom_modifiers()
+    available.sort(
+        key=lambda player: calculate_player_rating(
+            player,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        ),
+        reverse=True,
+    )
+
+    with st.sidebar.container(border=True):
+        if not available:
+            st.info("Nessun giocatore disponibile.")
+            return
+
+        for index, player in enumerate(available[:5], start=1):
+            rating = calculate_player_rating(
+                player,
+                preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            )
+            star = " ⭐" if player["id"] in preferred_players else ""
+
+            st.markdown(
+                f"**{index}. {player['name']}**{star} "
+                f"`[{player['role']}]` ({player['team_nfl']}) — "
+                f"⭐️ **{rating}** | 💎 **{player['list_price']} cr**"
+            )
+
+
+# ============================================================
+# AUTOCOMPILAZIONE
+# ============================================================
+
+def simulate_autofill(
+    teams: list[dict[str, Any]],
+    state: AuctionState,
+    role_filter: str,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    players = load_players()
+    free_players = [
+        player for player in players
+        if player["id"] not in state.bought_player_ids
+    ]
+
+    if role_filter != "Tutti":
+        free_players = [
+            player for player in free_players
+            if player["role"] == role_filter
+        ]
+
+    # Mockup più realistico:
+    # i giocatori TOP non possono rimanere liberi mentre gli slot vengono
+    # riempiti da profili peggiori. Ordiniamo quindi la simulazione per fascia:
+    # TOP -> Prima -> Seconda -> Terza -> Scommesse.
+    #
+    # All'interno della stessa fascia manteniamo una componente casuale,
+    # così simulazioni successive non producono sempre la stessa asta.
+    custom_modifiers = load_custom_modifiers()
+
+    def mockup_player_rating(player: dict[str, Any]) -> float:
+        # Per i portieri usiamo il ranking generale delle difese:
+        # durante il mockup non conosciamo ancora le tre squadre finali.
+        return calculate_player_rating(
+            player,
+            st.session_state.preferred_players,
+            custom_modifiers,
+            ALL_GOALKEEPER_RANKING,
+        )
+
+    tier_priority = {
+        "TOP": 0,
+        "Prima Fascia": 1,
+        "Seconda Fascia": 2,
+        "Terza Fascia": 3,
+        "Scommessa": 4,
+    }
+
+    # Generiamo prima un valore casuale così l'ordinamento è random
+    # solo tra giocatori appartenenti alla stessa fascia.
+    randomized_players = [
+        (
+            tier_priority[get_roster_tier(mockup_player_rating(player))],
+            random.random(),
+            -mockup_player_rating(player),
+            player,
+        )
+        for player in free_players
+    ]
+    randomized_players.sort(
+        key=lambda item: (item[0], item[1], item[2])
+    )
+    free_players = [item[3] for item in randomized_players]
+
+    sim_bought = state.team_total_bought.copy()
+    sim_roles = {
+        team: counts.copy()
+        for team, counts in state.team_role_totals.items()
+    }
+    sim_budgets = {
+        team["name"]: int(team["remaining_budget"])
+        for team in teams
+    }
+    team_id_map = {
+        team["name"]: team["id"]
+        for team in teams
+    }
+
+    inserts = []
+
+    for player in free_players:
+        role = player["role"]
+        if role not in ROLE_LIMITS:
+            continue
+
+        valid_teams = [
+            team_name
+            for team_name in sim_bought
+            if (
+                sim_bought[team_name] < TOTAL_SLOTS_PER_TEAM
+                and sim_roles[team_name][role] < ROLE_LIMITS[role]
+            )
+        ]
+
+        if not valid_teams:
+            continue
+
+        player_rating = mockup_player_rating(player)
+        player_tier = get_roster_tier(player_rating)
+
+        def team_score(team_name: str) -> float:
+            slots_left = TOTAL_SLOTS_PER_TEAM - sim_bought[team_name]
+            if slots_left <= 0:
+                return -1
+
+            budget_per_slot = sim_budgets[team_name] / slots_left
+
+            # Per i TOP aggiungiamo un piccolo fattore casuale:
+            # continuano a favorire chi ha più capacità di spesa, ma non
+            # finiscono sistematicamente tutti alla stessa squadra.
+            if player_tier == "TOP":
+                return budget_per_slot * random.uniform(0.88, 1.12)
+
+            return budget_per_slot * random.uniform(0.94, 1.06)
+
+        chosen_team = max(valid_teams, key=team_score)
+        slots_left = TOTAL_SLOTS_PER_TEAM - sim_bought[chosen_team]
+        current_budget = sim_budgets[chosen_team]
+
+        base_price = max(1, int(player.get("list_price") or 1))
+
+        if slots_left == 1:
+            purchase_price = max(1, current_budget)
+        else:
+            avg_allowed = current_budget / slots_left
+            purchase_price = max(
+                1,
+                int((base_price + avg_allowed) / 2),
+            )
+
+            max_allowed = current_budget - (slots_left - 1)
+            purchase_price = min(
+                purchase_price,
+                max(1, int(max_allowed)),
+            )
+
+        inserts.append(
+            {
+                "team_id": team_id_map[chosen_team],
+                "player_id": player["id"],
+                "purchase_price": purchase_price,
+            }
+        )
+
+        sim_bought[chosen_team] += 1
+        sim_roles[chosen_team][role] += 1
+        sim_budgets[chosen_team] -= purchase_price
+
+    return inserts, sim_budgets
+
+
+def perform_autofill(
+    teams: list[dict[str, Any]],
+    state: AuctionState,
+    role_filter: str,
+) -> bool:
+    inserts, budgets = simulate_autofill(
+        teams,
+        state,
+        role_filter,
+    )
+
+    if not inserts:
+        return False
+
+    supabase.table("rosters").insert(inserts).execute()
+
+    team_id_map = {
+        team["name"]: team["id"]
+        for team in teams
+    }
+
+    for team_name, budget in budgets.items():
+        supabase.table("teams").update(
+            {"remaining_budget": max(0, int(budget))}
+        ).eq(
+            "id",
+            team_id_map[team_name],
+        ).execute()
+
+    return True
+
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+def reset_auction(teams_df: pd.DataFrame) -> None:
+    supabase.table("rosters").delete().gt("purchase_price", -1).execute()
+
+    for _, row in teams_df.iterrows():
+        supabase.table("teams").update(
+            {"remaining_budget": int(row["initial_budget"])}
+        ).eq("id", row["id"]).execute()
+
+
+def render_admin_tools(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+) -> None:
+    st.sidebar.divider()
+    st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
+
+    role_filter = st.sidebar.selectbox(
+        "Completa ruolo (Mockup)",
+        ["Tutti"] + list(ROLE_LIMITS),
+    )
+
+    st.sidebar.caption(
+        "Nel mockup i TOP vengono assegnati prima delle fasce inferiori, "
+        "così non restano irrealisticamente svincolati."
+    )
+
+    if st.sidebar.button("🎲 Autocompila rose (Intermedio)"):
+        if perform_autofill(
+            teams_df.to_dict("records"),
+            state,
+            role_filter,
+        ):
+            st.sidebar.success("Rose autocompilate con successo!")
+            invalidate_data_cache()
+            st.rerun()
+        else:
+            st.sidebar.warning(
+                "Nessun inserimento possibile o limiti già raggiunti."
+            )
+
+    if st.sidebar.button(
+        "🗑️ Svuota tutte le rose (Reset)",
+        type="primary",
+    ):
+        st.session_state["confirm_reset"] = True
+
+    if st.session_state.get("confirm_reset"):
+        st.sidebar.warning(
+            "Questa operazione cancellerà tutti gli acquisti e "
+            "ripristinerà i budget iniziali."
+        )
+
+        confirm_col, cancel_col = st.sidebar.columns(2)
+
+        with confirm_col:
+            if st.button("Conferma reset", key="confirm_reset_button"):
+                reset_auction(teams_df)
+                st.session_state["confirm_reset"] = False
+                invalidate_data_cache()
+                st.sidebar.success("Asta resettata.")
                 st.rerun()
 
-            except Exception as e:
-                st.error(f"Errore: {e}")
-                print(traceback.format_exc())
-    st.stop()
+        with cancel_col:
+            if st.button("Annulla", key="cancel_reset_button"):
+                st.session_state["confirm_reset"] = False
+                st.rerun()
 
 
-# Force the logged-in welcome label to stay white on the dark sidebar.
-st.markdown(
-    """
-    <style>
-    section[data-testid="stSidebar"] .sanosync-welcome,
-    section[data-testid="stSidebar"] .sanosync-welcome *,
-    [data-testid="stSidebar"] .sanosync-welcome,
-    [data-testid="stSidebar"] .sanosync-welcome * {
-        color: #FFFFFF !important;
-        -webkit-text-fill-color: #FFFFFF !important;
-        opacity: 1 !important;
+# ============================================================
+# ACQUISTO MANUALE
+# ============================================================
+
+def execute_purchase(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    selected_player: dict[str, Any],
+    purchase_price: int,
+    target_team: str,
+) -> tuple[bool, str]:
+    team_row = teams_df[teams_df["name"] == target_team]
+
+    if team_row.empty:
+        return False, "Seleziona una squadra valida."
+
+    team = team_row.iloc[0]
+    role = selected_player["role"]
+    role_count = state.team_role_totals[target_team][role]
+    role_limit = ROLE_LIMITS.get(role, TOTAL_SLOTS_PER_TEAM)
+
+    if role_count >= role_limit:
+        return (
+            False,
+            f"❌ Limite raggiunto! {target_team} ha completato "
+            f"il ruolo {role} ({role_count}/{role_limit}).",
+        )
+
+    if state.team_total_bought[target_team] >= TOTAL_SLOTS_PER_TEAM:
+        return (
+            False,
+            f"❌ La squadra {target_team} ha completato la rosa "
+            f"({TOTAL_SLOTS_PER_TEAM}/{TOTAL_SLOTS_PER_TEAM}).",
+        )
+
+    current_budget = int(team["remaining_budget"])
+
+    if purchase_price > current_budget:
+        return (
+            False,
+            f"❌ Budget insufficiente per {target_team}: "
+            f"{current_budget} crediti residui.",
+        )
+
+    supabase.table("rosters").insert(
+        {
+            "team_id": team["id"],
+            "player_id": selected_player["id"],
+            "purchase_price": purchase_price,
+        }
+    ).execute()
+
+    supabase.table("teams").update(
+        {"remaining_budget": current_budget - purchase_price}
+    ).eq("id", team["id"]).execute()
+
+    return True, ""
+
+
+def render_manual_purchase(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    current_role: str,
+    rosters: list[dict[str, Any]],
+) -> str:
+    """Renderizza il pannello di acquisto manuale in una griglia allineata."""
+    if is_auction_finished(state):
+        return current_role
+
+    players_for_filter = load_players()
+
+    available_nfl_teams = sorted(
+        {
+            player["team_nfl"]
+            for player in players_for_filter
+            if player.get("team_nfl")
+        }
+    )
+
+    # Tutti i controlli restano sulla stessa riga: evita lo sfalsamento
+    # causato da colonne vuote usate come spaziatori.
+    col1, col2, col3, col4, col5 = st.columns(
+        [1.25, 1.45, 2.8, 1.0, 1.55],
+        gap="small",
+    )
+
+    with col1:
+        my_team_name = get_my_team_name_from_state(state)
+        my_counts = state.team_role_totals.get(my_team_name or "", {})
+        role_options = {
+            label: role
+            for label, role in ROLE_LABELS.items()
+            if role == "ALL"
+            or my_counts.get(role, 0) < ROLE_LIMITS[role]
+        }
+        role_labels = list(role_options)
+        current_label = next(
+            (label for label, role in role_options.items() if role == current_role),
+            role_labels[0],
+        )
+        selected_role_label = st.selectbox(
+            "1. Seleziona Ruolo",
+            role_labels,
+            index=role_labels.index(current_label),
+            key="main_role_select",
+        )
+        current_role = role_options[selected_role_label]
+
+    with col2:
+        nfl_filter_label = st.selectbox(
+            "2. Filtra per Squadra Serie A",
+            ["Tutte le squadre"] + available_nfl_teams,
+            key="manual_nfl_filter",
+        )
+        team_filter = (
+            "ALL"
+            if nfl_filter_label == "Tutte le squadre"
+            else nfl_filter_label
+        )
+
+    players = load_players(role=current_role, team_nfl=team_filter)
+    available_players = [
+        player
+        for player in players
+        if player["id"] not in state.bought_player_ids
+    ]
+
+    if not available_players:
+        st.warning("Nessun giocatore disponibile trovato con questi filtri.")
+        return current_role
+
+    player_options = {
+        (
+            f"{player['name']} [{player['role']}] "
+            f"({player['team_nfl']} - {int(player.get('list_price') or 0)} cr. - "
+            f"{calculate_player_rating_detailed(player, st.session_state.preferred_players, load_custom_modifiers(), build_current_goalkeeper_ranking(state))['final_rating']:.1f})"
+        ): player
+        for player in available_players
     }
 
-    section[data-testid="stSidebar"] .sanosync-welcome {
-        font-size: 1.15rem !important;
-        font-weight: 800 !important;
-        line-height: 1.25 !important;
-        margin: 0 !important;
-        padding: 0 !important;
+    with col3:
+        selected_label = st.selectbox(
+            "3. Seleziona Giocatore",
+            list(player_options),
+            key="manual_player_select",
+        )
+        selected_player = player_options[selected_label]
+
+    with col4:
+        default_price = max(1, int(selected_player.get("list_price") or 1))
+        purchase_price = st.number_input(
+            "4. Costo",
+            min_value=1,
+            max_value=500,
+            value=default_price,
+            step=1,
+            key="manual_purchase_price",
+        )
+
+    with col5:
+        role = selected_player["role"]
+        active_teams = [
+            team_name
+            for team_name in teams_df["name"].tolist()
+            if (
+                state.team_total_bought[team_name] < TOTAL_SLOTS_PER_TEAM
+                and state.team_role_totals[team_name][role] < ROLE_LIMITS[role]
+            )
+        ]
+        team_names = active_teams or teams_df["name"].tolist()
+
+        target_team = st.selectbox(
+            "5. Squadra Acquirente",
+            team_names,
+            index=default_team_index(team_names, MY_TEAM_NAME),
+            key="manual_target_team",
+        )
+
+    # Valutazione immediata del giocatore selezionato.
+    current_custom = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+    player_details = calculate_player_rating_detailed(
+        selected_player,
+        st.session_state.preferred_players,
+        current_custom,
+        goalkeeper_ranking,
+    )
+    estimate = estimate_auction_price(
+        selected_player,
+        rosters,
+        budget=st.session_state.get("my_team_budget"),
+        slots_left_after_purchase=max(
+            0,
+            TOTAL_SLOTS_PER_TEAM
+            - state.team_total_bought.get(get_my_team_name_from_state(state) or "", 0)
+            - 1,
+        ),
+    )
+
+    selected_value_score = get_price_value_score(
+        player_details["final_rating"], estimate["estimated_price"], int(selected_player.get("list_price") or 1)
+    )
+    selected_rating_per_10 = calculate_value_per_credit(
+        player_details["final_rating"], estimate["estimated_price"]
+    )
+    st.markdown(
+        f"💰 **Stima asta:** circa **{estimate['estimated_price']} cr** "
+        f"(**x{estimate['multiplier']:.2f}** del listino) · "
+        f"{estimate['source']} · campione {estimate['sample_size']} acquisti."
+    )
+    st.caption(
+        f"📊 **Valore stimato:** {selected_rating_per_10:.2f} rating ogni 10 cr · "
+        f"Value Score **{selected_value_score:.2f}** · "
+        "la priorità premia rating alto + costo stimato contenuto."
+    )
+
+    if estimate["budget_note"]:
+        st.caption(f"⚠️ {estimate['budget_note']}")
+    elif estimate.get("max_bid") is not None:
+        st.caption(f"Budget massimo sostenibile mantenendo 1 credito per ogni slot futuro: **{estimate['max_bid']} cr**.")
+
+    if not st.button(
+        "Conferma Acquisto",
+        type="primary",
+        key="confirm_manual_purchase",
+    ):
+        return current_role
+
+    success, error = execute_purchase(
+        teams_df,
+        state,
+        selected_player,
+        int(purchase_price),
+        target_team,
+    )
+
+    if not success:
+        st.error(error)
+        return current_role
+
+    rating = player_details["final_rating"]
+
+    # IMPORTANTE: st.rerun() interrompe immediatamente l'esecuzione del run.
+    # Per questo il banner deve essere salvato in session_state PRIMA del rerun.
+    if is_my_team(target_team):
+        queue_purchase_banner(
+            MY_TEAM_NAME,
+            selected_player["name"],
+            rating,
+            int(purchase_price),
+        )
+    else:
+        st.session_state.pop("pending_purchase_banner", None)
+
+    invalidate_data_cache()
+    st.rerun()
+    return current_role
+
+
+# ============================================================ SQUADRE
+# ============================================================
+
+def build_team_alerts(
+    players: list[dict[str, Any]],
+    bought: int,
+) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+
+    club_players: dict[str, list[str]] = {}
+    for player in players:
+        if player.get("role") == "P":
+            continue
+
+        club = player.get("team_nfl")
+        if club:
+            club_players.setdefault(club, []).append(
+                f"{player.get('name')} [{player.get('role')}]"
+            )
+
+    for club, names in club_players.items():
+        if len(names) >= 4:
+            alerts.append(
+                {
+                    "text": (
+                        f"🚨 **Rischio Blocco:** {len(names)} "
+                        f"giocatori di movimento su {club}"
+                    ),
+                    "help": (
+                        f"Giocatori di movimento del club {club}:\n- "
+                        + "\n- ".join(names)
+                    ),
+                }
+            )
+
+    ballotaggio = [
+        f"{player.get('name')} [{player.get('role')}]"
+        for player in players
+        if player.get("status_titolarita") == "Ballottaggio"
+    ]
+    if bought >= 5 and len(ballotaggio) >= bought * 0.4:
+        alerts.append(
+            {
+                "text": f"⚠️ **Troppi Ballottaggi:** {len(ballotaggio)} giocatori",
+                "help": "Giocatori in ballottaggio:\n- "
+                + "\n- ".join(ballotaggio),
+            }
+        )
+
+    cartellini = [
+        f"{player.get('name')} [{player.get('role')}]"
+        for player in players
+        if player.get("propensione_cartellini") == "A rischio malus"
+    ]
+    if len(cartellini) >= 3:
+        alerts.append(
+            {
+                "text": f"🟨 **Rischio Malus:** {len(cartellini)} a rischio cartellino",
+                "help": "Giocatori a rischio malus:\n- "
+                + "\n- ".join(cartellini),
+            }
+        )
+
+    rookies = [
+        f"{player.get('name')} [{player.get('role')}]"
+        for player in players
+        if player.get("primo_anno_serie_a")
+    ]
+    if len(rookies) >= 3:
+        alerts.append(
+            {
+                "text": f"👶 **Rischio Rookie:** {len(rookies)} al primo anno in A",
+                "help": "Giocatori al primo anno in Serie A:\n- "
+                + "\n- ".join(rookies),
+            }
+        )
+
+    return alerts
+
+
+def render_team_overview(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> None:
+    """Panoramica lega compatta: snapshot, classifica e dettagli solo su richiesta."""
+    st.markdown('<div class="rcd-section">📊 Panoramica Squadre & Alert Strategici</div>', unsafe_allow_html=True)
+
+    if teams_df.empty:
+        st.info("Nessuna squadra configurata.")
+        return
+
+    grades_df = calculate_auction_grades(
+        teams_df.to_dict("records"),
+        state,
+        ratings,
+    )
+    auction_grade_map = {
+        row["Squadra"]: float(row["Voto Asta"])
+        for _, row in grades_df.iterrows()
     }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-# ==============================================================================
-# LOGGED-IN ACCOUNT — COMPACT
-# ==============================================================================
-with st.sidebar:
-    first_name = (logged_name or "Utente").strip().split()[0]
+    rows = []
+    alerts_by_team: dict[str, list[dict[str, str]]] = {}
 
-    account_left, account_right = st.columns([1, 3], vertical_alignment="center")
+    for _, team in teams_df.iterrows():
+        name = team["name"]
+        players = state.team_players_map.get(name, [])
+        purchases = state.team_purchases_map.get(name, [])
+        bought = state.team_total_bought.get(name, 0)
+        budget = int(team["remaining_budget"])
+        spent = sum(int(p.get("purchase_price") or 0) for p in purchases)
+        total_listino = sum(int(p.get("list_price") or 0) for p in players)
+        multiplier = round(spent / total_listino, 2) if total_listino else 0.0
+        alerts = build_team_alerts(players, bought)
+        alerts_by_team[name] = alerts
 
-    with account_left:
-        if logged_avatar:
-            st.image(logged_avatar, width=58)
-        else:
+        # TOP basati sul rating effettivo, non sul solo listino.
+        player_ratings = [
+            calculate_player_rating(
+                p,
+                st.session_state.preferred_players,
+                load_custom_modifiers(),
+                build_current_goalkeeper_ranking(state),
+            )
+            for p in players
+        ]
+        top_count = sum(r >= 9.0 for r in player_ratings)
+
+        roles = state.team_role_totals.get(name, {})
+        rows.append({
+            "Squadra": name,
+            "Rating": round(ratings.get(name, 0.0), 1),
+            "Voto Asta": round(auction_grade_map.get(name, 0.0), 1),
+            "Budget": budget,
+            "Rosa": f"{bought}/{TOTAL_SLOTS_PER_TEAM}",
+            "P": f"{roles.get('P',0)}/{ROLE_LIMITS['P']}",
+            "D": f"{roles.get('D',0)}/{ROLE_LIMITS['D']}",
+            "C": f"{roles.get('C',0)}/{ROLE_LIMITS['C']}",
+            "A": f"{roles.get('A',0)}/{ROLE_LIMITS['A']}",
+            "TOP": top_count,
+            "x Listino": multiplier,
+            "Alert": len(alerts),
+        })
+
+    league_df = pd.DataFrame(rows).sort_values(
+        ["Voto Asta", "Rating"],
+        ascending=False,
+    ).reset_index(drop=True)
+    league_df.index += 1
+
+    # Snapshot: solo quattro informazioni veramente utili.
+    best_rating = max(rows, key=lambda r: r["Rating"]) if rows else None
+    best_auction = max(rows, key=lambda r: r["Voto Asta"]) if rows else None
+    richest = max(rows, key=lambda r: r["Budget"]) if rows else None
+    completed = sum(
+        state.team_total_bought.get(name, 0) >= TOTAL_SLOTS_PER_TEAM
+        for name in teams_df["name"].tolist()
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "⭐ Miglior rosa",
+        best_rating["Squadra"] if best_rating else "—",
+        f"{best_rating['Rating']:.1f}" if best_rating else None,
+        delta_color="off",
+    )
+    c2.metric(
+        "🏆 Miglior asta",
+        best_auction["Squadra"] if best_auction else "—",
+        f"{best_auction['Voto Asta']:.1f}" if best_auction else None,
+        delta_color="off",
+    )
+    c3.metric(
+        "💰 Più crediti",
+        richest["Squadra"] if richest else "—",
+        f"{richest['Budget']} cr" if richest else None,
+        delta_color="off",
+    )
+    c4.metric("✅ Rose complete", f"{completed}/{len(rows)}")
+
+    st.markdown('<div class="rcd-section">🏁 Classifica live</div>', unsafe_allow_html=True)
+    st.dataframe(
+        league_df,
+        use_container_width=True,
+        column_config={
+            "Rating": st.column_config.NumberColumn(format="%.1f"),
+            "Voto Asta": st.column_config.NumberColumn(format="%.1f"),
+            "Budget": st.column_config.NumberColumn(format="%d cr"),
+            "x Listino": st.column_config.NumberColumn(format="x%.2f"),
+            "TOP": st.column_config.NumberColumn(format="%d"),
+            "Alert": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+    # I dettagli/alert non occupano più tutta la pagina.
+    st.markdown('<div class="rcd-section">🚨 Dettagli e alert</div>', unsafe_allow_html=True)
+    st.caption("Apri solo la squadra che vuoi analizzare.")
+
+    ordered_names = league_df["Squadra"].tolist()
+    for name in ordered_names:
+        row = next(r for r in rows if r["Squadra"] == name)
+        alert_count = row["Alert"]
+        label = (
+            f"{name} · ⭐ {row['Rating']:.1f} · 🏆 {row['Voto Asta']:.1f} · "
+            f"💰 {row['Budget']} cr · 🚨 {alert_count}"
+        )
+        with st.expander(label, expanded=False):
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Rating", f"{row['Rating']:.1f}")
+            m2.metric("Voto Asta", f"{row['Voto Asta']:.1f}")
+            m3.metric("TOP", row["TOP"])
+            m4.metric("Moltiplicatore", f"x{row['x Listino']:.2f}")
+
             st.markdown(
-                """
-                <div style="
-                    width:54px;height:54px;border-radius:50%;
-                    display:flex;align-items:center;justify-content:center;
-                    background:#FF8B8B;color:white;font-size:1.5rem;
-                    font-weight:900;
-                ">✓</div>
+                f"**Composizione:** P {row['P']} · D {row['D']} · "
+                f"C {row['C']} · A {row['A']} · Rosa {row['Rosa']}"
+            )
+
+            alerts = alerts_by_team.get(name, [])
+            if not alerts:
+                st.success("Nessuna criticità strategica rilevante.")
+            else:
+                for alert in alerts:
+                    st.warning(alert["text"], icon="⚠️")
+                    if alert.get("help"):
+                        st.caption(alert["help"])
+
+
+# ============================================================
+# TAB 2 — ROSE E PAGELLE
+# ============================================================
+
+def build_roster_dataframe(
+    rosters: list[dict[str, Any]],
+    preferred_players: set[Any],
+) -> pd.DataFrame:
+    rows = []
+
+    for roster in rosters:
+        team = roster.get("teams")
+        player = roster.get("players")
+
+        if not team or not player:
+            continue
+
+        list_price = player.get("list_price") or 1
+
+        rows.append(
+            {
+                "⭐ Preferito": player["id"] in preferred_players,
+                "Squadra": team["name"],
+                "Giocatore": player["name"],
+                "Ruolo": player["role"],
+                "Rating": calculate_player_rating(
+                    player,
+                    preferred_players,
+                ),
+                "Club Serie A": player.get("team_nfl"),
+                "Listino": list_price,
+                "Pagato": roster.get("purchase_price", 0),
+                "Moltiplicatore Asta": round(
+                    float(roster.get("purchase_price", 0)) / float(list_price)
+                    if float(list_price) > 0 else 0.0,
+                    2,
+                ),
+                "Differenza": (
+                    roster.get("purchase_price", 0) - list_price
+                ),
+                "Slot": player.get(
+                    "slot_fantacalcio",
+                    "Scommessa",
+                ),
+                "Titolarità": player.get(
+                    "status_titolarita",
+                    "Titolare",
+                ),
+                "Rigorista": "Sì" if player.get("rigorista") else "No",
+                "Fisico": player.get(
+                    "affidabilita_fisica",
+                    "Integro",
+                ),
+                "Cartellini": player.get(
+                    "propensione_cartellini",
+                    "Normale",
+                ),
+                "1° Anno A": (
+                    "Sì"
+                    if player.get("primo_anno_serie_a")
+                    else "No"
+                ),
+                "_player_id": player["id"],
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def calculate_market_efficiency(
+    purchases: list[dict[str, Any]],
+    all_rosters: list[dict[str, Any]],
+) -> tuple[float, float]:
+    """
+    Confronta quanto una squadra ha pagato rispetto al mercato reale dell'asta.
+
+    Ritorna:
+    - bonus/malus economico [-1.0, +1.0]
+    - moltiplicatore medio pagato dalla squadra
+
+    Il confronto usa il moltiplicatore mediano osservato nell'asta, non
+    'listino - prezzo pagato', che in un fanta a 12 penalizzerebbe quasi tutti.
+    """
+    market_ratios = []
+    for roster in all_rosters:
+        player = roster.get("players") or {}
+        list_price = float(player.get("list_price") or 0)
+        paid = float(roster.get("purchase_price") or 0)
+        if list_price > 0 and paid > 0:
+            market_ratios.append(paid / list_price)
+
+    market_multiplier = (
+        float(pd.Series(market_ratios).median())
+        if market_ratios
+        else DEFAULT_AUCTION_MULTIPLIER
+    )
+
+    team_ratios = []
+    for purchase in purchases:
+        player = purchase.get("players") or {}
+        list_price = float(player.get("list_price") or 0)
+        paid = float(purchase.get("purchase_price") or 0)
+        if list_price > 0 and paid > 0:
+            team_ratios.append(paid / list_price)
+
+    if not team_ratios:
+        return 0.0, 0.0
+
+    team_multiplier = sum(team_ratios) / len(team_ratios)
+
+    # Se paghi meno del mercato hai bonus; se paghi più del mercato hai malus.
+    relative = market_multiplier / max(team_multiplier, 0.01)
+    economic_bonus = (relative - 1.0) * 2.5
+    economic_bonus = max(-1.0, min(1.0, economic_bonus))
+
+    return round(economic_bonus, 2), round(team_multiplier, 2)
+
+
+def calibrate_team_grade(raw_grade: float) -> float:
+    """
+    Rimappa linearmente il voto finale per allargare la scala utile.
+
+    4.5 -> 5.5
+    6.7 -> 8.0
+
+    La stessa pendenza viene mantenuta anche fuori dall'intervallo,
+    con clamp finale 4.0-9.8.
+    """
+    x1 = TEAM_GRADE_CALIBRATION_X1
+    y1 = TEAM_GRADE_CALIBRATION_Y1
+    x2 = TEAM_GRADE_CALIBRATION_X2
+    y2 = TEAM_GRADE_CALIBRATION_Y2
+
+    slope = (y2 - y1) / (x2 - x1)
+    calibrated = y1 + (raw_grade - x1) * slope
+
+    return round(max(4.0, min(9.8, calibrated)), 1)
+
+
+def calculate_auction_grades(
+    teams: list[dict[str, Any]],
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> pd.DataFrame:
+    grades = []
+
+    all_rosters = [
+        purchase
+        for purchases in state.team_purchases_map.values()
+        for purchase in purchases
+    ]
+
+    for team in teams:
+        name = team["name"]
+        players = state.team_players_map[name]
+        purchases = state.team_purchases_map[name]
+
+        if not players:
+            grades.append(
+                {
+                    "Squadra": name,
+                    "Voto Asta": 0.0,
+                    "Rating Rosa": 0.0,
+                    "TOP (>=9)": 0,
+                    "Moltiplicatore Pagato": 0.0,
+                    "Efficienza Mercato": 0.0,
+                    "Criticità Rilevate": 0,
+                }
+            )
+            continue
+
+        player_scores = [
+            calculate_player_rating(
+                player,
+                st.session_state.preferred_players,
+                load_custom_modifiers(),
+                build_current_goalkeeper_ranking(state),
+            )
+            for player in players
+        ]
+
+        top_count = sum(score >= 9.0 for score in player_scores)
+
+        alerts = build_team_alerts(players, len(players))
+        criticality = len(alerts)
+
+        economic_bonus, team_multiplier = calculate_market_efficiency(
+            purchases,
+            all_rosters,
+        )
+
+        # Il cuore del voto è la qualità della rosa.
+        # L'economia può spostare il voto, ma non schiacciare tutte le squadre.
+        quality = ratings[name]
+
+        # Un numero elevato di TOP ha un ulteriore piccolo premio nel voto asta.
+        top_bonus = min(0.50, top_count * 0.07)
+
+        # Criticità strategiche restano rilevanti, ma non dominanti.
+        risk_penalty = min(0.80, criticality * 0.18)
+
+        grade = (
+            quality * 0.88
+            + economic_bonus * 0.65
+            + top_bonus
+            - risk_penalty
+        )
+
+        # Calibrazione finale più leggibile:
+        # circa 4.5 -> 5.5 e 6.7 -> 8.0.
+        grade = calibrate_team_grade(grade)
+
+        grades.append(
+            {
+                "Squadra": name,
+                "Voto Asta": grade,
+                "Rating Rosa": round(quality, 1),
+                "TOP (>=9)": top_count,
+                "Moltiplicatore Pagato": team_multiplier,
+                "Efficienza Mercato": economic_bonus,
+                "Criticità Rilevate": criticality,
+            }
+        )
+
+    result = (
+        pd.DataFrame(grades)
+        .sort_values("Voto Asta", ascending=False)
+        .reset_index(drop=True)
+    )
+    result.index = range(1, len(result) + 1)
+    result.index.name = "Posizione"
+    return result
+
+
+def render_rosters_tab(
+    teams: list[dict[str, Any]],
+    teams_df: pd.DataFrame,
+    rosters: list[dict[str, Any]],
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> None:
+    st.subheader("📋 Tutte le Rose & Pagelle Post-Asta")
+    st.markdown(
+        "In questa sezione puoi visionare tutte le rose completate e "
+        "l'**Analisi Voto Asta** basata su ranking, risparmio/overpaying "
+        "sui listini e criticità complessive."
+    )
+
+    if not rosters:
+        st.info("Nessun giocatore ancora acquistato in questa sessione d'asta.")
+        return
+
+    df_rosters = build_roster_dataframe(
+        rosters,
+        st.session_state.preferred_players,
+    )
+
+    team_names = teams_df["name"].tolist()
+    filter_options = ["Tutte"] + team_names
+
+    selected_filter = st.selectbox(
+        "Filtra per Squadra",
+        filter_options,
+        index=default_team_index(filter_options),
+        key="table_team_filter_tab2",
+    )
+
+    display_df = df_rosters.copy()
+    if selected_filter != "Tutte":
+        display_df = display_df[
+            display_df["Squadra"] == selected_filter
+        ]
+
+    edited_df = st.data_editor(
+        display_df,
+        column_config={
+            "_player_id": None,
+            "Moltiplicatore Asta": st.column_config.NumberColumn(
+                "Moltiplicatore Asta",
+                format="x%.2f",
+            ),
+            "⭐ Preferito": st.column_config.CheckboxColumn(
+                "⭐ Preferito",
+                help="Dai un bonus di rating al giocatore.",
+                default=False,
+            ),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    for _, row in edited_df.iterrows():
+        player_id = row["_player_id"]
+        if row["⭐ Preferito"]:
+            st.session_state.preferred_players.add(player_id)
+        else:
+            st.session_state.preferred_players.discard(player_id)
+
+    st.divider()
+    st.subheader("🏆 Classifica e Voto Asta per Squadra")
+    st.markdown(
+        "Il voto dell'asta privilegia la **qualità reale della rosa**: "
+        "i giocatori TOP pesano più degli altri. La gestione economica viene "
+        "valutata rispetto ai prezzi realmente osservati nell'asta, mentre "
+        "le criticità strategiche applicano penalità moderate. La scala finale "
+        "è calibrata per rendere più leggibili le differenze tra rose forti e deboli."
+    )
+
+    grades_df = calculate_auction_grades(
+        teams,
+        state,
+        ratings,
+    )
+    st.dataframe(
+        grades_df,
+        use_container_width=True,
+    )
+
+
+# ============================================================
+# TAB 3 — TUTTI I GIOCATORI / RATING
+# ============================================================
+
+def render_all_players_tab() -> None:
+    st.subheader("⭐️ Tutti i Giocatori — Rating Dettagliato")
+    st.caption(
+        "Il rating combina statistiche stagionali, listino, titolarità, "
+        "modificatore squadra, rigoristi, rischio cartellini, rookie e preferiti. "
+        "Per i portieri, il modificatore difensivo è sostituito dal criterio "
+        "gol subiti: 1ª squadra +1.0, 2ª 0.0, 3ª -1.0."
+    )
+
+    all_players = load_players()
+    custom_modifiers = load_custom_modifiers()
+    if not all_players:
+        st.info("Nessun giocatore trovato nel database.")
+        return
+
+    rows = []
+    bought_ids = set()
+    for roster in load_rosters():
+        player = roster.get("players")
+        if player and player.get("id") is not None:
+            bought_ids.add(player["id"])
+
+    for player in all_players:
+        details = calculate_player_rating_detailed(
+            player,
+            st.session_state.preferred_players,
+            custom_modifiers,
+            ALL_GOALKEEPER_RANKING,
+        )
+        rows.append(
+            {
+                "⭐ Preferito": player["id"] in st.session_state.preferred_players,
+                "Giocatore": player.get("name", ""),
+                "Ruolo": player.get("role", ""),
+                "Rating ⭐️": details["final_rating"],
+                "Moltiplicatore ruolo": details.get("role_multiplier", 1.0),
+                "Rating pre-calibrazione": details.get("raw_rating", details["final_rating"]),
+                "Base/Fantamedia": details["base"],
+                "Mod Squadra": details["team_mod"],
+                "Mod. Portiere": details.get("goalkeeper_mod", 0.0),
+                "Pos. Difesa": details.get("goalkeeper_rank"),
+                "Titolarità": details["tit"],
+                "Rigorista": details["rig"],
+                "Cartellini": details["cart"],
+                "Rookie": details["rook"],
+                "Bonus/Malus manuale": details["custom_label"],
+                "Mod. manuale": details["custom_mod"],
+                "Gol": details["g"],
+                "Ass": details["a"],
+                "Presenze": details["m"],
+                "Club": player.get("team_nfl", ""),
+                "Listino": player.get("list_price", 0),
+                "Stato": "Acquistato" if player["id"] in bought_ids else "Libero",
+                "_player_id": player["id"],
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        role_filter = st.selectbox(
+            "Filtra per Ruolo",
+            ["Tutti", "P", "D", "C", "A"],
+            key="tab3_role_filter",
+        )
+    with col2:
+        status_filter = st.selectbox(
+            "Filtra per Stato",
+            ["Tutti", "Libero", "Acquistato"],
+            key="tab3_status_filter",
+        )
+    with col3:
+        search_name = st.text_input(
+            "Cerca Giocatore",
+            key="tab3_search_name",
+        )
+
+    filtered = df.copy()
+    if role_filter != "Tutti":
+        filtered = filtered[filtered["Ruolo"] == role_filter]
+    if status_filter != "Tutti":
+        filtered = filtered[filtered["Stato"] == status_filter]
+    if search_name:
+        needle = re.escape(search_name)
+        filtered = filtered[
+            filtered["Giocatore"].astype(str).str.contains(
+                needle,
+                case=False,
+                na=False,
+                regex=True,
+            )
+        ]
+
+    filtered = filtered.sort_values(
+        ["Rating ⭐️", "Giocatore"],
+        ascending=[False, True],
+    )
+
+    st.dataframe(
+        filtered.drop(columns=["_player_id"]),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "⭐ Preferito": st.column_config.CheckboxColumn(
+                "⭐ Preferito",
+                help="Aggiunge +0.5 al rating del giocatore.",
+            ),
+            "Rating ⭐️": st.column_config.NumberColumn(
+                "Rating ⭐️",
+                format="%.1f",
+            ),
+            "Moltiplicatore ruolo": st.column_config.NumberColumn(
+                "Moltiplicatore ruolo",
+                format="x%.3f",
+            ),
+            "Rating pre-calibrazione": st.column_config.NumberColumn(
+                "Rating pre-calibrazione",
+                format="%.1f",
+            ),
+            "Mod. manuale": st.column_config.NumberColumn(
+                "Mod. manuale",
+                format="%+.1f",
+            ),
+        },
+    )
+
+
+# ============================================================
+# TAB 4 — GESTIONE BONUS / MALUS
+# ============================================================
+
+def render_player_modifiers_tab() -> None:
+    st.subheader("🛠️ Gestione Bonus / Malus Giocatori")
+    st.caption(
+        "Le modifiche inserite qui vengono salvate in Supabase e "
+        "si sommano al rating calcolato automaticamente. "
+        "Il reset elimina solo la modifica manuale, senza toccare i dati originali del giocatore."
+    )
+
+    all_players = load_players()
+    if not all_players:
+        st.info("Nessun giocatore trovato nel database.")
+        return
+
+    modifiers = load_custom_modifiers()
+
+    rows = []
+    for player in all_players:
+        current = modifiers.get(player["id"], {})
+        rows.append(
+            {
+                "_player_id": player["id"],
+                "Giocatore": player.get("name", ""),
+                "Ruolo": player.get("role", ""),
+                "Club": player.get("team_nfl", ""),
+                "Modifica attuale": current.get(
+                    "modifier_label",
+                    "Nessuna modifica",
+                ),
+                "Valore": float(current.get("modifier_value") or 0.0),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        role_filter = st.selectbox(
+            "Ruolo",
+            ["Tutti", "P", "D", "C", "A"],
+            key="tab4_role_filter",
+        )
+    with c2:
+        modifier_filter = st.selectbox(
+            "Stato modifica",
+            ["Tutti", "Con bonus/malus", "Senza modifica"],
+            key="tab4_modifier_filter",
+        )
+    with c3:
+        search = st.text_input(
+            "Cerca giocatore",
+            key="tab4_search",
+        )
+
+    filtered = df.copy()
+
+    if role_filter != "Tutti":
+        filtered = filtered[filtered["Ruolo"] == role_filter]
+
+    if modifier_filter == "Con bonus/malus":
+        filtered = filtered[filtered["Valore"] != 0]
+    elif modifier_filter == "Senza modifica":
+        filtered = filtered[filtered["Valore"] == 0]
+
+    if search:
+        filtered = filtered[
+            filtered["Giocatore"].astype(str).str.contains(
+                re.escape(search),
+                case=False,
+                na=False,
+                regex=True,
+            )
+        ]
+
+    st.markdown("### Modifica singolo giocatore")
+
+    if filtered.empty:
+        st.info("Nessun giocatore corrisponde ai filtri.")
+        return
+
+    player_labels = {
+        f"{row['Giocatore']} [{row['Ruolo']}] — {row['Club']}": row["_player_id"]
+        for _, row in filtered.iterrows()
+    }
+
+    selected_label = st.selectbox(
+        "Giocatore",
+        list(player_labels),
+        key="tab4_selected_player",
+    )
+    selected_id = player_labels[selected_label]
+
+    current = modifiers.get(selected_id, {})
+    current_label = current.get(
+        "modifier_label",
+        "Nessuna modifica",
+    )
+
+    modifier_options = list(CUSTOM_MODIFIERS)
+    current_index = (
+        modifier_options.index(current_label)
+        if current_label in modifier_options
+        else 0
+    )
+
+    selected_modifier = st.selectbox(
+        "Bonus / Malus",
+        modifier_options,
+        index=current_index,
+        key=f"tab4_modifier_{selected_id}",
+        help=(
+            "La modifica viene aggiunta al rating. "
+            "Esempio: se Audero è indicato come Titolare ma tu ritieni "
+            "che sia in ballottaggio, seleziona 'Ballottaggio (-0.3)'."
+        ),
+    )
+
+    player = next(
+        player for player in all_players
+        if player["id"] == selected_id
+    )
+
+    base_details = calculate_player_rating_detailed(
+        player,
+        st.session_state.preferred_players,
+        modifiers,
+    )
+    new_value = CUSTOM_MODIFIERS[selected_modifier]["value"]
+    current_rating = base_details["final_rating"]
+    # Il rating attuale include già la modifica esistente.
+    rating_without_current_custom = current_rating - float(
+        current.get("modifier_value") or 0.0
+    )
+    preview_rating = round(
+        max(
+            1.0,
+            min(10.0, rating_without_current_custom + new_value),
+        ),
+        1,
+    )
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric("Rating senza modifica manuale", f"{rating_without_current_custom:.1f}")
+    with p2:
+        st.metric("Modifica scelta", f"{new_value:+.1f}")
+    with p3:
+        st.metric("Rating finale previsto", f"{preview_rating:.1f}")
+
+    b1, b2 = st.columns(2)
+
+    with b1:
+        if st.button(
+            "💾 Salva bonus/malus",
+            type="primary",
+            use_container_width=True,
+        ):
+            ok, error = save_custom_modifier(
+                selected_id,
+                selected_modifier,
+            )
+            if ok:
+                st.success(
+                    f"Modifica salvata per **{player['name']}**."
+                )
+                invalidate_data_cache()
+                st.rerun()
+            else:
+                st.error(
+                    "Impossibile salvare la modifica. "
+                    "Controlla che la tabella Supabase "
+                    f"`{CUSTOM_MODIFIER_TABLE}` esista.\n\n{error}"
+                )
+
+    with b2:
+        if st.button(
+            "♻️ Reset modifica giocatore",
+            use_container_width=True,
+        ):
+            ok, error = reset_custom_modifier(selected_id)
+            if ok:
+                st.success(
+                    f"Modifica rimossa da **{player['name']}**."
+                )
+                invalidate_data_cache()
+                st.rerun()
+            else:
+                st.error(f"Impossibile effettuare il reset: {error}")
+
+    st.divider()
+    st.markdown("### 📋 Modifiche attualmente salvate")
+
+    active = df[df["Valore"] != 0].copy()
+    if active.empty:
+        st.info("Nessun bonus/malus personalizzato salvato.")
+    else:
+        st.dataframe(
+            active.drop(columns=["_player_id"]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Valore": st.column_config.NumberColumn(
+                    "Valore",
+                    format="%+.1f",
+                ),
+            },
+        )
+
+    with st.expander("⚠️ Reset di tutte le modifiche manuali"):
+        st.warning(
+            "Cancella tutti i bonus/malus personalizzati della tabella. "
+            "Non modifica i dati originali dei giocatori."
+        )
+        if st.button(
+            "🗑️ Cancella TUTTI i bonus/malus",
+            type="secondary",
+            key="tab4_reset_all",
+        ):
+            try:
+                saved = (
+                    supabase.table(CUSTOM_MODIFIER_TABLE)
+                    .select("player_id")
+                    .execute()
+                    .data
+                )
+                for row in saved:
+                    (
+                        supabase.table(CUSTOM_MODIFIER_TABLE)
+                        .delete()
+                        .eq("player_id", row["player_id"])
+                        .execute()
+                    )
+                invalidate_data_cache()
+                st.success("Tutte le modifiche manuali sono state cancellate.")
+                st.rerun()
+            except Exception as exc:
+                st.error(
+                    f"Reset globale non riuscito: {exc}"
+                )
+
+
+def render_auction_dashboard_header(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    ratings: dict[str, float],
+) -> None:
+    """Hero compatto: identità, fase, budget, slot e rating."""
+    team_name = get_my_team_name_from_state(state)
+    if team_name is None:
+        return
+
+    team_row = teams_df[teams_df["name"] == team_name]
+    remaining = int(team_row.iloc[0]["remaining_budget"]) if not team_row.empty else 0
+    bought = state.team_total_bought.get(team_name, 0)
+    rating = ratings.get(team_name, 0.0)
+    draft_role = get_my_team_draft_role(state)
+    complete = bought >= TOTAL_SLOTS_PER_TEAM
+
+    phase = (
+        "ASTA COMPLETATA"
+        if complete
+        else f"FASE: {ROLE_NAMES.get(draft_role, 'Asta').upper()}"
+    )
+
+    st.markdown(
+        f"""
+        <div class="rcd-hero">
+          <div class="rcd-kicker">RCD ESCANYOL · AUCTION CENTER</div>
+          <div class="rcd-hero-title">⚽ Live Auction Dashboard</div>
+          <div class="rcd-phase">{phase}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Budget", f"{remaining} cr")
+    c2.metric("👥 Rosa", f"{bought}/{TOTAL_SLOTS_PER_TEAM}")
+    c3.metric("⭐ Rating Rosa", f"{rating:.1f}")
+    c4.metric("🎯 Prossimo ruolo", "—" if complete else ROLE_NAMES.get(draft_role, "—"))
+
+
+# ============================================================
+# TAB 1 — VALUTAZIONE E ROSA RCD ESCANYOL
+# ============================================================
+
+def render_my_team_evaluation(
+    teams_df: pd.DataFrame,
+    state: AuctionState,
+    ratings: dict[str, float],
+    rosters: list[dict[str, Any]],
+) -> None:
+    """Valuta RCD Escanyol in modo progressivo seguendo il draft PDCA."""
+    team_name, players, purchases = get_my_team_players_and_purchases(state)
+    if team_name is None or not players:
+        # A rosa vuota non mostriamo valutazioni generiche: l'utente ha chiesto
+        # che la strategia inizi dal primo acquisto dei portieri.
+        return
+
+    team_row = teams_df[teams_df["name"] == team_name]
+    bought = len(players)
+    remaining = int(team_row.iloc[0]["remaining_budget"]) if not team_row.empty else 0
+    initial = int(team_row.iloc[0]["initial_budget"]) if not team_row.empty else 0
+    spent = sum(int(p.get("purchase_price") or 0) for p in purchases)
+    listino = sum(int((p.get("players") or {}).get("list_price") or 1) for p in purchases)
+    slots_left = max(0, TOTAL_SLOTS_PER_TEAM - bought)
+    rating = ratings.get(team_name, 0.0)
+    counts = state.team_role_totals.get(team_name, {})
+    roster_complete = (
+        bought >= TOTAL_SLOTS_PER_TEAM
+        or state.team_total_bought.get(team_name, 0) >= TOTAL_SLOTS_PER_TEAM
+    )
+    current_role = None if roster_complete else get_my_team_draft_role(state)
+
+    grades = calculate_auction_grades(
+        teams_df.to_dict("records"),
+        state,
+        ratings,
+    )
+    grade_row = grades[grades["Squadra"] == team_name]
+    auction_grade = float(grade_row.iloc[0]["Voto Asta"]) if not grade_row.empty else 0.0
+
+    phase, assessment, advice = build_draft_strategy_text(
+        state,
+        rosters,
+        teams_df,
+        ratings,
+    )
+
+    st.markdown(
+        '<div class="rcd-section">🏁 Valutazione finale</div>'
+        if roster_complete
+        else '<div class="rcd-section">🧠 Assistente asta</div>',
+        unsafe_allow_html=True,
+    )
+    if phase:
+        st.markdown(f"**{phase}**")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🏆 Valutazione Asta", f"{auction_grade:.1f}/10")
+    c2.metric("💸 Crediti spesi", f"{spent} cr")
+    c3.metric("📋 Valore listino", f"{listino} cr")
+
+    role_parts = []
+    for role in DRAFT_ORDER:
+        value = counts.get(role, 0)
+        limit = ROLE_LIMITS[role]
+        check = " ✓" if value >= limit else ""
+        role_parts.append(f"{role} {value}/{limit}{check}")
+    st.markdown(
+        '<div class="rcd-rolebar">' + " &nbsp; · &nbsp; ".join(role_parts) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if assessment:
+        st.info(assessment)
+    if advice:
+        st.success(f"💡 **Consiglio:** {advice}")
+
+    if roster_complete:
+        custom_modifiers = load_custom_modifiers()
+        goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+        tier_counts = {
+            "TOP": 0,
+            "Prima Fascia": 0,
+            "Seconda Fascia": 0,
+            "Terza Fascia": 0,
+            "Scommessa": 0,
+        }
+
+        for player in state.team_players_map.get(team_name, []):
+            details = calculate_player_rating_detailed(
+                player,
+                st.session_state.preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            )
+            tier_counts[get_roster_tier(details["final_rating"])] += 1
+
+        st.markdown("### 📊 Composizione qualitativa della rosa")
+        q1, q2, q3, q4, q5 = st.columns(5)
+        q1.metric("🏆 TOP", tier_counts["TOP"])
+        q2.metric("🥇 Prima Fascia", tier_counts["Prima Fascia"])
+        q3.metric("🥈 Seconda Fascia", tier_counts["Seconda Fascia"])
+        q4.metric("🥉 Terza Fascia", tier_counts["Terza Fascia"])
+        q5.metric("🎲 Scommesse", tier_counts["Scommessa"])
+
+    # Suggerimenti disponibili solo durante l'asta.
+    if (not roster_complete) and current_role:
+        st.markdown(f"### 🎯 Prossimi obiettivi — {ROLE_NAMES[current_role]}")
+        history = auction_history_ratios(rosters)
+        if history:
+            median_multiplier = float(pd.Series([h["ratio"] for h in history]).median())
+            st.caption(
+                f"📈 Mercato osservato finora: moltiplicatore mediano **x{median_multiplier:.2f}** "
+                f"su {len(history)} acquisti con listino disponibile."
+            )
+        # Budget corrente salvato per la funzione di raccomandazione.
+        st.session_state["my_team_budget"] = remaining
+
+        recommendation_tier = st.selectbox(
+            "🎯 Fascia dei giocatori consigliati",
+            RECOMMENDATION_TIER_OPTIONS,
+            index=RECOMMENDATION_TIER_OPTIONS.index(
+                st.session_state.get("recommendation_tier", "TOP")
+            ),
+            key="recommendation_tier",
+            help=(
+                "TOP ≥ 9.0 · Prima Fascia 8.0–8.9 · "
+                "Seconda Fascia 7.0–7.9 · Terza Fascia 6.5–6.9. "
+                "Sotto 6.5 non vengono mai consigliati."
+            ),
+        )
+        tier_min = RECOMMENDATION_TIERS[recommendation_tier]["min_rating"]
+        tier_max = RECOMMENDATION_TIERS[recommendation_tier]["max_rating"]
+        st.caption(
+            f"Filtro: **{recommendation_tier}** · Rating "
+            f"{tier_min:.1f}" + (f"–{tier_max:.1f}" if tier_max < 10 else "+") +
+            ". Il costo viene usato per trovare il miglior affare dentro la fascia."
+        )
+
+        recommendations = build_next_player_recommendations(
+            state,
+            rosters,
+            st.session_state.preferred_players,
+            load_custom_modifiers(),
+            current_role,
+            limit=5,
+        )
+        if recommendations:
+            best = recommendations[0]
+            best_player = best["player"]
+            best_details = best["details"]
+            best_estimate = best["estimate"]
+            st.markdown(
+                f"""
+                <div class="rcd-target">
+                  <div class="rcd-kicker">🎯 TARGET #1 · {recommendation_tier.upper()}</div>
+                  <div class="rcd-target-name">{best_player.get('name', '')} · ⭐ {best_details['final_rating']:.1f}</div>
+                  <div class="rcd-target-meta">
+                    {best_player.get('team_nfl', '—')} · Listino {int(best_player.get('list_price') or 0)} cr ·
+                    Stima {best_estimate['estimated_price']} cr (x{best_estimate['multiplier']:.2f}) ·
+                    Value {best.get('rating_per_10_cr', 0.0):.2f}/10 cr
+                  </div>
+                </div>
                 """,
                 unsafe_allow_html=True,
             )
-
-    with account_right:
-        _lang = st.session_state.get("lang_selector", "Italiano")
-
-        # Saluto dinamico indipendente da `t`, perché questa card viene
-        # renderizzata PRIMA della tabella translations.
-        _hour = datetime.now().hour
-
-        if 5 <= _hour < 12:
-            _period = "morning"
-        elif 12 <= _hour < 18:
-            _period = "afternoon"
+            rec_rows = []
+            for index, row in enumerate(recommendations, start=1):
+                player = row["player"]
+                details = row["details"]
+                estimate = row["estimate"]
+                rec_rows.append({
+                    "#": index,
+                    "Giocatore": player.get("name", ""),
+                    "Fascia": row.get("tier", recommendation_tier),
+                    "Rating": details["final_rating"],
+                    "Listino": int(player.get("list_price") or 0),
+                    "Moltiplicatore": f"x{estimate['multiplier']:.2f}",
+                    "Stima asta": estimate["estimated_price"],
+                    "Rating / 10 cr": row.get("rating_per_10_cr", 0.0),
+                    "Valore Score": row.get("score", 0.0),
+                    "Club": player.get("team_nfl", "—"),
+                })
+            with st.expander("Mostra altri giocatori consigliati", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(rec_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Rating": st.column_config.NumberColumn(format="%.1f"),
+                        "Listino": st.column_config.NumberColumn(format="%d cr"),
+                        "Stima asta": st.column_config.NumberColumn(format="%d cr"),
+                        "Rating / 10 cr": st.column_config.NumberColumn(format="%.2f"),
+                        "Valore Score": st.column_config.NumberColumn(format="%.2f"),
+                    },
+                )
         else:
-            _period = "evening"
-
-        _greetings = {
-            "Italiano": {
-                "morning": "Buongiorno {name}!",
-                "afternoon": "Buon pomeriggio {name}!",
-                "evening": "Buonasera {name}!",
-            },
-            "English": {
-                "morning": "Good morning {name}!",
-                "afternoon": "Good afternoon {name}!",
-                "evening": "Good evening {name}!",
-            },
-            "Nederlands": {
-                "morning": "Goedemorgen {name}!",
-                "afternoon": "Goedemiddag {name}!",
-                "evening": "Goedenavond {name}!",
-            },
-            "Français": {
-                "morning": "Bonjour {name}!",
-                "afternoon": "Bon après-midi {name}!",
-                "evening": "Bonsoir {name}!",
-            },
-        }
-
-        _welcome = _greetings.get(
-            _lang,
-            _greetings["Italiano"],
-        )[_period].format(name=first_name)
-
-        st.markdown(
-            f'<div class="sanosync-welcome">{html.escape(_welcome)}</div>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-
-
-# ==============================================================================
-# 8. NAVIGATION & LANGUAGE
-# ==============================================================================
-translations = {
-    "Italiano": {
-        "t1": "🚀 Inserimento", 
-        "t2": "📊 Panoramica", 
-        "t3": "📈 Peso", 
-        "t4": "⚡ Immissione Rapida", 
-        "t5": "🏃 Attività",  
-        "meal": "Tipo di pasto", 
-        "meal_name": "Nome pasto", 
-        "add_meal": "Aggiungi pasto", 
-        "extra_act": "Attività extra", 
-        "extra_cals": "Calorie bruciate extra", 
-        "insert_weight": "Inserisci peso (kg)", 
-        "save_weight": "Salva peso", 
-        "recipe_name": "Nome ricetta", 
-        "save_recipe": "Salva ricetta", 
-        "recipe_saved": "✅ Ricetta salvata!",
-        "lang_label": "🌐 Lingua",
-        "logout": "🚪 Logout",
-        "search_food": "🔍 Cerca per Nome o Codice a Barre",
-        "search_btn": "🚀 Cerca",
-        "select_db": "Seleziona dal database",
-        "select_recipe": "Seleziona una ricetta",
-        "no_recipes": "Nessuna ricetta salvata.",
-        "calc_mode": "Inserimento basato su:",
-        "per_100g": "Per 100g",
-        "per_portion": "Per Porzione",
-        "qty_label": "Quantità (g o Porzioni)",
-        "num_portions": "Numero di porzioni",
-        "kcal": "Kcal",
-        "pro": "Pro (g)",
-        "carbs": "Carbs (g)",
-        "fat": "Fat (g)",
-        "inserted": "✅ Inserito",
-        "daily_summary": "📊 Riepilogo Giornaliero",
-        "summary_date": "📅 Data riepilogo",
-        "logged_foods": "🍽️ Cibi inseriti",
-        "del_meal": "Seleziona un pasto da eliminare",
-        "del_meal_btn": "🗑️ Elimina Pasto Selezionato",
-        "meal_del_success": "Pasto eliminato con successo!",
-        "no_meals": "Nessun pasto registrato per questa data.",
-        "burned_acts": "#### 🏃 Calorie Bruciate & Attività",
-        "weight_tracking": "⚖️ Tracciamento Peso",
-        "log_today_weight": "📥 Registra Peso Oggi",
-        "update_target": "🎯 Aggiorna Obiettivo",
-        "save_target": "Salva Obiettivo",
-        "target_updated": "✅ Obiettivo aggiornato!",
-        "quick_entries": "⚡ Immissioni Rapide",
-        "saved_entries": "📋 Entries salvate",
-        "del_quick": "🗑️ Elimina Immissione Rapida",
-        "select_quick_del": "Seleziona Immissione Rapida da rimuovere",
-        "del_quick_btn": "Elimina Immissione Rapida",
-        "quick_add_title": "➕ Aggiungi Nuova Immissione Rapida",
-        "calc_mode_radio": "Modalità di calcolo",
-        "caption_calc": "ℹ️ *Se scegli 'Per 100g', inserisci i valori riferiti a 100g. Se scegli 'Porzione', inserisci i valori totali della singola porzione.*",
-        "register_activity": "🏃 Registra Attività & Movimento",
-        "act_date": "📅 Data",
-        "steps_title": "👣 Passi (Totali)",
-        "update_steps": "💾 Aggiorna Passi",
-        "steps_updated": "Passi aggiornati!",
-        "bike_title": "🚲 Bici (Sessione)",
-        "bike_min": "Minuti Bici",
-        "add_bike": "💾 Aggiungi Bici",
-        "other_act": "🏋️ Altro",
-        "activity_label": "Attività",
-        "add_act_btn": "💾 Aggiungi",
-        "tab1_title": "🍽️ Inserimento Cibo & Pasti",
-        "input_source_lbl": "Fonte inserimento",
-        "opt_off": "🔍 Cerca online (Open Food Facts)",
-        "opt_quick": "🍳 Immissione Rapida",
-        "card_kcal_in": "Kcal Ingerite",
-        "card_kcal_burn": "Kcal Bruciate",
-        "card_balance": "Bilancio",
-        "card_weight": "Peso",
-        "in_msg_low": lambda p: f"⚠️ Proiezione bassa ({p} kcal previste). Mangia di più!",
-        "in_msg_high": lambda p: f"✅ Ottima proiezione ({p} kcal stimate a fine giornata).",
-        "burn_msg_yes": lambda e: f"🌟 Ottimo lavoro! Hai fatto attività extra (+{e} kcal).",
-        "burn_msg_no": "💡 Nessuna attività extra registrata. Che ne dici di muoverti un po'?",
-        "bilancio_ok": "🎯 Ottimo, sei in perfetto deficit calorico.",
-        "bilancio_bad": "⚠️ Attenzione: sei in surplus calorico.",
-        "weight_msg_default": "📈 Continua così per raggiungere il target.",
-        "weight_msg_val": lambda i, d_ini, t, d_tgt: f"Iniziale: {i} kg ({d_ini:+.1f}) | Target: {t} kg ({d_tgt:+.1f})",
-        "status_move_title": "👣 Status Movimento",
-        "status_very_active": "🌟 Ottimo! Giornata molto attiva.",
-        "status_good": "🚶 Buona attività, continua così.",
-        "status_lazy": "🛋️ Giornata pigra, prova a muoverti di più.",
-        "in_msg_deficit": lambda target_in, diff: f"🎯 Per il deficit ideale di 500 kcal (target {target_in} kcal), {'mancano' if diff >= 0 else 'hai sforato di'} {abs(diff)} kcal.",
-        "balance_days": lambda d: f"⏳ Al ritmo attuale, stimati circa {d} giorni per raggiungere il target.",
-        "balance_surplus": "⚠️ In surplus: impossibile stimare i giorni al target.",
-        "weight_forecast_title": "🔮 Previsione Raggiungimento Obiettivo",
-        "forecast_days": lambda d, date_str: f"🎯 Al ritmo attuale ({d} giorni stimati), potresti raggiungere il tuo obiettivo intorno al **{date_str}**!",
-        "forecast_steady": "📉 Mantenendo questo trend costante, il traguardo si avvicina.",
-        "forecast_flat_up": "💡 Il trend attuale è stabile o in salita: la proiezione temporale si attiva solo con un trend di perdita attivo.",
-    },
-    "English": {
-        "t1": "🚀 Logging", 
-        "t2": "📊 Overview", 
-        "t3": "📈 Weight", 
-        "t4": "⚡ Quick Entries", 
-        "t5": "🏃 Activity",  
-        "meal": "Meal type", 
-        "meal_name": "Meal name", 
-        "add_meal": "Add meal", 
-        "extra_act": "Extra activity", 
-        "extra_cals": "Extra calories burned", 
-        "insert_weight": "Enter weight (kg)", 
-        "save_weight": "Save weight", 
-        "recipe_name": "Recipe name", 
-        "save_recipe": "Save recipe", 
-        "recipe_saved": "✅ Recipe saved!",
-        "lang_label": "🌐 Language",
-        "logout": "🚪 Logout",
-        "search_food": "🔍 Search by Name or Barcode",
-        "search_btn": "🚀 Search",
-        "select_db": "Select from database",
-        "select_recipe": "Select a recipe",
-        "no_recipes": "No recipes saved.",
-        "calc_mode": "Entry based on:",
-        "per_100g": "Per 100g",
-        "per_portion": "Per Portion",
-        "qty_label": "Quantity (g or Portions)",
-        "num_portions": "Number of portions",
-        "kcal": "Kcal",
-        "pro": "Pro (g)",
-        "carbs": "Carbs (g)",
-        "fat": "Fat (g)",
-        "inserted": "✅ Inserted",
-        "daily_summary": "📊 Daily Overview",
-        "summary_date": "📅 Summary date",
-        "logged_foods": "🍽️ Logged Foods",
-        "del_meal": "Select a meal to delete",
-        "del_meal_btn": "🗑️ Delete Selected Meal",
-        "meal_del_success": "Meal deleted successfully!",
-        "no_meals": "No meals recorded for this date.",
-        "burned_acts": "#### 🏃 Burned Calories & Activities",
-        "weight_tracking": "⚖️ Weight Tracking",
-        "log_today_weight": "📥 Log Today's Weight",
-        "update_target": "🎯 Update Target",
-        "save_target": "Save Target",
-        "target_updated": "✅ Target updated!",
-        "quick_entries": "⚡ Quick Entries",
-        "saved_entries": "📋 Saved Entries",
-        "del_quick": "🗑️ Delete Quick Entry",
-        "select_quick_del": "Select Quick Entry to remove",
-        "del_quick_btn": "Delete Quick Entry",
-        "quick_add_title": "➕ Add New Quick Entry",
-        "calc_mode_radio": "Calculation Mode",
-        "caption_calc": "ℹ️ *If you choose 'Per 100g', enter values relative to 100g. If you choose 'Portion', enter total values for a single portion.*",
-        "register_activity": "🏃 Register Activity & Movement",
-        "act_date": "📅 Date",
-        "steps_title": "👣 Steps (Total)",
-        "update_steps": "💾 Update Steps",
-        "steps_updated": "Steps updated!",
-        "bike_title": "🚲 Bike (Session)",
-        "bike_min": "Bike Minutes",
-        "add_bike": "💾 Add Bike",
-        "other_act": "🏋️ Other",
-        "activity_label": "Activity",
-        "add_act_btn": "💾 Add",
-        "tab1_title": "🍽️ Food & Meal Logging",
-        "input_source_lbl": "Input source",
-        "opt_off": "🔍 Search online (Open Food Facts)",
-        "opt_quick": "🍳 Quick Entry",
-        "card_kcal_in": "Calories In",
-        "card_kcal_burn": "Calories Burned",
-        "card_balance": "Balance",
-        "card_weight": "Weight",
-        "in_msg_low": lambda p: f"⚠️ Low projection ({p} kcal expected). Eat more!",
-        "in_msg_high": lambda p: f"✅ Great projection ({p} kcal estimated by end of day).",
-        "burn_msg_yes": lambda e: f"🌟 Great job! You did extra activity (+{e} kcal).",
-        "burn_msg_no": "💡 No extra activity recorded. How about moving a bit?",
-        "bilancio_ok": "🎯 Great, you are in a perfect caloric deficit.",
-        "bilancio_bad": "⚠️ Warning: you are in a caloric surplus.",
-        "weight_msg_default": "📈 Keep it up to reach your target.",
-        "weight_msg_val": lambda i, d_ini, t, d_tgt: f"Initial: {i} kg ({d_ini:+.1f}) | Target: {t} kg ({d_tgt:+.1f})",
-        "status_move_title": "👣 Movement Status",
-        "status_very_active": "🌟 Great! Very active day.",
-        "status_good": "🚶 Good activity, keep it up.",
-        "status_lazy": "🛋️ Lazy day, try to move more.",
-        "in_msg_deficit": lambda target_in, diff: f"🎯 For an ideal 500 kcal deficit (target {target_in} kcal), {'left' if diff >= 0 else 'exceeded by'} {abs(diff)} kcal.",
-        "balance_days": lambda d: f"⏳ At the current pace, about {d} days estimated to reach target.",
-        "balance_surplus": "⚠️ In surplus: cannot estimate days to target.",
-        "weight_forecast_title": "🔮 Goal Achievement Forecast",
-        "forecast_days": lambda d, date_str: f"🎯 At your current pace ({d} estimated days), you could reach your goal around **{date_str}**!",
-        "forecast_steady": "📉 Maintaining this steady trend, your milestone is getting closer.",
-        "forecast_flat_up": "💡 Current trend is flat or increasing: the timeline projection activates only with an active weight-loss trend.",
-    },
-    "Nederlands": {
-        "t1": "🚀 Invoer", 
-        "t2": "📊 Overzicht", 
-        "t3": "📈 Gewicht", 
-        "t4": "⚡ Snelle Invoer", 
-        "t5": "🏃 Activiteit",  
-        "meal": "Maaltijdtype", 
-        "meal_name": "Maaltijdnaam", 
-        "add_meal": "Maaltijd toevoegen", 
-        "extra_act": "Extra activiteit", 
-        "extra_cals": "Extra verbrande calorieën", 
-        "insert_weight": "Voer gewicht in (kg)", 
-        "save_weight": "Gewicht opslaan", 
-        "recipe_name": "Receptnaam", 
-        "save_recipe": "Recept opslaan", 
-        "recipe_saved": "✅ Recept opgeslagen!",
-        "lang_label": "🌐 Taal",
-        "logout": "🚪 Uitloggen",
-        "search_food": "🔍 Zoek op naam of streepjescode",
-        "search_btn": "🚀 Zoeken",
-        "select_db": "Selecteer uit database",
-        "select_recipe": "Selecteer een recept",
-        "no_recipes": "Geen recepten opgeslagen.",
-        "calc_mode": "Invoer gebaseerd op:",
-        "per_100g": "Per 100g",
-        "per_portion": "Per Portie",
-        "qty_label": "Hoeveelheid (g of Porties)",
-        "num_portions": "Aantal porties",
-        "kcal": "Kcal",
-        "pro": "Pro (g)",
-        "carbs": "Koolh (g)",
-        "fat": "Vet (g)",
-        "inserted": "✅ Ingevoerd",
-        "daily_summary": "📊 Dagelijks Overzicht",
-        "summary_date": "📅 Overichtsdatum",
-        "logged_foods": "🍽️ Ingelogde Voeding",
-        "del_meal": "Selecteer een maaltijd om te verwijderen",
-        "del_meal_btn": "🗑️ Geselecteerde Maaltijd Verwijderen",
-        "meal_del_success": "Maaltijd succesvol verwijderd!",
-        "no_meals": "Geen maaltijden geregistreerd voor deze datum.",
-        "burned_acts": "#### 🏃 Verbrande Calorieën & Activiteiten",
-        "weight_tracking": "⚖️ Gewicht Volgen",
-        "log_today_weight": "📥 Vandaag Gewicht Registreren",
-        "update_target": "🎯 Doel Bijwerken",
-        "save_target": "Doel Opslaan",
-        "target_updated": "✅ Doel bijgewerkt!",
-        "quick_entries": "⚡ Snelle Invoer",
-        "saved_entries": "📋 Opgeslagen Items",
-        "del_quick": "🗑️ Snelle Invoer Verwijderen",
-        "select_quick_del": "Selecteer te verwijderen snelle invoer",
-        "del_quick_btn": "Snelle Invoer Verwijderen",
-        "quick_add_title": "➕ Nieuwe Snelle Invoer Toevoegen",
-        "calc_mode_radio": "Berekeningsmodus",
-        "caption_calc": "ℹ️ *Als je kiest voor 'Per 100g', vul dan de waarden per 100g in. Als je kiest voor 'Portie', vul dan de totale waarden voor een enkele portie in.*",
-        "register_activity": "🏃 Registreer Activiteit & Beweging",
-        "act_date": "📅 Datum",
-        "steps_title": "👣 Stappen (Totaal)",
-        "update_steps": "💾 Stappen Bijwerken",
-        "steps_updated": "Stappen bijgewerkt!",
-        "bike_title": "🚲 Fietsen (Sessie)",
-        "bike_min": "Fietsminuten",
-        "add_bike": "💾 Fietsen Toevoegen",
-        "other_act": "🏋️ Overig",
-        "activity_label": "Activiteit",
-        "add_act_btn": "💾 Toevoegen",
-        "tab1_title": "🍽️ Voeding & Maaltijden Invoeren",
-        "input_source_lbl": "Invoerbron",
-        "opt_off": "🔍 Online zoeken (Open Food Facts)",
-        "opt_quick": "🍳 Snelle Invoer",
-        "card_kcal_in": "Gegeten Kcal",
-        "card_kcal_burn": "Verbrande Kcal",
-        "card_balance": "Balans",
-        "card_weight": "Gewicht",
-        "in_msg_low": lambda p: f"⚠️ Lage projectie ({p} kcal verwacht). Eet meer!",
-        "in_msg_high": lambda p: f"✅ Geweldige projectie ({p} kcal geschat aan het einde van de dag).",
-        "burn_msg_yes": lambda e: f"🌟 Goed gedaan! Je hebt extra activiteiten gedaan (+{e} kcal).",
-        "burn_msg_no": "💡 Geen extra activiteiten geregistreerd. Wat dacht je van wat beweging?",
-        "bilancio_ok": "🎯 Uitstekend, je zit in een perfect calorie-tekort.",
-        "bilancio_bad": "⚠️ Waarschuwing: je hebt een calorie-overschot.",
-        "weight_msg_default": "📈 Ga zo door om je doel te bereiken.",
-        "weight_msg_val": lambda i, d_ini, t, d_tgt: f"Start: {i} kg ({d_ini:+.1f}) | Doel: {t} kg ({d_tgt:+.1f})",
-        "status_move_title": "👣 Bewegingsstatus",
-        "status_very_active": "🌟 Geweldig! Zeer actieve dag.",
-        "status_good": "🚶 Goede activiteit, ga zo door.",
-        "status_lazy": "🛋️ Luie dag, probeer meer te bewegen.",
-        "in_msg_deficit": lambda target_in, diff: f"🎯 Voor een ideaal tekort van 500 kcal (doel {target_in} kcal), {'nog' if diff >= 0 else 'overschreden met'} {abs(diff)} kcal.",
-        "balance_days": lambda d: f"⏳ In dit tempo duurt het ongeveer {d} dagen om het doel te bereiken.",
-        "balance_surplus": "⚠️ In overschot: kan dagen tot doel niet schatten.",
-        "weight_forecast_title": "🔮 Doelbereik Prognose",
-        "forecast_days": lambda d, date_str: f"🎯 In dit tempo ({d} geschatte dagen), zou je jouw doel rond **{date_str}** kunnen bereiken!",
-        "forecast_steady": "📉 Als je deze gestage trend aanhoudt, komt je mijlpaal dichterbij.",
-        "forecast_flat_up": "💡 De huidige trend is vlak of stijgend: de tijdlijnprognose wordt alleen geactiveerd bij een actieve gewichtsverliestrend.",
-    }
-}
-
-
-# Additional UI translations for features added after the first translation pass.
-translations["Italiano"].update({
-    "no_products":"Nessun prodotto trovato. Prova marca + nome oppure un codice a barre.",
-    "search_min_chars":"Inserisci almeno 2 caratteri o un codice a barre valido.",
-    "plan_day":"Giorno da pianificare","today":"Oggi","tomorrow":"Domani",
-    "morning_plan":"Buongiorno! Imposta il tipo di giornata e il livello di attività previsto per pianificare i pasti.",
-    "day_type":"Tipo di giornata","activity_expected":"Attività prevista","save_day_plan":"💾 Salva piano della giornata",
-    "weight_value":"Peso (kg)","edit_weight":"✏️ Modifica peso","delete_weight":"🗑️ Cancella peso",
-    "recipes_title":"🍲 Ricette","search_ingredient":"🔍 Cerca ingrediente",
-    "bike_type":"Tipo Bici","normal_bike":"Bici Normale","ebike":"E-Bike (Elettrica)",
-})
-translations["English"].update({
-    "no_products":"No products found. Try brand + product name or a barcode.",
-    "search_min_chars":"Enter at least 2 characters or a valid barcode.",
-    "plan_day":"Day to plan","today":"Today","tomorrow":"Tomorrow",
-    "morning_plan":"Good morning! Set the type of day and expected activity level to plan your meals.",
-    "day_type":"Type of day","activity_expected":"Expected activity","save_day_plan":"💾 Save daily plan",
-    "weight_value":"Weight (kg)","edit_weight":"✏️ Edit weight","delete_weight":"🗑️ Delete weight",
-    "recipes_title":"🍲 Recipes","search_ingredient":"🔍 Search ingredient",
-    "bike_type":"Bike type","normal_bike":"Regular Bike","ebike":"E-Bike (Electric)",
-})
-translations["Nederlands"].update({
-    "no_products":"Geen producten gevonden. Probeer merk + productnaam of een streepjescode.",
-    "search_min_chars":"Voer minstens 2 tekens of een geldige streepjescode in.",
-    "plan_day":"Dag om te plannen","today":"Vandaag","tomorrow":"Morgen",
-    "morning_plan":"Goedemorgen! Stel het type dag en het verwachte activiteitsniveau in om je maaltijden te plannen.",
-    "day_type":"Type dag","activity_expected":"Verwachte activiteit","save_day_plan":"💾 Dagplan opslaan",
-    "weight_value":"Gewicht (kg)","edit_weight":"✏️ Gewicht bewerken","delete_weight":"🗑️ Gewicht verwijderen",
-    "recipes_title":"🍲 Recepten","search_ingredient":"🔍 Ingrediënt zoeken",
-    "bike_type":"Type fiets","normal_bike":"Normale fiets","ebike":"E-bike (elektrisch)",
-})
-
-
-# Français
-translations["Français"] = {
-    "t1": "🚀 Saisie",
-    "t2": "📊 Vue d’ensemble",
-    "t3": "📈 Poids",
-    "t4": "⚡ Saisie rapide",
-    "t5": "🏃 Activité",
-    "meal": "Type de repas",
-    "meal_name": "Nom du repas",
-    "add_meal": "Ajouter le repas",
-    "extra_act": "Activité supplémentaire",
-    "extra_cals": "Calories supplémentaires brûlées",
-    "insert_weight": "Saisir le poids (kg)",
-    "save_weight": "Enregistrer le poids",
-    "recipe_name": "Nom de la recette",
-    "save_recipe": "Enregistrer la recette",
-    "recipe_saved": "✅ Recette enregistrée !",
-    "lang_label": "🌐 Langue",
-    "logout": "🚪 Déconnexion",
-    "search_food": "🔍 Rechercher par nom ou code-barres",
-    "search_btn": "🚀 Rechercher",
-    "select_db": "Sélectionner dans la base de données",
-    "select_recipe": "Sélectionner une recette",
-    "no_recipes": "Aucune recette enregistrée.",
-    "calc_mode": "Saisie basée sur :",
-    "per_100g": "Pour 100 g",
-    "per_portion": "Par portion",
-    "qty_label": "Quantité (g ou portions)",
-    "num_portions": "Nombre de portions",
-    "kcal": "Kcal",
-    "pro": "Protéines (g)",
-    "carbs": "Glucides (g)",
-    "fat": "Lipides (g)",
-    "inserted": "✅ Ajouté",
-    "daily_summary": "📊 Résumé journalier",
-    "summary_date": "📅 Date du résumé",
-    "logged_foods": "🍽️ Aliments enregistrés",
-    "del_meal": "Sélectionner un repas à supprimer",
-    "del_meal_btn": "🗑️ Supprimer le repas sélectionné",
-    "meal_del_success": "Repas supprimé avec succès !",
-    "no_meals": "Aucun repas enregistré pour cette date.",
-    "burned_acts": "#### 🏃 Calories brûlées & activités",
-    "weight_tracking": "⚖️ Suivi du poids",
-    "log_today_weight": "📥 Enregistrer le poids d’aujourd’hui",
-    "update_target": "🎯 Mettre à jour l’objectif",
-    "save_target": "Enregistrer l’objectif",
-    "target_updated": "✅ Objectif mis à jour !",
-    "quick_entries": "⚡ Saisies rapides",
-    "saved_entries": "📋 Éléments enregistrés",
-    "del_quick": "🗑️ Supprimer une saisie rapide",
-    "select_quick_del": "Sélectionner la saisie rapide à supprimer",
-    "del_quick_btn": "Supprimer la saisie rapide",
-    "quick_add_title": "➕ Ajouter une nouvelle saisie rapide",
-    "calc_mode_radio": "Mode de calcul",
-    "caption_calc": "ℹ️ *Si vous choisissez « Pour 100 g », saisissez les valeurs pour 100 g. Si vous choisissez « Portion », saisissez les valeurs totales d’une portion.*",
-    "register_activity": "🏃 Enregistrer activité & mouvement",
-    "act_date": "📅 Date",
-    "steps_title": "👣 Pas (Total)",
-    "update_steps": "💾 Mettre à jour les pas",
-    "steps_updated": "Pas mis à jour !",
-    "bike_title": "🚲 Vélo (Session)",
-    "bike_min": "Minutes de vélo",
-    "add_bike": "💾 Ajouter le vélo",
-    "other_act": "🏋️ Autre",
-    "activity_label": "Activité",
-    "add_act_btn": "💾 Ajouter",
-    "tab1_title": "🍽️ Saisie des aliments & repas",
-    "input_source_lbl": "Source de saisie",
-    "opt_off": "🔍 Rechercher en ligne (Open Food Facts)",
-    "opt_quick": "🍳 Saisie rapide",
-    "card_kcal_in": "Kcal consommées",
-    "card_kcal_burn": "Kcal brûlées",
-    "card_balance": "Bilan",
-    "card_weight": "Poids",
-    "in_msg_low": lambda p: f"⚠️ Projection basse ({p} kcal prévues). Mangez davantage !",
-    "in_msg_high": lambda p: f"✅ Bonne projection ({p} kcal estimées en fin de journée).",
-    "burn_msg_yes": lambda e: f"🌟 Bravo ! Vous avez fait une activité supplémentaire (+{e} kcal).",
-    "burn_msg_no": "💡 Aucune activité supplémentaire enregistrée. Pourquoi ne pas bouger un peu ?",
-    "bilancio_ok": "🎯 Parfait, vous êtes dans un bon déficit calorique.",
-    "bilancio_bad": "⚠️ Attention : vous êtes en surplus calorique.",
-    "weight_msg_default": "📈 Continuez ainsi pour atteindre votre objectif.",
-    "weight_msg_val": lambda i, d_ini, t, d_tgt: f"Initial : {i} kg ({d_ini:+.1f}) | Objectif : {t} kg ({d_tgt:+.1f})",
-    "status_move_title": "👣 Statut mouvement",
-    "status_very_active": "🌟 Excellent ! Journée très active.",
-    "status_good": "🚶 Bonne activité, continuez comme ça.",
-    "status_lazy": "🛋️ Journée calme, essayez de bouger davantage.",
-    "in_msg_deficit": lambda target_in, diff: f"🎯 Pour un déficit idéal de 500 kcal (objectif {target_in} kcal), {'il reste' if diff >= 0 else 'vous avez dépassé de'} {abs(diff)} kcal.",
-    "balance_days": lambda d: f"⏳ À ce rythme, environ {d} jours estimés pour atteindre l’objectif.",
-    "balance_surplus": "⚠️ En surplus : impossible d’estimer le nombre de jours jusqu’à l’objectif.",
-    "weight_forecast_title": "🔮 Prévision d’atteinte de l’objectif",
-    "forecast_days": lambda d, date_str: f"🎯 À votre rythme actuel ({d} jours estimés), vous pourriez atteindre votre objectif vers le **{date_str}** !",
-    "forecast_steady": "📉 En maintenant cette tendance, l’objectif se rapproche.",
-    "forecast_flat_up": "💡 La tendance actuelle est stable ou en hausse : la projection temporelle s’active uniquement avec une perte de poids active.",
-
-    # Traductions supplémentaires
-    "no_products": "Aucun produit trouvé. Essayez marque + nom ou un code-barres.",
-    "search_min_chars": "Saisissez au moins 2 caractères ou un code-barres valide.",
-    "plan_day": "Jour à planifier",
-    "today": "Aujourd’hui",
-    "tomorrow": "Demain",
-    "morning_plan": "Bonjour ! Définissez le type de journée et le niveau d’activité prévu pour planifier vos repas.",
-    "day_type": "Type de journée",
-    "activity_expected": "Activité prévue",
-    "save_day_plan": "💾 Enregistrer le plan de la journée",
-    "weight_value": "Poids (kg)",
-    "edit_weight": "✏️ Modifier le poids",
-    "delete_weight": "🗑️ Supprimer le poids",
-    "recipes_title": "🍲 Recettes",
-    "search_ingredient": "🔍 Rechercher un ingrédient",
-    "bike_type": "Type de vélo",
-    "normal_bike": "Vélo classique",
-    "ebike": "Vélo électrique",
-}
-
-
-# Saluti dinamici per fascia oraria.
-translations["Italiano"].update({
-    "greeting_morning": "Buongiorno {name}!",
-    "greeting_afternoon": "Buon pomeriggio {name}!",
-    "greeting_evening": "Buonasera {name}!",
-})
-translations["English"].update({
-    "greeting_morning": "Good morning {name}!",
-    "greeting_afternoon": "Good afternoon {name}!",
-    "greeting_evening": "Good evening {name}!",
-})
-translations["Nederlands"].update({
-    "greeting_morning": "Goedemorgen {name}!",
-    "greeting_afternoon": "Goedemiddag {name}!",
-    "greeting_evening": "Goedenavond {name}!",
-})
-translations["Français"].update({
-    "greeting_morning": "Bonjour {name}!",
-    "greeting_afternoon": "Bon après-midi {name}!",
-    "greeting_evening": "Bonsoir {name}!",
-})
-
-with st.sidebar:
-    # --- INSERIMENTO LOGO ---
-    st.sidebar.image("logo2.png", use_container_width=True)
-    st.markdown("---") # Linea di separazione dopo il logo
-    current_lang = st.selectbox("🌐 Lingua", ["Italiano", "English", "Nederlands", "Français"], key="lang_selector")
-    t = translations[current_lang]
-    
-    pages_map = {
-        t["t1"]: "t1",
-        t["t2"]: "t2",
-        t["t3"]: "t3",
-        t["t4"]: "t4",
-        t["t5"]: "t5"
-    }
-    
-    if "current_page_id" not in st.session_state:
-        st.session_state.current_page_id = "t1"
-
-    for page_name, page_id in pages_map.items():
-        is_active = (st.session_state.current_page_id == page_id)
-        if st.button(page_name, key=f"nav_{page_id}", use_container_width=True, type="primary" if is_active else "secondary"):
-            st.session_state.current_page_id = page_id
-            st.rerun()
-
-    selected_page_id = st.session_state.current_page_id
-    selected_page = t[selected_page_id]
-
-    st.markdown("---")
-    if st.button(t["logout"], use_container_width=True):
-        supabase.auth.sign_out()
-        _cookie_delete(SESSION_COOKIE)
-        st.session_state.clear()
-        st.rerun()
-
-# Su mobile la sidebar parte aperta (initial_sidebar_state="expanded") e viene
-# chiusa dopo la selezione di una tab. I selettori (es. lingua) non la chiudono.
-st.markdown("""
-<script>
-(function () {
-    function isMobile() { return window.innerWidth <= 768; }
-
-    function collapseSidebar() {
-        if (!isMobile()) return;
-        const candidates = [
-            '[data-testid="stSidebarCollapseButton"] button',
-            '[data-testid="stSidebarCollapseButton"]',
-            '[data-testid="collapsedControl"] button',
-            '[data-testid="collapsedControl"]'
-        ];
-        for (const selector of candidates) {
-            const el = document.querySelector(selector);
-            if (el) { el.click(); return; }
-        }
-    }
-
-    document.addEventListener('click', function(event) {
-        if (!isMobile()) return;
-        const sidebar = document.querySelector('[data-testid="stSidebar"]');
-        if (!sidebar || !sidebar.contains(event.target)) return;
-
-        const button = event.target.closest('button');
-        if (!button) return;
-
-        // Consideriamo solo i normali st.button della sidebar, escludendo
-        // il pulsante nativo di apertura/chiusura.
-        const buttons = Array.from(sidebar.querySelectorAll('[data-testid="stButton"] button'));
-        const buttonIndex = buttons.indexOf(button);
-        if (buttonIndex >= 0 && buttonIndex < 5) {
-            setTimeout(collapseSidebar, 180);
-        }
-    }, true);
-})();
-</script>
-""", unsafe_allow_html=True)
-
-# 9. PAGE 1: MEAL LOGGING
-# ==============================================================================
-if selected_page == t["t1"]:
-    log_date = st.date_input("📅 Data", value=date.today())
-    st.subheader(t["tab1_title"])
-
-    recipe_source_label = {
-        "Italiano": "🍲 Ricette",
-        "English": "🍲 Recipes",
-        "Nederlands": "🍲 Recepten",
-    }.get(current_lang, "🍲 Ricette")
-
-    input_source = st.radio(
-        t["input_source_lbl"],
-        [t["opt_off"], t["opt_quick"], recipe_source_label],
-        horizontal=True,
-    )
-
-    is_online = input_source == t["opt_off"]
-    is_quick = input_source == t["opt_quick"]
-    is_recipe = input_source == recipe_source_label
-    v = st.session_state["form_version"]
-
-    if "base_cals" not in st.session_state:
-        st.session_state["base_cals"] = 0.0
-        st.session_state["base_prot"] = 0.0
-        st.session_state["base_carbs"] = 0.0
-        st.session_state["base_fat"] = 0.0
-        st.session_state["m_name"] = ""
-        st.session_state["grams_val"] = 100.0
-        st.session_state["is_per_100g_val"] = True
-
-    def reset_or_update(name="", cals=0, prot=0, carbs=0, fat=0, selected="", grams=100.0,
-                        is_100g=True, note="", category="Casa"):
-        st.session_state["m_name"] = name
-        st.session_state["base_cals"] = float(cals)
-        st.session_state["base_prot"] = float(prot)
-        st.session_state["base_carbs"] = float(carbs)
-        st.session_state["base_fat"] = float(fat)
-        st.session_state["grams_val"] = float(grams)
-        st.session_state["is_per_100g_val"] = bool(is_100g)
-        st.session_state["last_selected"] = selected
-        st.session_state["selected_source_note"] = str(note or "")
-        st.session_state["selected_source_category"] = category if category in MEAL_CATEGORIES else "Casa"
-        st.session_state["form_version"] += 1
-
-    if st.session_state.get("last_source") != input_source:
-        st.session_state["last_source"] = input_source
-        reset_or_update()
-        st.rerun()
-
-    # ------------------------------------------------------------------
-    # A. Open Food Facts
-    # ------------------------------------------------------------------
-    if is_online:
-        search_q = st.text_input(t["search_food"])
-        if st.button(t["search_btn"]):
-            if len(search_q.strip()) >= 2 or search_q.strip().isdigit():
-                with st.spinner("Ricerca in Open Food Facts..."):
-                    st.session_state["api_res"] = search_open_food_facts(search_q)
-                st.session_state["prod_select"] = ""
-                st.session_state["last_selected"] = ""
-                if not st.session_state["api_res"]:
-                    st.info(t["no_products"])
-                st.rerun()
-            else:
-                st.warning(t["search_min_chars"])
-
-        api_res = st.session_state.get("api_res", {})
-        if api_res:
-            sel_prod = st.selectbox(t["select_db"], [""] + list(api_res.keys()), key=f"prod_select_{v}")
-            if sel_prod and sel_prod != st.session_state.get("last_selected"):
-                p_data = api_res[sel_prod]
-                reset_or_update(
-                    p_data.get("name", ""),
-                    p_data.get("calories", 0),
-                    p_data.get("protein", 0),
-                    p_data.get("carbs", 0),
-                    p_data.get("fat", 0),
-                    sel_prod,
-                    100.0,
-                    True,
-                )
-                st.rerun()
-
-    # ------------------------------------------------------------------
-    # B. Immissione rapida = storico meals, NON recipes
-    # ------------------------------------------------------------------
-    elif is_quick:
-        try:
-            quick_entries = get_quick_entries_from_meals()
-            if quick_entries:
-                quick_by_label = {q["label"]: q for q in quick_entries}
-                sel_quick = st.selectbox(
-                    "Seleziona un alimento già utilizzato",
-                    [""] + list(quick_by_label.keys()),
-                    key=f"quick_meal_select_{v}",
-                )
-                if sel_quick and sel_quick != st.session_state.get("last_selected"):
-                    q = quick_by_label[sel_quick]
-                    reset_or_update(
-                        q["name"], q["calories"], q["protein"], q["carbs"], q["fat"],
-                        sel_quick, q["default_quantity"], q["is_per_100g"], q.get("notes", ""), q.get("category", "Casa"),
-                    )
-                    st.rerun()
-            else:
-                st.info("Nessun alimento ancora disponibile. Registra prima un pasto nella Tab 1.")
-        except Exception as e:
-            st.error(f"Errore nel caricamento delle immissioni rapide: {e}")
-
-    # ------------------------------------------------------------------
-    # C. Ricette = meals composti da ingredienti (un solo database)
-    # ------------------------------------------------------------------
-    elif is_recipe:
-        try:
-            recipe_rows = (
-                supabase.table("meals")
-                .select(
-                    "id,date,name,base_name,quantity,is_per_100g,"
-                    "base_calories,base_protein,base_carbs,base_fat,"
-                    "calories,protein,carbs,fat,notes,category,ingredients_json"
-                )
-                .eq("user_id", user_id)
-                .order("date", desc=True)
-                .execute().data
-                or []
-            )
-
-            recipes_dict = {}
-            for r in recipe_rows:
-                if not r.get("ingredients_json"):
-                    continue
-                label = (r.get("base_name") or _clean_meal_name(r.get("name")) or "").strip()
-                if not label or label in recipes_dict:
-                    continue
-                recipes_dict[label] = r
-
-            if recipes_dict:
-                sel_recipe = st.selectbox(
-                    "Seleziona una ricetta",
-                    [""] + sorted(recipes_dict.keys(), key=str.casefold),
-                    key=f"recipe_select_{v}",
-                )
-                if sel_recipe and sel_recipe != st.session_state.get("last_selected"):
-                    r = recipes_dict[sel_recipe]
-                    is_100g = bool(r.get("is_per_100g", True))
-                    reset_or_update(
-                        sel_recipe,
-                        _safe_float(r.get("base_calories") if r.get("base_calories") is not None else r.get("calories")),
-                        _safe_float(r.get("base_protein") if r.get("base_protein") is not None else r.get("protein")),
-                        _safe_float(r.get("base_carbs") if r.get("base_carbs") is not None else r.get("carbs")),
-                        _safe_float(r.get("base_fat") if r.get("base_fat") is not None else r.get("fat")),
-                        sel_recipe,
-                        100.0 if is_100g else 1.0,
-                        is_100g,
-                        r.get("notes", ""),
-                        infer_meal_category(r),
-                    )
-                    st.rerun()
-            else:
-                st.info("Nessuna ricetta composta disponibile. Creane una nella Tab Ricette.")
-        except Exception as e:
-            st.error(f"Errore nel caricamento ricette: {e}")
-
-    if st.session_state.get("selected_source_note"):
-        st.markdown(
-            f"Note {info_badge(st.session_state.get('selected_source_note'), 'Note alimento o ricetta')}",
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-    meal_options = ["Colazione", "Pranzo", "Cena", "Snack"]
-    m_type = st.selectbox(t["meal"], meal_options, key=f"meal_type_input_{v}")
-    name = st.text_input(t["meal_name"], value=st.session_state["m_name"], key=f"input_meal_name_{v}")
-
-    default_category = st.session_state.get("selected_source_category", "Casa")
-    if default_category not in MEAL_CATEGORIES:
-        default_category = "Casa"
-    meal_category = st.selectbox(
-        "Categoria",
-        MEAL_CATEGORIES,
-        index=MEAL_CATEGORIES.index(default_category),
-        key=f"meal_category_{v}",
-        help="Casa = replicabile a casa · Lavoro = pasto aziendale · Ristorante = fuori casa · Una-tantum = evento/non replicabile",
-    )
-
-    meal_notes = st.text_area(
-        "Note (opzionali)",
-        value=st.session_state.get("selected_source_note", ""),
-        placeholder="Es. senza lattosio, marca preferita, preparazione, condimenti...",
-        key=f"meal_notes_{v}",
-        height=80,
-    )
-
-    mode_options = [t["per_100g"], t["per_portion"]]
-    default_index = 0 if st.session_state["is_per_100g_val"] else 1
-    mode = st.radio(
-        t["calc_mode"], mode_options, index=default_index,
-        horizontal=True, key=f"mode_radio_{v}",
-    )
-
-    is_now_100g = mode == t["per_100g"]
-    if is_now_100g != st.session_state["is_per_100g_val"]:
-        st.session_state["is_per_100g_val"] = is_now_100g
-        st.session_state["grams_val"] = 100.0 if is_now_100g else 1.0
-        st.session_state[f"dyn_qty_{v}"] = st.session_state["grams_val"]
-        st.rerun()
-
-    def on_qty_change():
-        st.session_state["grams_val"] = st.session_state.get(f"dyn_qty_{v}", 100.0)
-
-    quantity = st.number_input(
-        t["qty_label"] if mode == t["per_100g"] else t["num_portions"],
-        value=float(st.session_state["grams_val"]),
-        min_value=0.25,
-        step=0.25,
-        key=f"dyn_qty_{v}",
-        on_change=on_qty_change,
-    )
-
-    factor = quantity / 100.0 if mode == t["per_100g"] else quantity
-    meal_display_name = f"{name} ({quantity}{'g' if mode == t['per_100g'] else ' porz.'})"
-
-    final_cals = int(st.session_state["base_cals"] * factor)
-    final_prot = int(st.session_state["base_prot"] * factor)
-    final_carbs = int(st.session_state["base_carbs"] * factor)
-    final_fat = int(st.session_state["base_fat"] * factor)
-
-    c1, c2, c3, c4 = st.columns(4)
-    cals_in = c1.number_input(t["kcal"], value=final_cals, step=1, key=f"meal_kcal_{v}")
-    prot_in = c2.number_input(t["pro"], value=final_prot, step=1, key=f"meal_pro_{v}")
-    carbs_in = c3.number_input(t["carbs"], value=final_carbs, step=1, key=f"meal_carbs_{v}")
-    fat_in = c4.number_input(t["fat"], value=final_fat, step=1, key=f"meal_fat_{v}")
-
-    if st.button(t["add_meal"], use_container_width=True):
-        if not name.strip():
-            st.warning("Inserisci un nome per il pasto.")
-        else:
-            try:
-                # I valori base vengono derivati dai valori finali modificabili,
-                # così eventuali correzioni manuali diventano riutilizzabili.
-                safe_factor = factor if factor > 0 else 1.0
-                insert_meal_with_base_data(
-                    log_date=log_date,
-                    meal_type=m_type,
-                    display_name=meal_display_name,
-                    base_name=name.strip(),
-                    quantity=quantity,
-                    is_per_100g=(mode == t["per_100g"]),
-                    calories=cals_in,
-                    protein=prot_in,
-                    carbs=carbs_in,
-                    fat=fat_in,
-                    base_calories=float(cals_in) / safe_factor,
-                    base_protein=float(prot_in) / safe_factor,
-                    base_carbs=float(carbs_in) / safe_factor,
-                    base_fat=float(fat_in) / safe_factor,
-                    notes=meal_notes,
-                    category=meal_category,
-                    ingredients_json=None,
-                )
-                refresh_daily_logs(log_date)
-                reset_or_update()
-                st.success(f"{t['inserted']}: {meal_display_name} ({cals_in} kcal)")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Errore: {e}")
-
-# ==============================================================================
-# 10. PAGE 2: DAILY OVERVIEW
-# ==============================================================================
-elif selected_page == t["t2"]:
-    st.subheader(t["daily_summary"])
-
-    if "last_nav_page" not in st.session_state or st.session_state.last_nav_page != selected_page:
-        st.session_state.overview_date = date.today()
-        st.session_state.last_nav_page = selected_page
-
-    def update_overview_date():
-        st.session_state.overview_date = st.session_state.get("widget_overview_date", date.today())
-
-    summary_date = st.date_input(
-        t["summary_date"],
-        value=st.session_state.overview_date,
-        key="widget_overview_date",
-        on_change=update_overview_date,
-    )
-
-    try:
-        daily_log_res = supabase.table("daily_logs").select("*").eq("date", str(summary_date)).eq("user_id", user_id).execute().data or []
-        meals_data = supabase.table("meals").select("*").eq("date", str(summary_date)).eq("user_id", user_id).execute().data or []
-        raw_activities = supabase.table("activities").select("activity_name, burned_calories").eq("date", str(summary_date)).eq("user_id", user_id).execute().data or []
-        all_weight_logs = supabase.table("daily_logs").select("weight, date").eq("user_id", user_id).not_.is_("weight", "null").order("date", desc=False).execute().data or []
-    except Exception as e:
-        st.error(f"Errore nel caricamento dati: {e}")
-        daily_log_res, meals_data, raw_activities, all_weight_logs = [], [], [], []
-
-    activities_data = [a for a in raw_activities if a.get("activity_name")] if raw_activities else []
-    total_cals_in = sum(_safe_float(m.get("calories")) for m in meals_data)
-
-    current_weight = daily_log_res[0].get("weight") if daily_log_res else None
-    initial_weight = all_weight_logs[0]["weight"] if all_weight_logs else 89.0
-    target_weight = float(user_target_weight) if user_target_weight else 78.0
-
-    now = datetime.now()
-    if summary_date == date.today():
-        minutes_passed = max(60, now.hour * 60 + now.minute)
-        bmr_so_far = int((float(user_bmr) / (24 * 60)) * minutes_passed)
-    else:
-        bmr_so_far = int(float(user_bmr))
-        minutes_passed = 1440
-
-    extra_burned = sum(_safe_float(a.get("burned_calories")) for a in activities_data)
-    total_burned_finora = bmr_so_far + extra_burned
-    deficit = total_cals_in - total_burned_finora
-
-    total_estimated_burned = float(user_bmr) + extra_burned
-    ideal_target_cals = max(0, total_estimated_burned - 500)
-    diff_from_ideal = ideal_target_cals - total_cals_in
-
-    coral_light_bg, coral_border = "#FFF5F5", "#FF8B8B"
-
-    # Messaggi cards più immediati.
-    if diff_from_ideal > 0:
-        in_msg = (
-            f"🎯 Puoi mangiare ancora <b>{int(round(diff_from_ideal))} kcal</b> "
-            f"per chiudere la giornata con circa 500 kcal di deficit."
-        )
-    elif diff_from_ideal < 0:
-        in_msg = (
-            f"⚠️ Sei oltre il target da deficit di circa "
-            f"<b>{abs(int(round(diff_from_ideal)))} kcal</b>."
-        )
-    else:
-        in_msg = "🎯 Sei esattamente sul target per un deficit di circa 500 kcal."
-
-    # Proiezione semplice e conservativa:
-    # BMR completo della giornata + attività già registrate.
-    # Non inventiamo attività future.
-    projected_burn_end_day = int(round(float(user_bmr) + extra_burned))
-
-    if summary_date == date.today():
-        burn_msg = (
-            f"🔮 Fine giornata: <b>~{projected_burn_end_day} kcal</b> "
-            f"se non registri altra attività."
-        )
-    else:
-        burn_msg = (
-            f"🔥 Totale giornata: <b>{int(round(total_burned_finora))} kcal</b>."
-        )
-
-    weight_to_lose = (float(current_weight) if current_weight else float(initial_weight)) - target_weight
-    if deficit < 0 and weight_to_lose > 0:
-        daily_deficit_abs = abs(deficit)
-        total_kcal_needed = weight_to_lose * 7700
-        estimated_days = int(total_kcal_needed / daily_deficit_abs) if daily_deficit_abs > 0 else 0
-        bilancio_msg = t["balance_days"](estimated_days)
-    elif weight_to_lose <= 0:
-        bilancio_msg = "🎯 Target di peso raggiunto o superato!"
-    else:
-        bilancio_msg = t["balance_surplus"]
-
-    weight_msg = t["weight_msg_default"]
-    if current_weight:
-        diff_ini = float(current_weight) - float(initial_weight)
-        diff_tgt = float(current_weight) - target_weight
-        weight_msg = t["weight_msg_val"](initial_weight, diff_ini, target_weight, diff_tgt)
-
-    st.markdown(f"""
-        <style>
-            .custom-card {{
-                background-color: {coral_light_bg};
-                border: 1.5px solid {coral_border};
-                border-radius: 16px;
-                padding: 16px;
-                height: 100%;
-                box-shadow: 0 2px 6px rgba(255, 139, 139, 0.08);
-            }}
-            .custom-card-title {{ font-size: .95rem; font-weight: 600; color: #1A2942; margin-bottom: 4px; }}
-            .custom-card-value {{ font-size: 1.8rem; font-weight: 700; color: #1A2942; margin-bottom: 8px; }}
-            .custom-card-caption {{ font-size: .86rem; color: #4A4A4A; line-height: 1.42; }}
-        </style>
-    """, unsafe_allow_html=True)
-
-    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-    with col_c1:
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">🍽️ {t["card_kcal_in"]}</div><div class="custom-card-value">{int(total_cals_in)} kcal</div><div class="custom-card-caption">{in_msg}</div></div>', unsafe_allow_html=True)
-    with col_c2:
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">🔥 {t["card_kcal_burn"]}</div><div class="custom-card-value">{int(total_burned_finora)} kcal</div><div class="custom-card-caption">{burn_msg}</div></div>', unsafe_allow_html=True)
-    with col_c3:
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">⚖️ {t["card_balance"]}</div><div class="custom-card-value">{int(deficit):+d} kcal</div><div class="custom-card-caption">{bilancio_msg}</div></div>', unsafe_allow_html=True)
-    with col_c4:
-        weight_str = f"{float(current_weight):.1f} kg" if current_weight else "N/D"
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">📉 {t["card_weight"]}</div><div class="custom-card-value">{weight_str}</div><div class="custom-card-caption">{weight_msg}</div></div>', unsafe_allow_html=True)
-
-    # ------------------------------------------------------------------
-    # PIANIFICAZIONE DELLA GIORNATA E SUGGERIMENTI PASTI
-    # ------------------------------------------------------------------
-    if summary_date == date.today():
-        with st.container(border=True):
-            st.markdown("### 🧭 Piano della giornata")
-
-            plan_day_label = st.selectbox(t["plan_day"], [t["today"], t["tomorrow"]], index=0, key="overview_plan_day")
-            # Non confrontare mai l'etichetta localizzata con "Oggi":
-            # in NL/EN/FR il testo cambia. Usiamo la chiave tradotta.
-            # Inoltre date + Timedelta restituisce già una data compatibile:
-            # chiamare .date() qui può generare AttributeError.
-            plan_date = (
-                date.today()
-                if plan_day_label == t["today"]
-                else date.today() + pd.Timedelta(days=1)
-            )
-            if now.hour < 12:
-                st.info(t["morning_plan"])
-            else:
-                st.caption("Puoi aggiornare il piano della giornata anche dopo la mattina.")
-
-            saved_day_type = None
-            saved_activity = None
-            try:
-                plan_log = (
-                    supabase.table("daily_logs").select("id,day_type,activity_plan")
-                    .eq("user_id", user_id).eq("date", str(plan_date)).execute().data or []
-                )
-                if plan_log:
-                    saved_day_type = plan_log[0].get("day_type")
-                    saved_activity = plan_log[0].get("activity_plan")
-            except Exception:
-                plan_log = []
-
-            day_types = ["Lavoro da casa", "Ufficio", "Giornata libera"]
-            activity_types = ["Riposo", "Moderatamente attiva", "Attiva"]
-
-            default_day = saved_day_type or st.session_state.get("day_plan_type", "Lavoro da casa")
-            default_activity = saved_activity or st.session_state.get("day_plan_activity", "Riposo")
-            if default_day not in day_types: default_day = day_types[0]
-            if default_activity not in activity_types: default_activity = activity_types[0]
-
-            pc1, pc2 = st.columns(2)
-            with pc1:
-                day_type = st.selectbox(t["day_type"], day_types, index=day_types.index(default_day), key=f"overview_day_type_{plan_date}")
-            with pc2:
-                activity_plan = st.selectbox(t["activity_expected"], activity_types, index=activity_types.index(default_activity), key=f"overview_activity_plan_{plan_date}")
-
-            st.session_state["day_plan_type"] = day_type
-            st.session_state["day_plan_activity"] = activity_plan
-
-            if st.button(t["save_day_plan"], key="save_day_plan", use_container_width=True):
-                try:
-                    existing = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("date", str(plan_date)).execute().data or []
-                    payload_plan = {"day_type": day_type, "activity_plan": activity_plan}
-                    if existing:
-                        supabase.table("daily_logs").update(payload_plan).eq("id", existing[0]["id"]).execute()
-                    else:
-                        supabase.table("daily_logs").insert({"user_id": user_id, "date": str(plan_date), **payload_plan}).execute()
-                    st.success(f"✅ Piano salvato per {plan_date.strftime('%d/%m/%Y')}.")
-                except Exception:
-                    st.info("Il piano resta attivo in questa sessione. Esegui la migrazione SQL aggiornata per renderlo persistente.")
-
-            # Valori rappresentativi per la pianificazione:
-            # Riposo 0 kcal extra, Moderatamente attiva 500, Attiva 1000.
-            activity_bonus = {"Riposo": 0, "Moderatamente attiva": 500, "Attiva": 1000}[activity_plan]
-            daily_budget = float(user_bmr) + activity_bonus
-
-            try:
-                plan_meals = (
-                    supabase.table("meals")
-                    .select("meal_type,calories,category,name,base_name")
-                    .eq("user_id", user_id).eq("date", str(plan_date)).execute().data or []
-                )
-            except Exception:
-                plan_meals = []
-
-            is_today_plan = plan_date == date.today()
-            lunch_logged = any(
-                str(m.get("meal_type", "")).casefold() == "pranzo"
-                for m in plan_meals
-            )
-            calories_already_logged = sum(_safe_float(m.get("calories")) for m in plan_meals)
-
-            # Se oggi il pranzo è già loggato, suggeriamo esclusivamente la cena.
-            if is_today_plan and lunch_logged:
-                dinner_target = max(0.0, daily_budget - calories_already_logged)
-                st.markdown(
-                    f"**Budget stimato:** {daily_budget:.0f} kcal · "
-                    f"**Già registrato oggi:** {calories_already_logged:.0f} kcal · "
-                    f"**Cena disponibile:** circa {dinner_target:.0f} kcal"
-                )
-                dinner = closest_logged_meal(
-                    "Cena",
-                    dinner_target,
-                    allowed_categories={"Casa", "Ristorante"},
-                )
-                if dinner:
-                    st.markdown(
-                        f"🍽️ **Cena suggerita:** {html.escape(dinner['name'])} — "
-                        f"**{dinner['calories']:.0f} kcal** · {dinner['category']} "
-                        f"{info_badge(dinner.get('notes'), 'Note cena')}",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.caption("Nessuna cena replicabile nello storico abbastanza vicina al target.")
-
-            elif day_type == "Ufficio":
-                fixed_kcal = 1260.0
-                dinner_target = max(0.0, daily_budget - fixed_kcal)
-                st.markdown(
-                    f"**Budget stimato:** {daily_budget:.0f} kcal · "
-                    f"**Ufficio già allocato:** 1260 kcal · "
-                    f"**Cena:** circa {dinner_target:.0f} kcal"
-                )
-
-                # Se serve consultare un pranzo da ufficio, l'unica categoria ammessa è Lavoro.
-                office_lunch = closest_logged_meal(
-                    "Pranzo",
-                    1260.0,
-                    allowed_categories={"Lavoro"},
-                )
-                if office_lunch:
-                    st.caption(
-                        f"Pranzo ufficio nello storico: {office_lunch['name']} "
-                        f"({office_lunch['calories']:.0f} kcal)."
-                    )
-
-                dinner = closest_logged_meal(
-                    "Cena",
-                    dinner_target,
-                    allowed_categories={"Casa", "Ristorante"},
-                )
-                if dinner:
-                    st.markdown(
-                        f"🍽️ **Cena suggerita:** {html.escape(dinner['name'])} — "
-                        f"circa **{dinner['calories']:.0f} kcal** · {dinner['category']} "
-                        f"{info_badge(dinner.get('notes'), 'Note cena')}",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.caption("Non ho ancora abbastanza cene replicabili nello storico.")
-
-            else:
-                if day_type == "Lavoro da casa":
-                    already_allocated = 185.0
-                    allocated_label = "colazione da casa"
-                else:
-                    breakfast_logged = sum(
-                        _safe_float(m.get("calories"))
-                        for m in plan_meals
-                        if str(m.get("meal_type", "")).casefold() == "colazione"
-                    )
-                    already_allocated = breakfast_logged
-                    allocated_label = (
-                        "colazione già registrata"
-                        if breakfast_logged
-                        else "nessuna quota fissa"
-                    )
-
-                remaining = max(0.0, daily_budget - already_allocated)
-                per_meal = remaining / 2.0
-                st.markdown(
-                    f"**Budget stimato:** {daily_budget:.0f} kcal · "
-                    f"**{allocated_label}:** {already_allocated:.0f} kcal · "
-                    f"**Pranzo:** ~{per_meal:.0f} kcal · **Cena:** ~{per_meal:.0f} kcal"
-                )
-
-                # A casa/libero: pranzo solo Casa. Ristorante mai a pranzo.
-                lunch = closest_logged_meal(
-                    "Pranzo",
-                    per_meal,
-                    allowed_categories={"Casa"},
-                )
-                # Cena replicabile: Casa o Ristorante.
-                dinner = closest_logged_meal(
-                    "Cena",
-                    per_meal,
-                    allowed_categories={"Casa", "Ristorante"},
-                )
-
-                sc1, sc2 = st.columns(2)
-                with sc1:
-                    if lunch:
-                        st.markdown(
-                            f"🥗 **Pranzo suggerito**<br>{html.escape(lunch['name'])} · "
-                            f"**{lunch['calories']:.0f} kcal** · {lunch['category']} "
-                            f"{info_badge(lunch.get('notes'), 'Note pranzo')}",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.caption("Nessun pranzo Casa replicabile disponibile nello storico.")
-                with sc2:
-                    if dinner:
-                        st.markdown(
-                            f"🍽️ **Cena suggerita**<br>{html.escape(dinner['name'])} · "
-                            f"**{dinner['calories']:.0f} kcal** · {dinner['category']} "
-                            f"{info_badge(dinner.get('notes'), 'Note cena')}",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.caption("Nessuna cena replicabile disponibile nello storico.")
-
-            st.caption("Per la pianificazione uso +0 kcal (riposo), +500 kcal (moderatamente attiva), +1000 kcal (attiva). La soglia osservata nel grafico resta: riposo <300 kcal extra, attività intensa ≥800 kcal.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    with st.container(border=True):
-        st.markdown(f"### {t['logged_foods']}")
-        if meals_data:
-            try:
-                meals_with_id = (
-                    supabase.table("meals")
-                    .select(
-                        "id,meal_type,name,base_name,quantity,is_per_100g,"
-                        "base_calories,base_protein,base_carbs,base_fat,"
-                        "calories,protein,carbs,fat,notes,category"
-                    )
-                    .eq("date", str(summary_date))
-                    .eq("user_id", user_id)
-                    .execute()
-                    .data
-                    or []
-                )
-            except Exception:
-                # Compatibilità con eventuali righe/schema legacy.
-                meals_with_id = (
-                    supabase.table("meals")
-                    .select("id,meal_type,name,calories,protein,carbs,fat")
-                    .eq("date", str(summary_date))
-                    .eq("user_id", user_id)
-                    .execute()
-                    .data
-                    or []
-                )
-
-            df_meals = pd.DataFrame(meals_with_id)
-            df_display = df_meals.rename(columns={
-                "meal_type": "Pasto", "name": "Nome", "calories": "Kcal",
-                "protein": "Pro (g)", "carbs": "Carbs (g)", "fat": "Fat (g)", "category": "Categoria",
+            st.caption("Non ci sono obiettivi compatibili disponibili per questo ruolo.")
+
+    # Classifica portieri solo quando almeno un portiere è stato acquistato.
+    ranking = build_current_goalkeeper_ranking(state)
+    if counts.get("P", 0) > 0 and ranking:
+        goalkeeper_rows = []
+        for code, position in sorted(ranking.items(), key=lambda item: item[1]):
+            goalkeeper_rows.append({
+                "Pos.": position,
+                "Squadra": code,
+                "Gol subiti": GOALS_CONCEDED.get(code, 0),
+                "Mod. P": GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0),
             })
-            df_display["Categoria"] = [infer_meal_category(m) for m in meals_with_id]
+        with st.expander("🧤 Strategia portieri / difese scelte"):
             st.dataframe(
-                df_display[["Pasto", "Categoria", "Nome", "Kcal", "Pro (g)", "Carbs (g)", "Fat (g)"]],
+                pd.DataFrame(goalkeeper_rows),
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "Mod. P": st.column_config.NumberColumn(format="%+.1f"),
+                },
             )
 
-            meal_by_id = {m["id"]: m for m in meals_with_id}
-            meal_options = {
-                m["id"]: f"{m.get('meal_type', '')} - {m.get('name', '')} ({m.get('calories', 0)} kcal)"
-                for m in meals_with_id
+
+def render_my_roster(
+    state: AuctionState,
+) -> None:
+    """Mostra la rosa RCD Escanyol divisa P-D-C-A."""
+    team_name = resolve_my_team_name(list(state.team_players_map))
+
+    st.markdown('<div class="rcd-section">👕 Rosa RCD Escanyol</div>', unsafe_allow_html=True)
+    if team_name is None:
+        st.warning(
+            "⚠️ La squadra **RCD Escanyol** non è presente tra le squadre configurate."
+        )
+        return
+
+    players = state.team_players_map.get(team_name, [])
+    if not players:
+        st.info("La rosa è ancora vuota.")
+        return
+
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+    purchases = state.team_purchases_map.get(team_name, [])
+    purchase_by_player = {
+        purchase.get("players", {}).get("id"): purchase
+        for purchase in purchases
+        if purchase.get("players")
+    }
+
+    # In build_auction_state players e purchases provengono dalla stessa query,
+    # quindi usiamo anche la posizione per sicurezza nel caso l'id non sia presente.
+    rows_by_role = {role: [] for role in ["P", "D", "C", "A"]}
+    for player in players:
+        details = calculate_player_rating_detailed(
+            player,
+            st.session_state.preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        purchase = purchase_by_player.get(player.get("id"), {})
+        manual_value = details.get("custom_mod", 0.0)
+        manual_label = details.get("custom_label", "Nessuna modifica")
+        bonus_malus = (
+            f"{manual_label} ({manual_value:+.1f})"
+            if manual_value
+            else "—"
+        )
+        rows_by_role.setdefault(player.get("role", "D"), []).append(
+            {
+                "Nome": player.get("name", ""),
+                "Rating": details["final_rating"],
+                "Fascia": get_roster_tier(details["final_rating"]),
+                "Squadra": player.get("team_nfl", "—"),
+                "Crediti Spesi": int(purchase.get("purchase_price") or 0),
+                "Crediti Dichiarati": int(player.get("list_price") or 0),
+                "Moltiplicatore Asta": round(
+                    int(purchase.get("purchase_price") or 0) / max(1, int(player.get("list_price") or 0)),
+                    2,
+                ),
+                "Bonus/Malus": bonus_malus,
+                "_sort_rating": details["final_rating"],
             }
-            selected_meal_id = st.selectbox(
-                "🍽️ Seleziona il pasto da modificare",
-                options=[""] + list(meal_options),
-                format_func=lambda meal_id: "Seleziona un pasto..." if meal_id == "" else meal_options[meal_id],
-                key=f"edit_meal_select_{summary_date}",
-            )
-
-            if selected_meal_id:
-                selected_meal = meal_by_id[selected_meal_id]
-                meal_types = ["Colazione", "Pranzo", "Cena", "Snack"]
-                current_type = selected_meal.get("meal_type")
-                current_index = meal_types.index(current_type) if current_type in meal_types else 0
-
-                if selected_meal.get("notes"):
-                    st.markdown(f"Note {info_badge(selected_meal.get('notes'), 'Note pasto')}", unsafe_allow_html=True)
-
-                current_category = infer_meal_category(selected_meal)
-
-                # Quantità corrente. Le righe nuove hanno quantity/is_per_100g;
-                # quelle legacy vengono trattate come una porzione singola.
-                current_quantity = _safe_float(selected_meal.get("quantity"))
-                if current_quantity <= 0:
-                    current_quantity = 1.0
-
-                is_per_100g = bool(selected_meal.get("is_per_100g"))
-
-                # Se il meal è per 100 g, la quantità è espressa in grammi.
-                # Se è per porzione, la quantità rappresenta il numero di porzioni.
-                if is_per_100g:
-                    quantity_label = "Quantità (g)"
-                    quantity_step = 1.0
-                    quantity_unit = "g"
-                else:
-                    quantity_label = "Porzioni"
-                    quantity_step = 0.1
-                    quantity_unit = "porz."
-
-                edit_col1, edit_col2, edit_col3 = st.columns([2, 2, 2])
-                with edit_col1:
-                    new_meal_type = st.selectbox(
-                        "Tipo di pasto",
-                        meal_types,
-                        index=current_index,
-                        key=f"edit_meal_type_{selected_meal_id}_{summary_date}",
-                    )
-                with edit_col2:
-                    new_meal_category = st.selectbox(
-                        "Categoria",
-                        MEAL_CATEGORIES,
-                        index=MEAL_CATEGORIES.index(current_category),
-                        key=f"edit_meal_category_{selected_meal_id}_{summary_date}",
-                    )
-                with edit_col3:
-                    new_quantity = st.number_input(
-                        quantity_label,
-                        min_value=0.1,
-                        value=float(current_quantity),
-                        step=quantity_step,
-                        key=f"edit_meal_quantity_{selected_meal_id}_{summary_date}",
-                    )
-
-                st.caption(
-                    "Puoi modificare sia i grammi sia il numero di porzioni, "
-                    "a seconda di come il pasto è stato salvato. "
-                    "Kcal e macronutrienti vengono ricalcolati automaticamente."
-                )
-
-                if st.button(
-                    "💾 Salva modifiche",
-                    use_container_width=True,
-                    key=f"save_meal_edit_{selected_meal_id}_{summary_date}",
-                ):
-                    try:
-                        old_quantity = float(current_quantity)
-                        new_quantity = float(new_quantity)
-
-                        base_calories = selected_meal.get("base_calories")
-                        base_protein = selected_meal.get("base_protein")
-                        base_carbs = selected_meal.get("base_carbs")
-                        base_fat = selected_meal.get("base_fat")
-
-                        has_base_values = base_calories is not None
-
-                        if has_base_values:
-                            factor = (
-                                new_quantity / 100.0
-                                if is_per_100g
-                                else new_quantity
-                            )
-                            new_calories = _safe_float(base_calories) * factor
-                            new_protein = _safe_float(base_protein) * factor
-                            new_carbs = _safe_float(base_carbs) * factor
-                            new_fat = _safe_float(base_fat) * factor
-                        else:
-                            # Legacy: mantiene le proporzioni del record attuale.
-                            scale = (
-                                new_quantity / old_quantity
-                                if old_quantity > 0
-                                else 1.0
-                            )
-                            new_calories = _safe_float(selected_meal.get("calories")) * scale
-                            new_protein = _safe_float(selected_meal.get("protein")) * scale
-                            new_carbs = _safe_float(selected_meal.get("carbs")) * scale
-                            new_fat = _safe_float(selected_meal.get("fat")) * scale
-
-                        base_name = (
-                            selected_meal.get("base_name")
-                            or _clean_meal_name(selected_meal.get("name"))
-                            or "Pasto"
-                        )
-
-                        if is_per_100g:
-                            new_display_name = f"{base_name} ({new_quantity:g}g)"
-                        else:
-                            new_display_name = f"{base_name} ({new_quantity:g} porz.)"
-
-                        update_payload = {
-                            "meal_type": new_meal_type,
-                            "category": new_meal_category,
-                            "name": new_display_name,
-                            "calories": int(round(new_calories)),
-                            "protein": int(round(new_protein)),
-                            "carbs": int(round(new_carbs)),
-                            "fat": int(round(new_fat)),
-                        }
-
-                        # Solo schema esteso.
-                        if selected_meal.get("quantity") is not None:
-                            update_payload["quantity"] = new_quantity
-
-                        supabase.table("meals").update(
-                            update_payload
-                        ).eq("id", selected_meal_id).eq(
-                            "user_id", user_id
-                        ).execute()
-
-                        refresh_daily_logs(summary_date)
-
-                        st.success(
-                            f"✅ Pasto aggiornato: **{new_meal_type} · "
-                            f"{new_meal_category} · {new_quantity:g} "
-                            f"{quantity_unit}**."
-                        )
-                        st.rerun()
-
-                    except Exception as e:
-                        st.error(f"Errore nella modifica del pasto: {e}")
-
-                st.markdown("---")
-                delete_col1, delete_col2 = st.columns([3, 1])
-                with delete_col1:
-                    st.caption(f"Elimina definitivamente **{selected_meal.get('name', 'questo pasto')}** se non vuoi più conservarlo.")
-                with delete_col2:
-                    if st.button(t["del_meal_btn"], key=f"delete_meal_{selected_meal_id}_{summary_date}", use_container_width=True):
-                        try:
-                            supabase.table("meals").delete().eq("id", selected_meal_id).eq("user_id", user_id).execute()
-                            st.success(t["meal_del_success"])
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Errore nell'eliminazione del pasto: {e}")
-        else:
-            st.info(t["no_meals"])
-
-    with st.container(border=True):
-        st.markdown(t["burned_acts"])
-        rows_acts = [{"Attività": "BMR (Base)", "Kcal Bruciate": bmr_so_far}]
-        for act in activities_data:
-            rows_acts.append({"Attività": act.get("activity_name"), "Kcal Bruciate": act.get("burned_calories")})
-        st.dataframe(pd.DataFrame(rows_acts), use_container_width=True, hide_index=True)
-
-# 11. PAGE 3: WEIGHT TRACKING / ANALYTICS
-# ==============================================================================
-elif selected_page == t["t3"]:
-    st.subheader(t["weight_tracking"])
-
-    # Se un peso è appena stato salvato, riproduci il relativo feedback sonoro.
-    render_pending_weight_sound()
-
-    with st.container(border=True):
-        st.markdown("#### ⚖️ Gestione pesi")
-        logs_all = (
-            supabase.table("daily_logs").select("id, date, weight").eq("user_id", user_id)
-            .not_.is_("weight", "null").order("date", desc=True).execute().data or []
-        )
-        edit_options = {str(r["id"]): f"{r['date']} · {float(r['weight']):.1f} kg" for r in logs_all}
-
-        c1, c2 = st.columns(2)
-        with c1:
-            w = st.number_input("Nuovo peso (kg)", value=80.0, min_value=20.0, max_value=300.0, step=0.1, key="new_weight_value")
-            w_date = st.date_input("Data del peso", value=date.today(), key="new_weight_date")
-            if st.button("💾 Salva peso", use_container_width=True):
-                try:
-                    # Cerchiamo il peso cronologicamente precedente alla data
-                    # che stiamo registrando. Un eventuale peso già presente
-                    # nello stesso giorno non viene usato come confronto.
-                    previous_rows = []
-                    for row in logs_all:
-                        try:
-                            row_date = pd.to_datetime(row.get("date")).date()
-                            if row_date < w_date and row.get("weight") is not None:
-                                previous_rows.append((row_date, float(row["weight"])))
-                        except Exception:
-                            continue
-
-                    previous_weight = None
-                    if previous_rows:
-                        previous_rows.sort(key=lambda item: item[0], reverse=True)
-                        previous_weight = previous_rows[0][1]
-
-                    # Decidiamo il suono PRIMA del salvataggio, ma lo accodiamo
-                    # solo dopo che Supabase conferma il successo.
-                    sound_to_play = None
-                    if previous_weight is not None:
-                        delta_weight = float(w) - float(previous_weight)
-
-                        # Perdita > 0.5 kg
-                        if delta_weight < -0.5:
-                            sound_to_play = WEIGHT_SOUND_BIG_LOSS
-
-                        # Perdita da 0.5 kg fino a peso invariato incluso
-                        elif delta_weight <= 0:
-                            sound_to_play = WEIGHT_SOUND_SMALL_LOSS
-
-                        # Aumento di peso
-                        else:
-                            sound_to_play = WEIGHT_SOUND_GAIN
-
-                    supabase.table("daily_logs").upsert(
-                        {
-                            "user_id": user_id,
-                            "date": str(w_date),
-                            "weight": float(w),
-                        },
-                        on_conflict="user_id,date",
-                    ).execute()
-
-                    if sound_to_play is not None:
-                        st.session_state["pending_weight_sound"] = str(sound_to_play)
-
-                    st.success("✅ Peso salvato!")
-                    st.rerun()
-
-                except Exception as e:
-                    st.error(f"Errore nel salvataggio del peso: {e}")
-
-        with c2:
-            selected_weight_id = st.selectbox(
-                "Peso da modificare o eliminare",
-                [""] + list(edit_options),
-                format_func=lambda x: "Seleziona un peso..." if x == "" else edit_options[x],
-                key="weight_edit_selector",
-            )
-            if selected_weight_id:
-                selected_row = next(r for r in logs_all if str(r["id"]) == selected_weight_id)
-                ew1, ew2 = st.columns(2)
-                with ew1:
-                    edited_date = st.date_input("Data", value=pd.to_datetime(selected_row["date"]).date(), key=f"edit_weight_date_{selected_weight_id}")
-                with ew2:
-                    edited_weight = st.number_input(t["weight_value"], value=float(selected_row["weight"]), min_value=20.0, max_value=300.0, step=0.1, key=f"edit_weight_value_{selected_weight_id}")
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button(t["edit_weight"], use_container_width=True, key=f"update_weight_{selected_weight_id}"):
-                        try:
-                            if str(edited_date) != str(selected_row["date"]):
-                                supabase.table("daily_logs").delete().eq("id", selected_row["id"]).eq("user_id", user_id).execute()
-                                supabase.table("daily_logs").upsert(
-                                    {"user_id": user_id, "date": str(edited_date), "weight": float(edited_weight)},
-                                    on_conflict="user_id,date",
-                                ).execute()
-                            else:
-                                supabase.table("daily_logs").update({"weight": float(edited_weight)}).eq("id", selected_row["id"]).eq("user_id", user_id).execute()
-                            st.success("✅ Peso modificato!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Errore nella modifica: {e}")
-                with b2:
-                    if st.button(t["delete_weight"], use_container_width=True, key=f"delete_weight_{selected_weight_id}"):
-                        try:
-                            # Non cancelliamo l'intera riga se contiene passi o piano giornata:
-                            # azzeriamo solo weight. Se la riga ha solo il peso, Supabase
-                            # conserverà una riga innocua con weight NULL.
-                            supabase.table("daily_logs").update({"weight": None}).eq("id", selected_row["id"]).eq("user_id", user_id).execute()
-                            st.success("✅ Peso cancellato.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Errore nella cancellazione: {e}")
-
-    with st.container(border=True):
-        st.markdown(f"#### {t['update_target']}")
-        new_target = st.number_input(
-            "Peso Obiettivo (kg)",
-            value=float(user_target_weight) if user_target_weight else 75.0,
-            min_value=20.0, max_value=300.0, step=0.5,
-            key="weight_target_edit",
-        )
-        if st.button(t["save_target"], use_container_width=True):
-            try:
-                res = supabase.auth.update_user({"data": {"target_weight": float(new_target)}})
-                if res.user:
-                    st.session_state["user"] = res.user
-                st.success(t["target_updated"])
-                st.rerun()
-            except Exception as e:
-                st.error(f"Errore: {e}")
-
-    # ------------------------------------------------------------------
-    # KPI ULTIMI 30 GIORNI
-    # ------------------------------------------------------------------
-    try:
-        month_end = pd.Timestamp(date.today())
-        month_start = month_end - pd.Timedelta(days=29)
-
-        month_weights_rows = (
-            supabase.table("daily_logs").select("date, weight").eq("user_id", user_id)
-            .gte("date", str(month_start.date())).lte("date", str(month_end.date()))
-            .not_.is_("weight", "null").order("date", desc=False).execute().data or []
-        )
-        month_meals_rows = (
-            supabase.table("meals").select("date, calories").eq("user_id", user_id)
-            .gte("date", str(month_start.date())).lte("date", str(month_end.date()))
-            .execute().data or []
-        )
-        month_acts_rows = (
-            supabase.table("activities").select("date, burned_calories").eq("user_id", user_id)
-            .gte("date", str(month_start.date())).lte("date", str(month_end.date()))
-            .execute().data or []
         )
 
-        mw = pd.DataFrame(month_weights_rows)
-        mm = pd.DataFrame(month_meals_rows)
-        ma = pd.DataFrame(month_acts_rows)
+    role_titles = {
+        "P": "🧤 Portieri",
+        "D": "🛡️ Difensori",
+        "C": "🎯 Centrocampisti",
+        "A": "⚡ Attaccanti",
+    }
 
-        weight_lost_30 = None
-        latest_weight_30 = None
-        if not mw.empty and len(mw) >= 2:
-            mw["date"] = pd.to_datetime(mw["date"])
-            mw["weight"] = pd.to_numeric(mw["weight"], errors="coerce")
-            mw = mw.dropna().sort_values("date")
-            if len(mw) >= 2:
-                first_w = float(mw.iloc[0]["weight"])
-                latest_weight_30 = float(mw.iloc[-1]["weight"])
-                weight_lost_30 = first_w - latest_weight_30
-        elif not mw.empty:
-            latest_weight_30 = float(pd.to_numeric(mw.iloc[-1]["weight"], errors="coerce"))
-
-        # Deficit calcolato solo sui giorni in cui esiste almeno un pasto registrato,
-        # così un giorno senza logging non viene interpretato come un enorme deficit.
-        total_deficit_30 = 0.0
-        valid_deficit_days = 0
-        avg_daily_deficit_30 = None
-        if not mm.empty:
-            mm["date"] = pd.to_datetime(mm["date"]).dt.normalize()
-            mm["calories"] = pd.to_numeric(mm["calories"], errors="coerce").fillna(0)
-            meal_daily = mm.groupby("date")["calories"].sum()
-
-            if not ma.empty:
-                ma["date"] = pd.to_datetime(ma["date"]).dt.normalize()
-                ma["burned_calories"] = pd.to_numeric(ma["burned_calories"], errors="coerce").fillna(0)
-                act_daily = ma.groupby("date")["burned_calories"].sum()
-            else:
-                act_daily = pd.Series(dtype=float)
-
-            for d, kcal_in in meal_daily.items():
-                extra = float(act_daily.get(d, 0.0))
-                total_deficit_30 += float(user_bmr) + extra - float(kcal_in)
-                valid_deficit_days += 1
-
-            if valid_deficit_days > 0:
-                avg_daily_deficit_30 = total_deficit_30 / valid_deficit_days
-
-        ratio_text = "N/D"
-        ratio_caption = "Servono almeno due pesi e dati alimentari nell'ultimo mese."
-        if weight_lost_30 is not None and weight_lost_30 > 0 and valid_deficit_days > 0:
-            kcal_per_kg = total_deficit_30 / weight_lost_30
-            ratio_text = f"{kcal_per_kg:,.0f} kcal/kg".replace(",", ".")
-            ratio_caption = f"{total_deficit_30:.0f} kcal di deficit / {weight_lost_30:.1f} kg persi."
-        elif weight_lost_30 is not None and weight_lost_30 <= 0:
-            ratio_caption = "Nessuna perdita di peso misurata negli ultimi 30 giorni."
-
-        lost_text = "N/D" if weight_lost_30 is None else f"{weight_lost_30:+.1f} kg"
-        lost_caption = "Differenza tra la prima e l'ultima misurazione degli ultimi 30 giorni."
-
-        goal_date_text = "N/D"
-        goal_caption = "Serve un deficit medio positivo per stimare la data obiettivo."
-        target_30 = float(user_target_weight) if user_target_weight else None
-        current_for_projection = latest_weight_30
-        if current_for_projection is None and logs_all:
-            try:
-                current_for_projection = float(logs_all[0]["weight"])
-            except Exception:
-                current_for_projection = None
-
-        if target_30 is not None and current_for_projection is not None:
-            kg_remaining = current_for_projection - target_30
-            if kg_remaining <= 0:
-                goal_date_text = "Raggiunto 🎯"
-                goal_caption = "Il peso più recente è già pari o inferiore all'obiettivo."
-            elif avg_daily_deficit_30 is not None and avg_daily_deficit_30 > 0:
-                days_needed = int(__import__("math").ceil((kg_remaining * 7700.0) / avg_daily_deficit_30))
-                projected_date = date.today() + pd.Timedelta(days=days_needed)
-                goal_date_text = projected_date.strftime("%d/%m/%Y")
-                goal_caption = f"Stima basata su {avg_daily_deficit_30:.0f} kcal/giorno di deficit medio ({valid_deficit_days} giorni loggati)."
-
-        st.markdown('''
-            <style>
-                .custom-card {
-                    background-color: #FFF5F5;
-                    border: 1.5px solid #FF8B8B;
-                    border-radius: 16px;
-                    padding: 16px;
-                    height: 100%;
-                    box-shadow: 0 2px 6px rgba(255,139,139,.08);
-                }
-                .custom-card-title { font-size:.95rem;font-weight:600;color:#1A2942;margin-bottom:4px; }
-                .custom-card-value { font-size:1.8rem;font-weight:700;color:#1A2942;margin-bottom:8px; }
-                .custom-card-caption { font-size:.82rem;color:#555;line-height:1.35; }
-            </style>
-        ''', unsafe_allow_html=True)
-
-        wk1, wk2, wk3 = st.columns(3)
-        with wk1:
-            st.markdown(f'<div class="custom-card"><div class="custom-card-title">📉 Peso perso · 30 giorni</div><div class="custom-card-value">{lost_text}</div><div class="custom-card-caption">{lost_caption}</div></div>', unsafe_allow_html=True)
-        with wk2:
-            st.markdown(f'<div class="custom-card"><div class="custom-card-title">⚡ Deficit / kg perso</div><div class="custom-card-value">{ratio_text}</div><div class="custom-card-caption">{ratio_caption}</div></div>', unsafe_allow_html=True)
-        with wk3:
-            st.markdown(f'<div class="custom-card"><div class="custom-card-title">🎯 Data obiettivo stimata</div><div class="custom-card-value">{goal_date_text}</div><div class="custom-card-caption">{goal_caption}</div></div>', unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-    except Exception as e:
-        st.warning(f"Impossibile calcolare le statistiche mensili: {e}")
-
-    with st.container(border=True):
-        try:
-            ctrl1, ctrl2 = st.columns(2)
-            with ctrl1:
-                chart_mode = st.selectbox(
-                    "Visualizzazione",
-                    ["Peso", "Kcal", "Macros", "Pasti"],
-                    index=0,
-                    key="main_analytics_mode",
-                )
-            with ctrl2:
-                period_options = {"7 giorni": 7, "14 giorni": 14, "30 giorni": 30, "60 giorni": 60, "90 giorni": 90}
-                selected_period_label = st.selectbox(
-                    "Periodo",
-                    list(period_options),
-                    index=1,  # default 14 giorni
-                    key="weight_chart_period",
-                )
-
-            selected_days = period_options[selected_period_label]
-            chart_end = pd.Timestamp(date.today())
-            chart_start = chart_end - pd.Timedelta(days=selected_days - 1)
-            timeline_dates = pd.date_range(chart_start, chart_end, freq="D")
-
-            logs = (
-                supabase.table("daily_logs").select("date, weight").eq("user_id", user_id)
-                .gte("date", str(chart_start.date())).lte("date", str(chart_end.date()))
-                .not_.is_("weight", "null").order("date", desc=False).execute().data or []
-            )
-            meals_rows = (
-                supabase.table("meals").select("date, meal_type, name, calories, protein, carbs, fat")
-                .eq("user_id", user_id).gte("date", str(chart_start.date())).lte("date", str(chart_end.date()))
-                .execute().data or []
-            )
-            acts_rows = (
-                supabase.table("activities").select("date, activity_name, burned_calories")
-                .eq("user_id", user_id).gte("date", str(chart_start.date())).lte("date", str(chart_end.date()))
-                .execute().data or []
-            )
-
-            df_weight = pd.DataFrame(logs)
-            meals_df = pd.DataFrame(meals_rows)
-            acts_df = pd.DataFrame(acts_rows)
-
-            if not df_weight.empty:
-                df_weight["date"] = pd.to_datetime(df_weight["date"]).dt.normalize()
-                df_weight["weight"] = pd.to_numeric(df_weight["weight"], errors="coerce")
-                df_weight = df_weight.dropna().sort_values("date")
-            if not meals_df.empty:
-                meals_df["date"] = pd.to_datetime(meals_df["date"]).dt.normalize()
-                for col in ["calories", "protein", "carbs", "fat"]:
-                    meals_df[col] = pd.to_numeric(meals_df[col], errors="coerce").fillna(0)
-            if not acts_df.empty:
-                acts_df["date"] = pd.to_datetime(acts_df["date"]).dt.normalize()
-                acts_df["burned_calories"] = pd.to_numeric(acts_df["burned_calories"], errors="coerce").fillna(0)
-
-            days_df = pd.DataFrame({"date": timeline_dates})
-            if not meals_df.empty:
-                meal_totals = meals_df.groupby("date")[["calories", "protein", "carbs", "fat"]].sum().reset_index()
-                days_df = days_df.merge(meal_totals, on="date", how="left")
-            else:
-                for c in ["calories", "protein", "carbs", "fat"]:
-                    days_df[c] = 0.0
-
-            for c in ["calories", "protein", "carbs", "fat"]:
-                if c not in days_df:
-                    days_df[c] = 0.0
-            days_df[["calories", "protein", "carbs", "fat"]] = days_df[["calories", "protein", "carbs", "fat"]].fillna(0)
-
-            if not acts_df.empty:
-                burn_totals = acts_df.groupby("date")["burned_calories"].sum().reset_index(name="extra")
-                days_df = days_df.merge(burn_totals, on="date", how="left")
-            else:
-                days_df["extra"] = 0.0
-            days_df["extra"] = days_df["extra"].fillna(0.0)
-            days_df["burned"] = float(user_bmr) + days_df["extra"]
-
-            fig = go.Figure()
-            y_title = ""
-
-            if chart_mode == "Peso":
-                if not df_weight.empty:
-                    fig.add_trace(go.Scatter(
-                        x=df_weight["date"], y=df_weight["weight"],
-                        mode="lines+markers", name="Peso reale",
-                        line=dict(color="#FF8B8B", width=3),
-                        marker=dict(size=8, color="#FF8B8B"),
-                        hovertemplate="<b>%{x|%d %b %Y}</b><br>Peso: <b>%{y:.1f} kg</b><extra></extra>",
-                    ))
-
-                    target_val = float(user_target_weight) if user_target_weight else 75.0
-                    # Trend lineare sui dati disponibili negli ultimi 14 giorni.
-                    trend_source = df_weight[df_weight["date"] >= chart_end - pd.Timedelta(days=13)]
-                    if len(trend_source) >= 3:
-                        x_days = (trend_source["date"] - trend_source["date"].min()).dt.days.astype(float)
-                        slope, intercept = pd.Series(trend_source["weight"].values).pipe(
-                            lambda y: __import__("numpy").polyfit(x_days, y, 1)
-                        )
-                        trend_x = pd.date_range(chart_start, chart_end, freq="D")
-                        trend_days = (trend_x - trend_source["date"].min()).days.astype(float)
-                        trend_y = intercept + slope * trend_days
-                        fig.add_trace(go.Scatter(
-                            x=trend_x, y=trend_y, mode="lines",
-                            name="Proiezione",
-                            line=dict(color="#FF8B8B", width=2.5, dash="dash"),
-                            hovertemplate="<b>Trend</b><br>%{x|%d %b}<br>%{y:.1f} kg<extra></extra>",
-                        ))
-
-                    fig.add_trace(go.Scatter(
-                        x=[chart_start, chart_end], y=[target_val, target_val],
-                        mode="lines", name="Obiettivo",
-                        line=dict(color="#1A2942", width=2.5),
-                        hovertemplate=f"Obiettivo: {target_val:.1f} kg<extra></extra>",
-                    ))
-
-                    visible_values = df_weight["weight"].tolist() + [target_val]
-                    y_min, y_max = min(visible_values), max(visible_values)
-                    spread = max(y_max - y_min, 1.0)
-                    pad = max(.5, spread * .18)
-                    fig.update_yaxes(range=[y_min - pad, y_max + pad])
-                else:
-                    st.info(f"Nessun peso registrato negli ultimi {selected_days} giorni.")
-                y_title = "Peso (kg)"
-
-            elif chart_mode == "Kcal":
-                fig.add_trace(go.Bar(
-                    x=days_df["date"], y=days_df["calories"],
-                    name="Kcal ingerite", marker_color="#FF8B8B",
-                    hovertemplate="%{x|%d %b}<br>Ingerite: %{y:.0f} kcal<extra></extra>",
-                ))
-                fig.add_trace(go.Bar(
-                    x=days_df["date"], y=days_df["burned"],
-                    name="Kcal bruciate", marker_color="#1A2942",
-                    hovertemplate="%{x|%d %b}<br>Bruciate: %{y:.0f} kcal<extra></extra>",
-                ))
-                fig.update_layout(barmode="group")
-                y_title = "kcal"
-
-            elif chart_mode == "Macros":
-                macro_specs = [
-                    ("protein", "Proteine", "#FF8B8B"),
-                    ("carbs", "Carboidrati", "#1A2942"),
-                    ("fat", "Grassi", "#FFB4B4"),
-                ]
-                for col, label, color in macro_specs:
-                    fig.add_trace(go.Bar(
-                        x=days_df["date"], y=days_df[col], name=label, marker_color=color,
-                        hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.1f}} g<extra></extra>",
-                    ))
-                fig.update_layout(barmode="stack")
-                y_title = "grammi"
-
-            else:  # Pasti
-                meal_order = ["Colazione", "Pranzo", "Snack", "Cena"]
-                meal_colors = ["#FF8B8B", "#1A2942", "#FFB4B4", "#667085"]
-                for meal_type, color in zip(meal_order, meal_colors):
-                    if meals_df.empty:
-                        vals = [0.0] * len(days_df)
-                    else:
-                        series = meals_df[meals_df["meal_type"] == meal_type].groupby("date")["calories"].sum()
-                        vals = [float(series.get(d, 0)) for d in days_df["date"]]
-                    fig.add_trace(go.Bar(
-                        x=days_df["date"], y=vals, name=meal_type, marker_color=color,
-                        hovertemplate=f"%{{x|%d %b}}<br>{meal_type}: %{{y:.0f}} kcal<extra></extra>",
-                    ))
-                fig.update_layout(barmode="stack")
-                y_title = "kcal"
-
-            fig.update_xaxes(
-                range=[chart_start, chart_end + pd.Timedelta(hours=23)],
-                tickformat="%d %b",
-                showgrid=False,
-                fixedrange=False,
-            )
-            fig.update_yaxes(title=y_title, gridcolor="#E8ECF2", zeroline=False, fixedrange=False)
-            fig.update_layout(
-                height=500,
-                plot_bgcolor="#FFFFFF",
-                paper_bgcolor="rgba(0,0,0,0)",
-                hovermode="x unified",
-                font=dict(color="#1A2942"),
-                margin=dict(l=55, r=25, t=45, b=55),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(255,255,255,.85)"),
-            )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-            # --------------------------------------------------------------
-            # DETTAGLI GIORNALIERI SOTTO IL GRAFICO
-            # --------------------------------------------------------------
-            detail_cells = []
-            for _, row in days_df.iterrows():
-                day = row["date"]
-                kcal_in = float(row["calories"])
-                extra = float(row["extra"])
-                if kcal_in <= 0:
-                    deficit_icon, deficit_tip = "·", "Nessun dato alimentare"
-                else:
-                    daily_def = float(user_bmr) + extra - kcal_in
-                    if daily_def >= 500:
-                        deficit_icon = "👍"
-                    elif daily_def >= 0:
-                        deficit_icon = "😐"
-                    else:
-                        deficit_icon = "👎"
-                    deficit_tip = f"Deficit: {daily_def:.0f} kcal"
-
-                if not acts_df.empty:
-                    day_acts = acts_df[acts_df["date"] == day]
-                    has_padel = any(str(v).strip().lower() == "padel" for v in day_acts["activity_name"].tolist())
-                else:
-                    has_padel = False
-
-                if has_padel:
-                    activity_icon = "🎾"
-                    activity_tip = f"Padel · {extra:.0f} kcal extra"
-                elif extra > 300:
-                    activity_icon = "🔥"
-                    activity_tip = f"{extra:.0f} kcal extra"
-                else:
-                    activity_icon = "🛏️"
-                    activity_tip = f"{extra:.0f} kcal extra"
-
-                detail_cells.append(
-                    f'<div style="min-width:48px;text-align:center;padding:5px 3px;">'
-                    f'<div style="font-size:11px;color:#667085;">{day.strftime("%d")}<br>{day.strftime("%b")}</div>'
-                    f'<div title="{html.escape(deficit_tip, quote=True)}" style="font-size:20px;cursor:help;">{deficit_icon}</div>'
-                    f'<div title="{html.escape(activity_tip, quote=True)}" style="font-size:18px;cursor:help;">{activity_icon}</div>'
-                    f'</div>'
-                )
-
-            timeline_html = (
-                '<div style="border:1px solid #E8ECF2;border-radius:12px;padding:8px 10px;overflow-x:auto;">'
-                '<div style="font-size:12px;color:#667085;margin-bottom:4px;">'
-                'Dettagli: 👍 deficit ≥500 · 😐 deficit 0–499 · 👎 surplus &nbsp;|&nbsp; 🎾 Padel · 🔥 extra >300 · 🛏️ extra ≤300'
-                '</div>'
-                f'<div style="display:flex;gap:2px;min-width:{max(100, len(detail_cells)*50)}px;">'
-                + "".join(detail_cells) +
-                '</div></div>'
-            )
-            st.markdown(timeline_html, unsafe_allow_html=True)
-
-        except Exception as e:
-            st.error(f"Errore nel caricamento del grafico: {e}")
-            print(traceback.format_exc())
-
-# 12. PAGE 4: RICETTE / MEAL COMPOSTI
-# ==============================================================================
-elif selected_page == t["t4"]:
-    st.subheader(t["recipes_title"])
-    st.caption(
-        "Le ricette non usano più una tabella separata: sono normali record di `meals` "
-        "con gli ingredienti salvati in `ingredients_json`. Quick Entry, Ricette e suggerimenti "
-        "usano quindi lo stesso database."
-    )
-
-    if "recipe_form_version" not in st.session_state:
-        st.session_state["recipe_form_version"] = 0
-    v = st.session_state["recipe_form_version"]
-
-    with st.container(border=True):
-        st.markdown("### 📋 Ricette disponibili")
-        try:
-            recipe_meals = (
-                supabase.table("meals")
-                .select(
-                    "id,date,meal_type,category,name,base_name,calories,protein,carbs,fat,"
-                    "base_calories,base_protein,base_carbs,base_fat,notes,ingredients_json"
-                )
-                .eq("user_id", user_id)
-                .order("date", desc=True)
-                .execute().data
-                or []
-            )
-        except Exception:
-            recipe_meals = []
-
-        recipe_meals = [r for r in recipe_meals if r.get("ingredients_json")]
-
-        if recipe_meals:
-            display_rows = []
-            seen_names = set()
-            for r in recipe_meals:
-                label = (r.get("base_name") or _clean_meal_name(r.get("name")) or "Ricetta").strip()
-                key = label.casefold()
-                if key in seen_names:
-                    continue
-                seen_names.add(key)
-                display_rows.append({
-                    "Nome": label,
-                    "Pasto": r.get("meal_type"),
-                    "Categoria": infer_meal_category(r),
-                    "Kcal": r.get("calories"),
-                    "Pro (g)": r.get("protein"),
-                    "Carbs (g)": r.get("carbs"),
-                    "Fat (g)": r.get("fat"),
-                    "Data": r.get("date"),
-                })
-            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
-
-            for r in recipe_meals:
-                if r.get("notes"):
-                    label = r.get("base_name") or _clean_meal_name(r.get("name"))
-                    st.markdown(
-                        f"**{html.escape(str(label or 'Ricetta'))}** "
-                        f"{info_badge(r.get('notes'), 'Note ricetta')}",
-                        unsafe_allow_html=True,
-                    )
-        else:
-            st.info("Nessuna ricetta composta presente in meals.")
-
-    with st.container(border=True):
-        st.markdown("### ➕ Crea un meal da ingredienti")
-
-        rc1, rc2, rc3 = st.columns(3)
-        with rc1:
-            recipe_log_date = st.date_input(
-                "Data",
-                value=date.today(),
-                key=f"recipe_meal_date_{v}",
-            )
-        with rc2:
-            recipe_meal_type = st.selectbox(
-                "Tipo di pasto",
-                ["Colazione", "Pranzo", "Cena", "Snack"],
-                key=f"recipe_meal_type_{v}",
-            )
-        with rc3:
-            recipe_category = st.selectbox(
-                "Categoria",
-                MEAL_CATEGORIES,
-                index=0,
-                key=f"recipe_category_{v}",
-                help="Una-tantum non entra nei suggerimenti. Ristorante non viene mai suggerito a pranzo.",
-            )
-
-        r_name = st.text_input(
-            "Nome",
-            placeholder="Es. Pasta al pomodoro",
-            key=f"recipe_builder_name_{v}",
+    for role in ["P", "D", "C", "A"]:
+        role_rows = sorted(
+            rows_by_role.get(role, []),
+            key=lambda row: (-row["_sort_rating"], row["Nome"]),
         )
-        r_notes = st.text_area(
-            "Note (opzionali)",
-            placeholder="Es. preparazione, sostituzioni, condimenti...",
-            key=f"recipe_builder_notes_{v}",
-            height=90,
-        )
-
-        st.markdown("#### 🥕 Aggiungi ingrediente")
-        source = st.radio(
-            "Fonte ingrediente",
-            ["Database / Open Food Facts", "Inserimento manuale"],
-            horizontal=True,
-            key=f"ingredient_source_{v}",
-        )
-
-        ingredient_name = ""
-        base = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
-
-        if source.startswith("Database"):
-            iq = st.text_input("Cerca ingrediente", key=f"ingredient_search_{v}")
-            if st.button(t["search_ingredient"], key=f"ingredient_search_btn_{v}"):
-                if len(iq.strip()) >= 2 or iq.strip().isdigit():
-                    with st.spinner("Ricerca ingrediente..."):
-                        st.session_state[f"ingredient_results_{v}"] = search_open_food_facts(iq)
-                    st.rerun()
-                else:
-                    st.warning("Inserisci almeno 2 caratteri.")
-
-            results = st.session_state.get(f"ingredient_results_{v}", {})
-            if results:
-                sel = st.selectbox(
-                    "Risultati",
-                    [""] + list(results),
-                    key=f"ingredient_result_select_{v}",
-                )
-                if sel:
-                    p_data = results[sel]
-                    ingredient_name = p_data.get("name", sel)
-                    base = {k: float(p_data.get(k, 0) or 0) for k in base}
-                    st.caption(
-                        f"Per 100g: {base['calories']:.0f} kcal · "
-                        f"Pro {base['protein']:.1f} g · Carbs {base['carbs']:.1f} g · Fat {base['fat']:.1f} g"
-                    )
-        else:
-            ingredient_name = st.text_input(
-                "Nome ingrediente",
-                key=f"manual_ingredient_name_{v}",
-            )
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            base["calories"] = mc1.number_input(
-                "Kcal / 100g", min_value=0.0, step=1.0, key=f"manual_kcal_{v}"
-            )
-            base["protein"] = mc2.number_input(
-                "Pro / 100g", min_value=0.0, step=0.1, key=f"manual_pro_{v}"
-            )
-            base["carbs"] = mc3.number_input(
-                "Carbs / 100g", min_value=0.0, step=0.1, key=f"manual_carbs_{v}"
-            )
-            base["fat"] = mc4.number_input(
-                "Fat / 100g", min_value=0.0, step=0.1, key=f"manual_fat_{v}"
-            )
-
-        quantity = st.number_input(
-            "Quantità ingrediente (g)",
-            min_value=0.1,
-            value=100.0,
-            step=1.0,
-            key=f"ingredient_qty_{v}",
-        )
-
-        if st.button(
-            "➕ Aggiungi ingrediente",
-            use_container_width=True,
-            key=f"add_ingredient_{v}",
-        ):
-            if not ingredient_name.strip():
-                st.warning("Inserisci o seleziona un ingrediente.")
-            else:
-                st.session_state["recipe_builder_ingredients"].append({
-                    "name": ingredient_name.strip(),
-                    "quantity_g": float(quantity),
-                    "calories_per_100g": float(base["calories"]),
-                    "protein_per_100g": float(base["protein"]),
-                    "carbs_per_100g": float(base["carbs"]),
-                    "fat_per_100g": float(base["fat"]),
-                    "source": "database" if source.startswith("Database") else "manual",
-                })
-                st.success(f"✅ {ingredient_name} aggiunto.")
-                st.rerun()
-
-        ingredients = st.session_state.get("recipe_builder_ingredients", [])
-
-        if ingredients:
-            st.markdown("#### 📋 Ingredienti")
-            rows = []
-            for idx, ing in enumerate(ingredients):
-                ing_factor = float(ing["quantity_g"]) / 100.0
-                rows.append({
-                    "#": idx + 1,
-                    "Ingrediente": ing["name"],
-                    "Quantità (g)": ing["quantity_g"],
-                    "Kcal": round(ing["calories_per_100g"] * ing_factor),
-                    "Pro": round(ing["protein_per_100g"] * ing_factor, 1),
-                    "Carbs": round(ing["carbs_per_100g"] * ing_factor, 1),
-                    "Fat": round(ing["fat_per_100g"] * ing_factor, 1),
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-            remove_idx = st.selectbox(
-                "Rimuovi ingrediente",
-                [""] + [str(i + 1) for i in range(len(ingredients))],
-                key=f"remove_ingredient_{v}",
-            )
-            if remove_idx and st.button(
-                "🗑️ Rimuovi ingrediente",
-                key=f"remove_ingredient_btn_{v}",
-            ):
-                del st.session_state["recipe_builder_ingredients"][int(remove_idx) - 1]
-                st.rerun()
-
-            total_weight, totals, per100 = calculate_recipe_totals(ingredients)
-
+        complete_mark = " ✓" if len(role_rows) >= ROLE_LIMITS[role] else ""
+        with st.container(border=True):
             st.markdown(
-                f"**Totale meal:** {total_weight:.0f} g · **{totals['calories']:.0f} kcal** · "
-                f"Pro {totals['protein']:.1f} g · Carbs {totals['carbs']:.1f} g · Fat {totals['fat']:.1f} g"
+                f"**{role_titles[role]}** &nbsp; "
+                f"`{len(role_rows)}/{ROLE_LIMITS[role]}{complete_mark}`"
             )
-            st.caption(
-                f"Per 100 g: {per100['calories']:.0f} kcal · "
-                f"Pro {per100['protein']:.1f} g · Carbs {per100['carbs']:.1f} g · Fat {per100['fat']:.1f} g"
-            )
+            if not role_rows:
+                st.caption("Nessun giocatore acquistato in questo ruolo.")
+                continue
 
-            if st.button(
-                "💾 Salva come meal",
+            display = pd.DataFrame(role_rows).drop(columns=["_sort_rating"])
+            compact_cols = [
+                "Nome", "Rating", "Fascia", "Squadra",
+                "Crediti Spesi", "Bonus/Malus",
+            ]
+            st.dataframe(
+                display[compact_cols],
                 use_container_width=True,
-                key=f"save_recipe_builder_{v}",
-            ):
-                if not r_name.strip():
-                    st.warning("Inserisci un nome.")
-                else:
-                    try:
-                        display_name = f"{r_name.strip()} ({total_weight:.0f}g)"
-                        insert_meal_with_base_data(
-                            log_date=recipe_log_date,
-                            meal_type=recipe_meal_type,
-                            display_name=display_name,
-                            base_name=r_name.strip(),
-                            quantity=total_weight,
-                            is_per_100g=True,
-                            calories=totals["calories"],
-                            protein=totals["protein"],
-                            carbs=totals["carbs"],
-                            fat=totals["fat"],
-                            base_calories=per100["calories"],
-                            base_protein=per100["protein"],
-                            base_carbs=per100["carbs"],
-                            base_fat=per100["fat"],
-                            notes=r_notes,
-                            category=recipe_category,
-                            ingredients_json=ingredients,
-                        )
-                        refresh_daily_logs(recipe_log_date)
-                        st.session_state["recipe_builder_ingredients"] = []
-                        st.session_state["recipe_form_version"] += 1
-                        st.success("✅ Meal composto salvato in meals!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(
-                            "Impossibile salvare il meal composto. Applica la nuova migrazione SQL "
-                            "per aggiungere category e ingredients_json a meals. Errore: " + str(e)
-                        )
-        else:
-            st.info("Aggiungi almeno un ingrediente per costruire il meal.")
+                hide_index=True,
+                column_config={
+                    "Rating": st.column_config.NumberColumn(format="%.1f"),
+                    "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
+                },
+            )
+            with st.expander("Dettagli economici", expanded=False):
+                st.dataframe(
+                    display[[
+                        "Nome", "Crediti Dichiarati",
+                        "Crediti Spesi", "Moltiplicatore Asta",
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Crediti Dichiarati": st.column_config.NumberColumn(format="%d cr"),
+                        "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
+                        "Moltiplicatore Asta": st.column_config.NumberColumn(format="x%.2f"),
+                    },
+                )
 
-# ==============================================================================
-# 13. PAGE 5: ACTIVITY & STEPS LOGGING
-# ==============================================================================
-elif selected_page == t["t5"]:
-    st.subheader(t["register_activity"])
-    act_date = st.date_input(t["act_date"], value=date.today())
-    
-    try:
-        existing_log = supabase.table("daily_logs").select("steps").eq("date", str(act_date)).eq("user_id", user_id).execute().data
-        day_steps = existing_log[0].get("steps", 0) if existing_log and existing_log[0].get("steps") else 0
-        
-        # Recuperiamo anche le attività registrate per questa data per la logica intelligente
-        day_activities = supabase.table("activities").select("activity_name, burned_calories").eq("date", str(act_date)).eq("user_id", user_id).execute().data or []
-    except Exception:
-        day_steps = 0
-        day_activities = []
 
-    # Riepilogo calorie attività per la giornata selezionata
-    def _activity_kcal(name):
-        return sum(
-            int(a.get("burned_calories") or 0)
-            for a in day_activities
-            if str(a.get("activity_name") or "").strip().casefold() == name.casefold()
-        )
 
-    steps_kcal = _activity_kcal("Passi (Stima)")
-    padel_kcal = _activity_kcal("Padel")
-    bike_kcal = sum(
-        int(a.get("burned_calories") or 0)
-        for a in day_activities
-        if str(a.get("activity_name") or "").strip().casefold() in {"bici", "bici elettrica"}
+# ============================================================
+# MODULO STAGIONE — IMPORT VOTI / FORMAZIONE / CAMPIONATO
+# ============================================================
+
+FANTASY_RULES_DEFAULT = {
+    "assist": 1.0,
+    "clean_sheet": 1.0,
+    "goal_conceded": -1.0,
+    "missed_penalty": -3.0,
+    "own_goal": -1.0,
+    "red_card": -1.0,
+    "penalty_saved": 3.0,
+    "goal": 3.0,
+    "yellow_card": -0.5,
+}
+
+GOAL_THRESHOLDS_DEFAULT = {
+    1: 66,
+    2: 70,
+    3: 74,
+    4: 78,
+    5: 82,
+    6: 86,
+    7: 90,
+    8: 94,
+    9: 98,
+    10: 102,
+    11: 106,
+    12: 110,
+}
+
+
+def _parse_vote(value: Any) -> float | None:
+    """Converte 6*, 6.5, ecc.; valori non numerici diventano None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", ".").replace("*", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group()) if match else None
+
+
+def parse_fantacalcio_votes_xlsx(uploaded_file: Any, sheet_name: str = "Fantacalcio") -> pd.DataFrame:
+    """
+    Legge il formato XLSX Fantacalcio mostrato nel file di test.
+    Le righe con un solo testo prima dell'header sono interpretate come club.
+    """
+    raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
+    rows: list[dict[str, Any]] = []
+    current_team = ""
+
+    for _, row in raw.iterrows():
+        values = row.tolist()
+        first = values[0] if len(values) else None
+
+        if str(first).strip() == "Cod.":
+            continue
+
+        # Riga squadra: prima cella testuale, resto vuoto.
+        rest = values[1:13]
+        if (
+            isinstance(first, str)
+            and first.strip()
+            and all(pd.isna(v) for v in rest)
+            and not first.startswith(("Voti Fantacalcio", "Solo su ", "QUESTO FILE", "E' DA "))
+        ):
+            current_team = first.strip()
+            continue
+
+        if not isinstance(first, (int, float)) or pd.isna(first):
+            continue
+        if len(values) < 13:
+            continue
+
+        role = str(values[1]).strip() if not pd.isna(values[1]) else ""
+        name = str(values[2]).strip() if not pd.isna(values[2]) else ""
+        if role not in {"P", "D", "C", "A"} or not name:
+            continue
+
+        rows.append({
+            "Codice": int(first),
+            "Ruolo": role,
+            "Giocatore": name,
+            "Squadra": current_team,
+            "Voto": _parse_vote(values[3]),
+            "Gf": int(values[4] or 0) if not pd.isna(values[4]) else 0,
+            "Gs": int(values[5] or 0) if not pd.isna(values[5]) else 0,
+            "Rp": int(values[6] or 0) if not pd.isna(values[6]) else 0,
+            "Rs": int(values[7] or 0) if not pd.isna(values[7]) else 0,
+            "Rf": int(values[8] or 0) if not pd.isna(values[8]) else 0,
+            "Au": int(values[9] or 0) if not pd.isna(values[9]) else 0,
+            "Amm": int(values[10] or 0) if not pd.isna(values[10]) else 0,
+            "Esp": int(values[11] or 0) if not pd.isna(values[11]) else 0,
+            "Ass": int(values[12] or 0) if not pd.isna(values[12]) else 0,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def calculate_weekly_fantasy_score(row: pd.Series, rules: dict[str, float]) -> float | None:
+    """Fantavoto di test basato sui bonus/malus forniti dall'utente."""
+    vote = row.get("Voto")
+    if vote is None or pd.isna(vote):
+        return None
+
+    score = float(vote)
+    score += float(row.get("Gf", 0)) * rules["goal"]
+    score += float(row.get("Gs", 0)) * rules["goal_conceded"]
+    score += float(row.get("Rp", 0)) * rules["penalty_saved"]
+    score += float(row.get("Rs", 0)) * rules["missed_penalty"]
+    score += float(row.get("Au", 0)) * rules["own_goal"]
+    score += float(row.get("Amm", 0)) * rules["yellow_card"]
+    score += float(row.get("Esp", 0)) * rules["red_card"]
+    score += float(row.get("Ass", 0)) * rules["assist"]
+
+    # Dalla schermata: Porta inviolata +1.
+    # Nel file è inferibile con sufficiente sicurezza solo per il portiere con voto.
+    if row.get("Ruolo") == "P" and int(row.get("Gs", 0)) == 0:
+        score += rules["clean_sheet"]
+
+    return round(score, 2)
+
+
+def points_to_goals(points: float, thresholds: dict[int, int] | None = None) -> int:
+    thresholds = thresholds or GOAL_THRESHOLDS_DEFAULT
+    goals = 0
+    for goal, threshold in sorted(thresholds.items()):
+        if points >= threshold:
+            goals = goal
+    return goals
+
+
+def get_season_rules_ui() -> dict[str, float]:
+    if "season_rules" not in st.session_state:
+        st.session_state.season_rules = FANTASY_RULES_DEFAULT.copy()
+    return st.session_state.season_rules
+
+
+def render_matchday_import_tab() -> None:
+    st.markdown('<div class="rcd-section">📥 Importa voti giornata</div>', unsafe_allow_html=True)
+    st.caption(
+        "Area di test per i file XLSX Fantacalcio. Per ora i dati restano nella sessione "
+        "e non vengono scritti su Supabase."
     )
-    total_extra_kcal = sum(int(a.get("burned_calories") or 0) for a in day_activities)
 
-    # Verifichiamo se ci sono attività strutturate oltre ai passi
-    has_structured_activity = any(a.get("activity_name") not in ["Passi (Stima)"] for a in day_activities)
+    left, right = st.columns([1.25, 1])
+    with left:
+        uploaded = st.file_uploader(
+            "File voti Fantacalcio (.xlsx)",
+            type=["xlsx"],
+            key="season_votes_upload",
+        )
+    with right:
+        sheet = st.selectbox(
+            "Redazione",
+            ["Fantacalcio", "Statistico", "Italia"],
+            key="season_votes_sheet",
+        )
 
-    # Status Movimento intelligente: se c'è un'attività strutturata, lo status riflette l'allenamento!
-    move_bg, move_border = "#FFFFFF", "#FF8B8B"
-    if has_structured_activity:
-        move_msg = "🌟 Ottimo! Hai completato un'attività fisica strutturata oggi."
-        status_display_text = "🏋️ Attività registrata"
-    elif day_steps >= 10000:
-        move_msg = t["status_very_active"]
-        status_display_text = f"{day_steps} passi"
-    elif day_steps >= 5000:
-        move_msg = t["status_good"]
-        status_display_text = f"{day_steps} passi"
+    with st.expander("⚙️ Regolamento bonus/malus usato nel test", expanded=False):
+        rules = get_season_rules_ui()
+        cols = st.columns(4)
+        labels = [
+            ("assist", "Assist"),
+            ("clean_sheet", "Porta inviolata"),
+            ("goal_conceded", "Gol subito"),
+            ("goal", "Gol segnato"),
+            ("missed_penalty", "Rigore sbagliato"),
+            ("penalty_saved", "Rigore parato"),
+            ("own_goal", "Autogol"),
+            ("red_card", "Espulsione"),
+            ("yellow_card", "Ammonizione"),
+        ]
+        for i, (key, label) in enumerate(labels):
+            rules[key] = cols[i % 4].number_input(
+                label,
+                value=float(rules[key]),
+                step=0.5,
+                key=f"rule_{key}",
+            )
+        st.caption(
+            "Gol vittoria/pareggio, assist gold/soft e Player of the Match sono 0/1 "
+            "nel regolamento mostrato, ma il file XLSX di test non contiene colonne separate "
+            "per identificarli. Non vengono quindi inventati."
+        )
+
+    with st.expander("🥅 Soglie gol", expanded=False):
+        st.write(
+            "**66 = 1 gol · 70 = 2 · 74 = 3 · 78 = 4 · 82 = 5 · "
+            "86 = 6 · 90 = 7 · 94 = 8 · 98 = 9 · 102 = 10 · 106 = 11 · 110 = 12**"
+        )
+
+    if uploaded is not None:
+        try:
+            votes = parse_fantacalcio_votes_xlsx(uploaded, sheet)
+            if votes.empty:
+                st.error("Non sono riuscito a trovare righe giocatore nel file.")
+                return
+
+            votes["Fantavoto"] = votes.apply(
+                lambda r: calculate_weekly_fantasy_score(r, rules),
+                axis=1,
+            )
+            st.session_state["season_votes_df"] = votes
+            st.session_state["season_votes_source"] = uploaded.name
+            st.session_state["season_votes_loaded_sheet"] = sheet
+
+            played = int(votes["Voto"].notna().sum())
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Giocatori nel file", len(votes))
+            c2.metric("Con voto", played)
+            c3.metric("Gol", int(votes["Gf"].sum()))
+            c4.metric("Assist", int(votes["Ass"].sum()))
+
+            st.success(f"File letto correttamente: **{uploaded.name}** · redazione **{sheet}**.")
+        except Exception as exc:
+            st.error(f"Errore durante la lettura del file: {exc}")
+            return
+
+    votes = st.session_state.get("season_votes_df")
+    if isinstance(votes, pd.DataFrame) and not votes.empty:
+        st.markdown('<div class="rcd-section">🔎 Anteprima giornata</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            role = st.selectbox("Ruolo", ["Tutti", "P", "D", "C", "A"], key="votes_role")
+        with c2:
+            search = st.text_input("Cerca giocatore", key="votes_search")
+
+        view = votes.copy()
+        if role != "Tutti":
+            view = view[view["Ruolo"] == role]
+        if search.strip():
+            q = normalize_string(search)
+            view = view[view["Giocatore"].map(normalize_string).str.contains(q, na=False)]
+
+        st.dataframe(
+            view[["Codice", "Ruolo", "Giocatore", "Squadra", "Voto", "Fantavoto", "Gf", "Gs", "Ass", "Amm", "Esp"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Voto": st.column_config.NumberColumn(format="%.1f"),
+                "Fantavoto": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+
+def _match_vote_for_player(player: dict[str, Any], votes: pd.DataFrame) -> pd.Series | None:
+    target = normalize_string(player.get("name", ""))
+    if not target:
+        return None
+
+    exact = votes[votes["Giocatore"].map(normalize_string) == target]
+    if not exact.empty:
+        return exact.iloc[0]
+
+    # Fallback prudente per abbreviazioni tipo "Paz N.".
+    candidates = votes[
+        votes["Giocatore"].map(normalize_string).apply(
+            lambda x: bool(x) and (x in target or target in x)
+        )
+    ]
+    return candidates.iloc[0] if len(candidates) == 1 else None
+
+
+def render_formation_lab_tab(state: AuctionState) -> None:
+    st.markdown('<div class="rcd-section">🧠 Formation Lab</div>', unsafe_allow_html=True)
+    st.caption(
+        "Prototype retrospettivo: usa i voti caricati per verificare abbinamenti e logica "
+        "della futura formazione consigliata."
+    )
+
+    votes = st.session_state.get("season_votes_df")
+    if not isinstance(votes, pd.DataFrame) or votes.empty:
+        st.info("Carica prima un XLSX nella tab **📥 GIORNATE**.")
+        return
+
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    if team_name is None or not players:
+        st.info("Non trovo una rosa RCD Escanyol da confrontare con i voti.")
+        return
+
+    matched = []
+    missing = []
+    for player in players:
+        row = _match_vote_for_player(player, votes)
+        if row is None:
+            missing.append(player.get("name", ""))
+            continue
+        matched.append({
+            "Nome": player.get("name", ""),
+            "Ruolo": player.get("role", ""),
+            "Squadra": row.get("Squadra", ""),
+            "Voto": row.get("Voto"),
+            "Fantavoto": row.get("Fantavoto"),
+            "Gol": row.get("Gf", 0),
+            "Assist": row.get("Ass", 0),
+        })
+
+    if not matched:
+        st.warning(
+            "Nessun giocatore della rosa attuale coincide con il file storico. "
+            "È normale se stai usando rose/stagioni diverse."
+        )
+        return
+
+    df = pd.DataFrame(matched)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Abbinati", f"{len(df)}/{len(players)}")
+    c2.metric("Con voto", int(df["Voto"].notna().sum()))
+    c3.metric(
+        "Fantavoto medio",
+        f"{df['Fantavoto'].dropna().mean():.2f}" if df["Fantavoto"].notna().any() else "—",
+    )
+
+    # XI di test 3-4-3: non pretende ancora di essere il motore finale.
+    chosen = []
+    for role, n in [("P", 1), ("D", 3), ("C", 4), ("A", 3)]:
+        part = df[(df["Ruolo"] == role) & df["Fantavoto"].notna()].nlargest(n, "Fantavoto")
+        chosen.append(part)
+    xi = pd.concat(chosen, ignore_index=True) if chosen else pd.DataFrame()
+
+    st.markdown('<div class="rcd-section">🧪 Miglior XI retrospettivo · 3-4-3</div>', unsafe_allow_html=True)
+    st.caption(
+        "Serve solo per validare l'import: usa i fantavoti già avvenuti, quindi non è ancora "
+        "un consiglio predittivo per la giornata successiva."
+    )
+    if len(xi) == 11:
+        total = float(xi["Fantavoto"].sum())
+        c1, c2 = st.columns(2)
+        c1.metric("Punteggio XI", f"{total:.1f}")
+        c2.metric("Gol da soglia", points_to_goals(total))
     else:
-        move_msg = t["status_lazy"]
-        status_display_text = f"{day_steps} passi"
+        st.warning(f"XI incompleto: trovati {len(xi)}/11 giocatori con voto nei ruoli richiesti.")
 
-    # Tile con lo stesso design della Panoramica
-    st.markdown("""
-        <style>
-            .custom-card {
-                background-color: #FFF5F5;
-                border: 1.5px solid #FF8B8B;
-                border-radius: 16px;
-                padding: 16px;
-                height: 100%;
-                box-shadow: 0 2px 6px rgba(255,139,139,.08);
-            }
-            .custom-card-title { font-size:.95rem;font-weight:600;color:#1A2942;margin-bottom:4px; }
-            .custom-card-value { font-size:1.8rem;font-weight:700;color:#1A2942;margin-bottom:8px; }
-            .custom-card-caption { font-size:.82rem;color:#555;line-height:1.35; }
-        </style>
-    """, unsafe_allow_html=True)
+    st.dataframe(
+        xi[["Ruolo", "Nome", "Squadra", "Voto", "Fantavoto", "Gol", "Assist"]],
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    ac1, ac2 = st.columns(2)
-    with ac1:
-        st.markdown(
-            f'<div class="custom-card"><div class="custom-card-title">{t["status_move_title"]}</div>'
-            f'<div class="custom-card-value">{status_display_text}</div>'
-            f'<div class="custom-card-caption">{move_msg}</div></div>',
-            unsafe_allow_html=True,
+    if missing:
+        with st.expander(f"Giocatori non abbinati ({len(missing)})", expanded=False):
+            st.write(", ".join(missing))
+
+
+def render_championship_lab_tab() -> None:
+    st.markdown('<div class="rcd-section">🏆 Campionato & Classifica</div>', unsafe_allow_html=True)
+    st.caption("Struttura già pronta per la fase post-asta.")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Soglia 1° gol", "66 pt")
+    c2.metric("Scatto successivo", "+4 pt")
+    c3.metric("Squadre", "12")
+
+    st.info(
+        "Per produrre la **classifica ufficiale** servono anche le formazioni schierate "
+        "da ciascuna fantasquadra e il calendario degli scontri diretti. Il solo file voti "
+        "Fantacalcio contiene i voti dei calciatori reali, non dice quali 11 siano stati "
+        "schierati da ogni squadra della lega."
+    )
+
+    st.markdown('<div class="rcd-section">📐 Motore punteggio già impostato</div>', unsafe_allow_html=True)
+    demo = pd.DataFrame({
+        "Punti": [65.5, 66, 69.5, 70, 74, 78, 82, 90, 102, 110],
+    })
+    demo["Gol"] = demo["Punti"].map(points_to_goals)
+    st.dataframe(demo, use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="rcd-section">🚧 Prossimi dati da importare</div>', unsafe_allow_html=True)
+    st.write(
+        "Quando avremo un export Fantaleghe con **formazioni/risultati/calendario**, "
+        "questa tab potrà generare automaticamente: classifica, GF/GS, differenza reti, "
+        "fantapunti, forma ultime 5, miglior attacco/difesa e analisi fortuna/sfortuna."
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main() -> None:
+
+    current_user = require_authentication()
+    render_app_logo()
+    render_authenticated_user_header(current_user)
+    render_logout_sidebar()
+
+    teams = load_teams()
+    rosters = load_rosters()
+
+    teams_df = pd.DataFrame(teams)
+    state = build_auction_state(teams, rosters)
+
+    if "preferred_players" not in st.session_state:
+        st.session_state.preferred_players = set()
+
+    preferred_players = st.session_state.preferred_players
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+    ratings = calculate_team_ratings(
+        state,
+        preferred_players,
+        custom_modifiers,
+        goalkeeper_ranking,
+    )
+
+    completed_roles = calculate_completed_roles(state)
+    auction_finished = is_auction_finished(state)
+
+
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        [
+            "🎯 ASTA",
+            "📊 LEGA",
+            "⭐ GIOCATORI",
+            "⚙️ BONUS / MALUS",
+            "📥 GIORNATE",
+            "🧠 FORMAZIONE",
+            "🏆 CAMPIONATO",
+        ]
+    )
+
+    with tab1:
+        render_auction_dashboard_header(teams_df, state, ratings)
+
+        # Mostrato dopo il rerun dell'acquisto.
+        render_pending_purchase_banner()
+
+        refresh_col, _ = st.columns([1, 6])
+        with refresh_col:
+            if st.button("↻ Aggiorna", key="refresh_live_data"):
+                invalidate_data_cache()
+                st.rerun()
+
+        st.markdown('<div class="rcd-section">🎯 Acquista giocatore</div>', unsafe_allow_html=True)
+
+        resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
+        if resolved_my_team and resolved_my_team != "RCD Escanyol":
+            st.caption(
+                f"ℹ️ RCD Escanyol collegata alla squadra Supabase **{resolved_my_team}**."
+            )
+
+        if auction_finished:
+            st.success(
+                "🎉 **ASTA CONCLUSA!** Tutte le squadre hanno completato "
+                "le proprie rose."
+            )
+            current_role = "ALL"
+        else:
+            current_role = "ALL"
+
+        # Il pannello contiene tutti e 5 i dropdown/controlli sulla stessa riga.
+        my_team_name = get_my_team_name_from_state(state)
+        my_team_row = teams_df[teams_df["name"] == my_team_name] if my_team_name else pd.DataFrame()
+        st.session_state["my_team_budget"] = int(my_team_row.iloc[0]["remaining_budget"]) if not my_team_row.empty else 0
+
+        draft_role = get_my_team_draft_role(state)
+        if draft_role:
+            draft_label = role_label(draft_role)
+            valid_role_labels = [
+                label for label, role in ROLE_LABELS.items()
+                if role == "ALL" or role == draft_role or (
+                    role in DRAFT_ORDER and state.team_role_totals.get(my_team_name or "", {}).get(role, 0) < ROLE_LIMITS[role]
+                )
+            ]
+            if st.session_state.get("main_role_select") not in valid_role_labels:
+                st.session_state["main_role_select"] = draft_label
+            current_role = draft_role
+        else:
+            current_role = "ALL"
+
+        current_role = render_manual_purchase(
+            teams_df,
+            state,
+            current_role,
+            rosters,
         )
-    with ac2:
-        extra_caption = (
-            "Somma delle calorie registrate nelle attività della giornata selezionata."
-            if total_extra_kcal > 0 else "Nessuna caloria extra registrata per questa giornata."
+
+        # La Top 5 serve solo durante l'asta.
+        if not auction_finished:
+            render_top5(
+                current_role,
+                state.bought_player_ids,
+                preferred_players,
+                state,
+            )
+
+        resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
+        if resolved_my_team:
+            db_team_count = sum(
+                1 for roster in rosters
+                if roster.get("teams", {}).get("name") == resolved_my_team
+                and roster.get("players")
+            )
+            if db_team_count != state.team_total_bought.get(resolved_my_team, 0):
+                st.warning(
+                    "⚠️ Incoerenza nei dati caricati: "
+                    f"Supabase contiene {db_team_count} giocatori per **{resolved_my_team}**, "
+                    f"ma lo stato dell'asta ne ha caricati {state.team_total_bought.get(resolved_my_team, 0)}. "
+                    "La query delle rose è stata resa esplicita tramite team_id/player_id per evitare questo problema."
+                )
+
+        render_my_team_evaluation(
+            teams_df,
+            state,
+            ratings,
+            rosters,
         )
-        st.markdown(
-            f'<div class="custom-card"><div class="custom-card-title">🔥 Kcal bruciate extra</div>'
-            f'<div class="custom-card-value">{total_extra_kcal} kcal</div>'
-            f'<div class="custom-card-caption">{extra_caption}</div></div>',
-            unsafe_allow_html=True,
+
+        render_my_roster(state)
+
+        with st.expander("🛠️ Strumenti asta e diagnostica", expanded=False):
+            render_team_analysis(
+                teams_df,
+                state,
+                ratings,
+            )
+            render_admin_tools(
+                teams_df,
+                state,
+            )
+
+    with tab2:
+        render_team_overview(
+            teams_df,
+            state,
+            ratings,
+        )
+        st.divider()
+        render_rosters_tab(
+            teams,
+            teams_df,
+            rosters,
+            state,
+            ratings,
         )
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    other_kcal = max(0, total_extra_kcal - steps_kcal - padel_kcal - bike_kcal)
-    kc1, kc2, kc3 = st.columns(3)
-    with kc1:
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">👣 Passi</div><div class="custom-card-value">{steps_kcal} kcal</div><div class="custom-card-caption">Calorie attribuite ai passi.</div></div>', unsafe_allow_html=True)
-    with kc2:
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">🎾 Padel</div><div class="custom-card-value">{padel_kcal} kcal</div><div class="custom-card-caption">Calorie registrate come Padel.</div></div>', unsafe_allow_html=True)
-    with kc3:
-        bike_caption = f"Bici + E-Bike. Altre attività: {other_kcal} kcal." if other_kcal > 0 else "Somma di Bici ed E-Bike."
-        st.markdown(f'<div class="custom-card"><div class="custom-card-title">🚲 Bici</div><div class="custom-card-value">{bike_kcal} kcal</div><div class="custom-card-caption">{bike_caption}</div></div>', unsafe_allow_html=True)
+    with tab3:
+        render_all_players_tab()
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    with tab4:
+        render_player_modifiers_tab()
 
-    # 3 Colonne: Passi, Bici (Normale ed Elettrica), Altro
-    col_a1, col_a2, col_a3 = st.columns(3)
-    
-    with col_a1:
-        with st.container(border=True):
-            st.markdown(f"### {t['steps_title']}")
-            new_steps = st.number_input("Totale passi", value=int(day_steps), min_value=0, step=500)
-            if st.button(t["update_steps"], use_container_width=True):
-                try:
-                    existing = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("date", str(act_date)).execute().data
-                    
-                    if existing:
-                        supabase.table("daily_logs").update({"steps": int(new_steps)}).eq("user_id", user_id).eq("date", str(act_date)).execute()
-                    else:
-                        supabase.table("daily_logs").insert({"user_id": user_id, "date": str(act_date), "steps": int(new_steps)}).execute()
-                    
-                    # I passi sono incompatibili SOLO con attività che già
-                    # incorporano gli stessi passi/spostamenti: Padel e Corsa.
-                    # Bici/E-Bike e le altre attività possono invece sommarsi.
-                    step_conflicting_activities = {"padel", "corsa", "running"}
-                    has_step_conflict = any(
-                        str(a.get("activity_name") or "").strip().casefold()
-                        in step_conflicting_activities
-                        for a in day_activities
-                    )
-                    estim_cals = 0 if has_step_conflict else int(new_steps * 0.04)
-                    
-                    existing_act = supabase.table("activities").select("id").eq("user_id", user_id).eq("date", str(act_date)).eq("activity_name", "Passi (Stima)").execute().data
-                    
-                    if existing_act:
-                        supabase.table("activities").update({"burned_calories": estim_cals}).eq("id", existing_act[0]["id"]).execute()
-                    else:
-                        supabase.table("activities").insert({"user_id": user_id, "date": str(act_date), "activity_name": "Passi (Stima)", "burned_calories": estim_cals}).execute()
-                    
-                    refresh_daily_logs(act_date)
-                    
-                    st.toast(f"✅ Passi aggiornati! ({estim_cals} kcal)", icon="👣")
-                    st.success(f"✅ {t['steps_updated']} ({estim_cals} kcal stimate)")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Errore nel salvataggio dei passi: {e}")
+    with tab5:
+        render_matchday_import_tab()
 
-    with col_a2:
-        with st.container(border=True):
-            st.markdown("### 🚲 Bici & E-Bike")
-            bike_type = st.radio(t["bike_type"], [t["normal_bike"], t["ebike"]], horizontal=True, key=f"bike_type_{act_date}")
-            bike_min = st.number_input("Minuti Bici", value=0, min_value=0, step=5, key=f"bike_min_{act_date}")
-            
-            if st.button("💾 Aggiungi Bici", use_container_width=True):
-                if bike_min > 0:
-                    if "Elettrica" in bike_type:
-                        estim_cals = int(bike_min * 4)  # Stima E-bike: ~4 kcal/min
-                        act_label = "Bici Elettrica"
-                    else:
-                        estim_cals = int(bike_min * 8)  # Stima Bici normale: ~8 kcal/min
-                        act_label = "Bici"
-                        
-                    supabase.table("activities").insert({"user_id": user_id, "date": str(act_date), "activity_name": act_label, "burned_calories": estim_cals}).execute()
-                    
-                    # Bici/E-Bike è compatibile con i passi:
-                    # NON azzeriamo le kcal attribuite ai passi.
+    with tab6:
+        render_formation_lab_tab(state)
 
-                    refresh_daily_logs(act_date)
-                    
-                    st.toast(f"✅ Aggiunti {bike_min} min di {act_label}! ({estim_cals} kcal)", icon="🚲")
-                    st.success(f"✅ Aggiunti {bike_min} min di {act_label} ({estim_cals} kcal)!")
-                    st.rerun()
-                else:
-                    st.warning("Inserisci almeno 1 minuto.")
+    with tab7:
+        render_championship_lab_tab()
 
-    with col_a3:
-        with st.container(border=True):
-            st.markdown(f"### {t['other_act']}")
-            with st.form("activity_form", clear_on_submit=True):
-                extra_act = st.selectbox(t["activity_label"], ["Padel", "Palestra", "Nuoto", "Altro"])
-                extra_cals = st.number_input("Kcal bruciate", value=0, min_value=0, step=50)
-                
-                submitted_act = st.form_submit_button(t["add_act_btn"], use_container_width=True)
-                if submitted_act:
-                    # Inseriamo l'attività
-                    supabase.table("activities").insert({"user_id": user_id, "date": str(act_date), "activity_name": extra_act, "burned_calories": int(extra_cals)}).execute()
-                    
-                    # Padel e Corsa sono incompatibili con le kcal dei passi,
-                    # perché i passi di quelle attività sarebbero già compresi.
-                    # Palestra/Nuoto/Altro restano invece cumulabili con i passi.
-                    if str(extra_act).strip().casefold() in {"padel", "corsa", "running"}:
-                        passi_act = (
-                            supabase.table("activities")
-                            .select("id")
-                            .eq("user_id", user_id)
-                            .eq("date", str(act_date))
-                            .eq("activity_name", "Passi (Stima)")
-                            .execute()
-                            .data
-                        )
-                        if passi_act:
-                            supabase.table("activities").update(
-                                {"burned_calories": 0}
-                            ).eq("id", passi_act[0]["id"]).execute()
 
-                    refresh_daily_logs(act_date)
-                    
-                    # Usiamo st.success e st.toast per garantire il feedback visivo immediato
-                    st.toast(f"✅ {extra_act} registrato con successo! ({extra_cals} kcal)", icon="🎯")
-                    st.success(f"✅ {extra_act} registrato con successo! ({extra_cals} kcal)")
-                    st.rerun()
+if __name__ == "__main__":
+    main()
