@@ -622,7 +622,9 @@ def handle_oauth_callback() -> bool:
 
     try:
         auth_client = get_auth_flow_client(str(flow_id))
-        response = auth_client.auth.exchange_code_for_session(str(code))
+        response = auth_client.auth.exchange_code_for_session(
+            {"auth_code": str(code)}
+        )
 
         session = getattr(response, "session", None)
         user = getattr(response, "user", None)
