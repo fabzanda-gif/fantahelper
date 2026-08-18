@@ -15,7 +15,6 @@ import openpyxl
 import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
-from supabase.lib.client_options import ClientOptions
 
 
 # ============================================================
@@ -504,7 +503,7 @@ class AuctionState:
 # ============================================================
 
 @st.cache_resource
-def get_auth_flow_client(flow_id: str) -> Client:
+def get_supabase() -> Client:
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"],
@@ -555,13 +554,7 @@ def get_public_app_url() -> str:
 
 @st.cache_resource
 def get_auth_flow_client(flow_id: str) -> Client:
-    """
-    Client Auth separato per ogni flusso OAuth.
-
-    Non usiamo il client DB globale per l'autenticazione: un client Auth
-    condiviso fra utenti potrebbe mischiare sessioni. Il flow_id casuale
-    separa invece ogni login e conserva il verifier PKCE sul server.
-    """
+    """Client Supabase dedicato al flusso OAuth corrente."""
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"],
