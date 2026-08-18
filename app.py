@@ -39,7 +39,7 @@ div[data-testid="stTabs"] button[data-baseweb="tab"] * {
 st.markdown("""
 <style>
 /* ==========================================================
-   RCD ESCANYOL — PREMIUM HIGH-CONTRAST DASHBOARD
+   FANTAHE1PER — PREMIUM HIGH-CONTRAST DASHBOARD
    Pensato per restare leggibile anche con tema Streamlit Light.
    ========================================================== */
 
@@ -492,16 +492,6 @@ SEASON_FILE = DATA_DIR / "season-2526.csv"
 CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
 USER_TEAM_TABLE = "user_team_assignments"
 
-# Nome della squadra dell'utente. Vengono tollerati anche i nomi usati
-# nelle versioni precedenti, così il codice non dipende da una singola
-# stringa hardcoded.
-MY_TEAM_NAME = "RCD Escanyol"
-MY_TEAM_ALIASES = (
-    "RCD Escanyol",
-    "Escanyol",
-    "RCD Escalnyol",
-)
-
 CUSTOM_MODIFIERS = {
     "Nessuna modifica": {"key": None, "value": 0.0},
     "⭐ Preferito (+0.5)": {"key": "preferito", "value": 0.5},
@@ -829,14 +819,56 @@ def sign_in_with_email_password(email: str, password: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def sign_up_with_email_password(email: str, password: str) -> tuple[bool, str]:
-    """Registrazione classica Supabase con email/password."""
+def load_registration_teams() -> list[dict[str, Any]]:
+    """
+    Legge id e nome delle fantasquadre per la registrazione.
+    La tabella teams deve consentire SELECT con la chiave anon/publishable.
+    """
+    try:
+        rows = (
+            supabase.table("teams")
+            .select("id, name")
+            .order("name")
+            .execute()
+            .data
+            or []
+        )
+        return [
+            {"id": row.get("id"), "name": str(row.get("name") or "")}
+            for row in rows
+            if row.get("id") is not None and row.get("name")
+        ]
+    except Exception as exc:
+        st.session_state["registration_teams_error"] = str(exc)
+        return []
+
+
+def sign_up_with_email_password(
+    email: str,
+    password: str,
+    team_id: Any,
+    team_name: str,
+) -> tuple[bool, str]:
+    """
+    Registrazione Supabase email/password.
+
+    La squadra scelta viene salvata subito nei user_metadata. Se l'email
+    richiede conferma, al primo login autenticato verrà trasformata
+    automaticamente nell'associazione persistente user_team_assignments.
+    """
     try:
         auth_client = get_auth_flow_client("password-signup")
         response = auth_client.auth.sign_up(
             {
                 "email": email.strip(),
                 "password": password,
+                "options": {
+                    "data": {
+                        "signup_team_id": str(team_id),
+                        "signup_team_name": team_name,
+                    },
+                    "email_redirect_to": get_public_app_url().rstrip("/") + "/",
+                },
             }
         )
 
@@ -846,15 +878,36 @@ def sign_up_with_email_password(email: str, password: str) -> tuple[bool, str]:
         if user is None:
             return False, "Registrazione non completata."
 
-        # Se la conferma email è disattivata, Supabase restituisce subito la sessione.
+        # Se Supabase crea subito una sessione, associamo immediatamente
+        # anche la fantasquadra.
         if session is not None:
             access_token = getattr(session, "access_token", None)
             refresh_token = getattr(session, "refresh_token", None)
+
             if access_token and refresh_token:
-                st.session_state["auth_access_token"] = access_token
-                st.session_state["auth_refresh_token"] = refresh_token
-                st.session_state["auth_user"] = _minimal_user_dict(user)
+                main_response = supabase.auth.set_session(
+                    access_token,
+                    refresh_token,
+                )
+                save_authenticated_session(
+                    main_response,
+                    fallback_user=user,
+                )
                 st.session_state["auth_flow_id"] = "password-signup"
+
+                user_id = str(getattr(user, "id", "") or "")
+                if user_id:
+                    ok, error = save_user_team_assignment(
+                        user_id,
+                        team_id,
+                        team_name,
+                    )
+                    if not ok:
+                        return False, (
+                            "Account creato, ma non riesco ad associare la squadra: "
+                            + error
+                        )
+
                 return True, "signed_in"
 
         return True, "check_email"
@@ -863,8 +916,9 @@ def sign_up_with_email_password(email: str, password: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+
 def render_login_page() -> None:
-    """Pagina login RCD Escanyol con pulsanti Google/Facebook e loghi."""
+    """Pagina login fantahe1per con Google, Facebook ed email/password."""
     st.markdown(
         """
 <style>
@@ -995,6 +1049,9 @@ def render_login_page() -> None:
         label_visibility="collapsed",
     )
 
+    registration_teams = load_registration_teams() if login_mode == "Registrati" else []
+    selected_registration_team = None
+
     with st.form("password_auth_form", clear_on_submit=False):
         email = st.text_input(
             "Email",
@@ -1007,6 +1064,28 @@ def render_login_page() -> None:
             placeholder="••••••••",
             key="password_auth_password",
         )
+
+        if login_mode == "Registrati":
+            if registration_teams:
+                registration_team_names = [
+                    team["name"] for team in registration_teams
+                ]
+                selected_registration_team_name = st.selectbox(
+                    "La tua squadra",
+                    registration_team_names,
+                    key="password_signup_team",
+                    help="L'account verrà collegato a questa fantasquadra.",
+                )
+                selected_registration_team = next(
+                    team
+                    for team in registration_teams
+                    if team["name"] == selected_registration_team_name
+                )
+            else:
+                st.warning(
+                    "Non riesco a caricare le squadre dal database. "
+                    "La registrazione richiede la scelta della squadra."
+                )
 
         submit_label = "Accedi" if login_mode == "Accedi" else "Crea account"
         submitted = st.form_submit_button(
@@ -1027,17 +1106,31 @@ def render_login_page() -> None:
                 else:
                     st.error(f"Login non riuscito: {message}")
             else:
-                ok, message = sign_up_with_email_password(email, password)
-                if not ok:
-                    st.error(f"Registrazione non riuscita: {message}")
-                elif message == "signed_in":
-                    st.success("Account creato. Accesso effettuato.")
-                    st.rerun()
-                else:
-                    st.success(
-                        "Account creato. Controlla la tua email per confermare "
-                        "l'indirizzo, poi torna qui e accedi."
+                if selected_registration_team is None:
+                    st.error(
+                        "Seleziona una squadra prima di creare l'account."
                     )
+                else:
+                    ok, message = sign_up_with_email_password(
+                        email,
+                        password,
+                        selected_registration_team["id"],
+                        selected_registration_team["name"],
+                    )
+                    if not ok:
+                        st.error(f"Registrazione non riuscita: {message}")
+                    elif message == "signed_in":
+                        st.success(
+                            f"Account creato e associato a "
+                            f"**{selected_registration_team['name']}**."
+                        )
+                        st.rerun()
+                    else:
+                        st.success(
+                            f"Account creato per **{selected_registration_team['name']}**. "
+                            "Controlla la tua email per confermare l'indirizzo, "
+                            "poi torna qui e accedi."
+                        )
 
 
 def _first_name_from_user(user: dict[str, Any]) -> str:
@@ -1256,16 +1349,6 @@ def render_logout_sidebar() -> None:
             pass
 
         clear_auth_state()
-        for key in (
-            "current_user_team_id",
-            "current_user_team_name",
-            "_ui_defaults_for_team",
-            "sidebar_team_analysis",
-            "manual_target_team",
-            "table_team_filter_tab2",
-            "my_team_budget",
-        ):
-            st.session_state.pop(key, None)
         st.rerun()
 
 
@@ -1295,11 +1378,8 @@ def load_teams() -> list[dict[str, Any]]:
 
 
 def get_current_user_team_name() -> str:
-    """Squadra associata all'utente loggato; fallback legacy per compatibilità."""
-    return str(
-        st.session_state.get("current_user_team_name")
-        or MY_TEAM_NAME
-    )
+    """Restituisce esclusivamente la squadra associata al login corrente."""
+    return str(st.session_state.get("current_user_team_name") or "")
 
 
 def get_current_user_team_id() -> str | None:
@@ -1346,28 +1426,10 @@ def save_user_team_assignment(
         )
         st.session_state["current_user_team_id"] = str(team_id)
         st.session_state["current_user_team_name"] = team_name
-        sync_user_team_ui_defaults(team_name)
         st.session_state.pop("user_team_table_error", None)
         return True, ""
     except Exception as exc:
         return False, str(exc)
-
-
-def sync_user_team_ui_defaults(team_name: str) -> None:
-    """
-    Allinea le preselezioni della UI alla squadra associata al login.
-
-    L'inizializzazione avviene una sola volta per squadra nella sessione:
-    dopo di che l'utente resta libero di cambiare manualmente i filtri.
-    """
-    marker = st.session_state.get("_ui_defaults_for_team")
-    if marker == team_name:
-        return
-
-    st.session_state["sidebar_team_analysis"] = team_name
-    st.session_state["manual_target_team"] = team_name
-    st.session_state["table_team_filter_tab2"] = team_name
-    st.session_state["_ui_defaults_for_team"] = team_name
 
 
 def require_user_team_assignment(
@@ -1401,8 +1463,33 @@ def require_user_team_assignment(
             team_name = str(matched.get("name") or assignment.get("team_name") or "")
             st.session_state["current_user_team_id"] = assigned_id
             st.session_state["current_user_team_name"] = team_name
-            sync_user_team_ui_defaults(team_name)
             return team_name
+
+    # Se l'utente si è registrato via email scegliendo già una squadra,
+    # recuperiamo la scelta dai metadata e creiamo automaticamente
+    # l'associazione persistente al primo accesso autenticato.
+    metadata = user.get("metadata") or {}
+    metadata_team_id = str(metadata.get("signup_team_id") or "")
+    metadata_team_name = str(metadata.get("signup_team_name") or "")
+
+    if metadata_team_id and metadata_team_name:
+        matched = team_by_id.get(metadata_team_id)
+        if matched:
+            canonical_name = str(matched.get("name") or metadata_team_name)
+            ok, error = save_user_team_assignment(
+                user_id,
+                metadata_team_id,
+                canonical_name,
+            )
+            if ok:
+                sync_user_team_ui_defaults(canonical_name)
+                return canonical_name
+            if "duplicate" in error.lower() or "unique" in error.lower():
+                st.error(
+                    f"La squadra **{canonical_name}** è già associata "
+                    "a un altro account."
+                )
+                st.stop()
 
     # Se la tabella non esiste ancora, mostriamo un errore esplicito invece
     # di lasciare l'app in uno stato ambiguo.
@@ -1660,27 +1747,18 @@ def play_sound(sound_url: str) -> None:
 
 
 def resolve_my_team_name(team_names: list[str]) -> str | None:
-    """Trova la squadra associata al login corrente."""
+    """Trova la squadra associata al login corrente fra le squadre disponibili."""
+    assigned = get_current_user_team_name()
+    if not assigned:
+        return None
+
     normalized = {
         normalize_string(name): name
         for name in team_names
         if isinstance(name, str)
     }
+    return normalized.get(normalize_string(assigned))
 
-    assigned = get_current_user_team_name()
-    hit = normalized.get(normalize_string(assigned))
-    if hit:
-        return hit
-
-    # Compatibilità con installazioni precedenti solo quando non è ancora
-    # presente una vera associazione persistente.
-    if "current_user_team_name" not in st.session_state:
-        for candidate in (MY_TEAM_NAME, *MY_TEAM_ALIASES):
-            hit = normalized.get(normalize_string(candidate))
-            if hit:
-                return hit
-
-    return None
 
 
 def is_my_team(team_name: str | None) -> bool:
@@ -1731,9 +1809,8 @@ def queue_purchase_banner(
         level = "great"
         title = "✨ PRIMA FASCIA!"
         message = (
-            f"**{player_name}** entra nella rosa **{team_name}** · "
-            f"Rating **{rating:.1f}** · Prezzo **{purchase_price} cr**. "
-            "Innesto di livello."
+            f"Acquistato **{player_name}** · Rating **{rating:.1f}** · "
+            f"Prezzo **{purchase_price} cr**. Innesto di livello."
         )
     else:
         level = "normal"
@@ -1989,7 +2066,7 @@ def get_my_team_players_and_purchases(
 
 
 def get_my_team_draft_role(state: "AuctionState") -> str | None:
-    """Restituisce il prossimo ruolo della squadra associata al login secondo PDCA."""
+    """Restituisce il prossimo ruolo della rosa squadra associata secondo PDCA."""
     team_name = get_my_team_name_from_state(state)
     if team_name is None:
         return "P"
@@ -2804,7 +2881,7 @@ def render_team_analysis(
     selected_team = st.sidebar.selectbox(
         "Analizza squadra",
         team_names,
-        index=default_team_index(team_names, get_current_user_team_name()),
+        index=default_team_index(team_names),
         key="sidebar_team_analysis",
     )
 
@@ -4100,7 +4177,7 @@ def render_rosters_tab(
     selected_filter = st.selectbox(
         "Filtra per Squadra",
         filter_options,
-        index=default_team_index(filter_options, get_current_user_team_name()),
+        index=default_team_index(filter_options),
         key="table_team_filter_tab2",
     )
 
@@ -4559,7 +4636,7 @@ def render_auction_dashboard_header(
         f"""
         <div class="rcd-hero">
           <div class="rcd-kicker">fantahe1per</div>
-          <div class="rcd-hero-title">⚽ Live Auction Dashboard - {escape(team_name)}</div>
+          <div class="rcd-hero-title">⚽ Live Auction Dashboard</div>
           <div class="rcd-phase">{phase}</div>
         </div>
         """,
@@ -4574,7 +4651,7 @@ def render_auction_dashboard_header(
 
 
 # ============================================================
-# TAB 1 — VALUTAZIONE E ROSA RCD ESCANYOL
+# TAB 1 — VALUTAZIONE E ROSA DELLA SQUADRA ASSOCIATA
 # ============================================================
 
 def render_my_team_evaluation(
@@ -4583,7 +4660,7 @@ def render_my_team_evaluation(
     ratings: dict[str, float],
     rosters: list[dict[str, Any]],
 ) -> None:
-    """Valuta la squadra associata al login in modo progressivo seguendo il draft PDCA."""
+    """Valuta squadra associata in modo progressivo seguendo il draft PDCA."""
     team_name, players, purchases = get_my_team_players_and_purchases(state)
     if team_name is None or not players:
         # A rosa vuota non mostriamo valutazioni generiche: l'utente ha chiesto
@@ -4797,7 +4874,7 @@ def render_my_team_evaluation(
 def render_my_roster(
     state: AuctionState,
 ) -> None:
-    """Mostra la rosa della squadra associata al login divisa P-D-C-A."""
+    """Mostra la rosa squadra associata divisa P-D-C-A."""
     team_name = resolve_my_team_name(list(state.team_players_map))
 
     st.markdown(
