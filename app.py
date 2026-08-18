@@ -944,7 +944,7 @@ def render_login_page() -> None:
         '</div>'
         '<div class="login-card">'
         '<div class="login-card-title">Accedi per continuare</div>'
-        f'<a class="social-login google" href="{google_url}" target="_self">'
+        f'<a class="social-login google" href="{google_url}" target="_blank" rel="noopener">'
         '<svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">'
         '<path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41z"/>'
         '<path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.63-2.43l-3.24-2.54c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22z"/>'
@@ -953,7 +953,7 @@ def render_login_page() -> None:
         '</svg>'
         '<span>Continua con Google</span>'
         '</a>'
-        f'<a class="social-login facebook" href="{facebook_url}" target="_self">'
+        f'<a class="social-login facebook" href="{facebook_url}" target="_blank" rel="noopener">'
         '<svg class="social-logo" viewBox="0 0 24 24" aria-hidden="true">'
         '<circle cx="12" cy="12" r="12" fill="#ffffff"/>'
         '<path fill="#1877F2" d="M13.52 20v-7h2.35l.35-2.73h-2.7V8.53c0-.79.22-1.33 1.35-1.33h1.44V4.76c-.25-.03-1.1-.1-2.1-.1-2.08 0-3.5 1.27-3.5 3.6v2.01H8.36V13h2.35v7h2.81z"/>'
@@ -1214,15 +1214,23 @@ def render_logout_sidebar() -> None:
     st.sidebar.markdown(
         """
         <style>
-        div[data-testid="stSidebar"] button[kind="secondary"][data-testid="stBaseButton-secondary"] {
+        /* Solo il widget con key="auth_logout" */
+        .st-key-auth_logout button,
+        .st-key-auth_logout button[data-testid="stBaseButton-primary"] {
             background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
             border: 1px solid #1d4ed8 !important;
             color: #ffffff !important;
-            font-weight: 800 !important;
-            box-shadow: 0 6px 16px rgba(37,99,235,.18);
+            font-weight: 850 !important;
+            box-shadow: 0 6px 16px rgba(37,99,235,.22) !important;
         }
-        div[data-testid="stSidebar"] button[kind="secondary"][data-testid="stBaseButton-secondary"] * {
+        .st-key-auth_logout button *,
+        .st-key-auth_logout button p,
+        .st-key-auth_logout button span {
             color: #ffffff !important;
+        }
+        .st-key-auth_logout button:hover {
+            background: linear-gradient(135deg, #1e40af, #1d4ed8) !important;
+            border-color: #1e40af !important;
         }
         </style>
         """,
@@ -1232,6 +1240,7 @@ def render_logout_sidebar() -> None:
     if st.sidebar.button(
         "Logout",
         key="auth_logout",
+        type="primary",
         use_container_width=True,
     ):
         try:
