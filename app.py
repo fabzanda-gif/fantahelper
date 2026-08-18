@@ -352,26 +352,7 @@ div[data-baseweb="select"] div {
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Tab: stesso font dell'app, solo con peso più marcato */
-div[data-testid="stTabs"] button[role="tab"],
-div[data-testid="stTabs"] button[role="tab"] p,
-div[data-testid="stTabs"] button[role="tab"] span,
-div[data-baseweb="tab-list"] button,
-div[data-baseweb="tab-list"] button p,
-div[data-baseweb="tab-list"] button span {
-    font-family: inherit !important;
-    font-weight: 700 !important;
-}
 
-/* v41 — forza il peso sul vero nodo testo delle tab Streamlit/BaseWeb */
-div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"],
-div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] > div,
-div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] > div > div,
-div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] p,
-div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] span {
-    font-family: var(--font, "Source Sans Pro", sans-serif) !important;
-    font-weight: 800 !important;
-}
 
 </style>
 """, unsafe_allow_html=True)
@@ -5054,13 +5035,13 @@ def main() -> None:
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
-            "🎯 ASTA",
-            "📊 LEGA",
-            "⭐ GIOCATORI",
-            "⚙️ BONUS / MALUS",
-            "📥 GIORNATE",
-            "🧠 FORMAZIONE",
-            "🏆 CAMPIONATO",
+            "🎯 Asta",
+            "📊 Lega",
+            "⭐ Giocatori",
+            "⚙️ Bonus / Malus",
+            "📥 Giornate",
+            "🧠 Formazione",
+            "🏆 Campionato",
         ]
     )
 
