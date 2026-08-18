@@ -362,6 +362,17 @@ div[data-baseweb="tab-list"] button span {
     font-family: inherit !important;
     font-weight: 700 !important;
 }
+
+/* v41 — forza il peso sul vero nodo testo delle tab Streamlit/BaseWeb */
+div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"],
+div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] > div,
+div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] > div > div,
+div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] p,
+div[data-testid="stTabs"] div[data-baseweb="tab-list"] button[role="tab"] span {
+    font-family: var(--font, "Source Sans Pro", sans-serif) !important;
+    font-weight: 800 !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
