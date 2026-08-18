@@ -1056,7 +1056,7 @@ def render_app_logo() -> None:
         <div class="rcd-sidebar-logo-wrap">
             <img
                 class="rcd-sidebar-logo"
-                src="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Screenshot%202026-08-18%20at%2020.01.18.png"
+                src="https://raw.githubusercontent.com/fabzanda-gif/fantahelper/main/Screenshot%202026-08-18%20at%2020.11.38.png"
                 alt="Fantahelper"
             >
         </div>
