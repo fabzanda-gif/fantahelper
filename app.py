@@ -727,6 +727,75 @@ def build_provider_login_url(provider: str) -> str:
     return _oauth_response_url(response)
 
 
+
+def sign_in_with_email_password(email: str, password: str) -> tuple[bool, str]:
+    """Login classico Supabase con email/password."""
+    try:
+        auth_client = get_auth_flow_client("password-login")
+        response = auth_client.auth.sign_in_with_password(
+            {
+                "email": email.strip(),
+                "password": password,
+            }
+        )
+
+        session = getattr(response, "session", None)
+        user = getattr(response, "user", None)
+
+        if session is None:
+            return False, "Supabase non ha restituito una sessione valida."
+
+        access_token = getattr(session, "access_token", None)
+        refresh_token = getattr(session, "refresh_token", None)
+
+        if not access_token or not refresh_token:
+            return False, "Token di sessione non disponibili."
+
+        st.session_state["auth_access_token"] = access_token
+        st.session_state["auth_refresh_token"] = refresh_token
+        st.session_state["auth_user"] = _minimal_user_dict(user)
+        st.session_state["auth_flow_id"] = "password-login"
+
+        return True, ""
+
+    except Exception as exc:
+        return False, str(exc)
+
+
+def sign_up_with_email_password(email: str, password: str) -> tuple[bool, str]:
+    """Registrazione classica Supabase con email/password."""
+    try:
+        auth_client = get_auth_flow_client("password-signup")
+        response = auth_client.auth.sign_up(
+            {
+                "email": email.strip(),
+                "password": password,
+            }
+        )
+
+        user = getattr(response, "user", None)
+        session = getattr(response, "session", None)
+
+        if user is None:
+            return False, "Registrazione non completata."
+
+        # Se la conferma email è disattivata, Supabase restituisce subito la sessione.
+        if session is not None:
+            access_token = getattr(session, "access_token", None)
+            refresh_token = getattr(session, "refresh_token", None)
+            if access_token and refresh_token:
+                st.session_state["auth_access_token"] = access_token
+                st.session_state["auth_refresh_token"] = refresh_token
+                st.session_state["auth_user"] = _minimal_user_dict(user)
+                st.session_state["auth_flow_id"] = "password-signup"
+                return True, "signed_in"
+
+        return True, "check_email"
+
+    except Exception as exc:
+        return False, str(exc)
+
+
 def render_login_page() -> None:
     """Pagina login RCD Escanyol con pulsanti Google/Facebook e loghi."""
     st.markdown(
@@ -762,6 +831,22 @@ def render_login_page() -> None:
 .social-login.google span { color:#24324a !important; }
 .social-logo { width:22px; height:22px; flex:0 0 22px; }
 .login-note { text-align:center; color:#64748b !important; font-size:.78rem; line-height:1.45; margin-top:16px; }
+        .login-shell + div { max-width: 470px; margin-left:auto; margin-right:auto; }
+        div[data-testid="stForm"] {
+            max-width: 470px;
+            margin-left: auto;
+            margin-right: auto;
+            border: 1px solid #cbdcf5;
+            border-radius: 18px;
+            background: rgba(255,255,255,.97);
+            padding: 18px 20px 20px;
+            box-shadow: 0 10px 28px rgba(15,23,42,.06);
+        }
+        div[data-testid="stRadio"] {
+            max-width: 470px;
+            margin-left: auto;
+            margin-right: auto;
+        }
 </style>
         """,
         unsafe_allow_html=True,
@@ -818,6 +903,74 @@ def render_login_page() -> None:
 
     if error:
         st.error(f"Login non completato: {error}")
+
+    st.markdown(
+        """
+        <div style="
+            max-width:470px;
+            margin:14px auto 0 auto;
+            text-align:center;
+            color:#64748b;
+            font-size:.82rem;
+            font-weight:700;
+        ">
+            oppure accedi con email e password
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    login_mode = st.radio(
+        "Modalità",
+        ["Accedi", "Registrati"],
+        horizontal=True,
+        key="password_auth_mode",
+        label_visibility="collapsed",
+    )
+
+    with st.form("password_auth_form", clear_on_submit=False):
+        email = st.text_input(
+            "Email",
+            placeholder="nome@email.com",
+            key="password_auth_email",
+        )
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="••••••••",
+            key="password_auth_password",
+        )
+
+        submit_label = "Accedi" if login_mode == "Accedi" else "Crea account"
+        submitted = st.form_submit_button(
+            submit_label,
+            type="primary",
+            use_container_width=True,
+        )
+
+        if submitted:
+            if not email.strip() or not password:
+                st.error("Inserisci email e password.")
+            elif len(password) < 6:
+                st.error("La password deve contenere almeno 6 caratteri.")
+            elif login_mode == "Accedi":
+                ok, message = sign_in_with_email_password(email, password)
+                if ok:
+                    st.rerun()
+                else:
+                    st.error(f"Login non riuscito: {message}")
+            else:
+                ok, message = sign_up_with_email_password(email, password)
+                if not ok:
+                    st.error(f"Registrazione non riuscita: {message}")
+                elif message == "signed_in":
+                    st.success("Account creato. Accesso effettuato.")
+                    st.rerun()
+                else:
+                    st.success(
+                        "Account creato. Controlla la tua email per confermare "
+                        "l'indirizzo, poi torna qui e accedi."
+                    )
 
 
 def render_authenticated_user_sidebar(user: dict[str, Any]) -> None:
