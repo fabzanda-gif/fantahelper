@@ -8,6 +8,8 @@ import uuid
 from html import escape
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import pandas as pd
@@ -620,9 +622,7 @@ def handle_oauth_callback() -> bool:
 
     try:
         auth_client = get_auth_flow_client(str(flow_id))
-        response = auth_client.auth.exchange_code_for_session(
-    {"auth_code": str(code)}
-)
+        response = auth_client.auth.exchange_code_for_session(str(code))
 
         session = getattr(response, "session", None)
         user = getattr(response, "user", None)
@@ -975,24 +975,134 @@ def render_login_page() -> None:
                     )
 
 
-def render_authenticated_user_sidebar(user: dict[str, Any]) -> None:
-    """Profilo utente + logout nella sidebar."""
-    name = _auth_display_name(user)
-    email = str(user.get("email") or "")
-    avatar = _auth_avatar_url(user)
+def _first_name_from_user(user: dict[str, Any]) -> str:
+    """Ricava solo il nome, senza cognome, dai metadata Google/Facebook."""
+    metadata = user.get("metadata") or {}
 
+    first_name = (
+        metadata.get("given_name")
+        or metadata.get("first_name")
+        or ""
+    )
+    if first_name:
+        return str(first_name).strip().split()[0]
+
+    full_name = str(
+        metadata.get("full_name")
+        or metadata.get("name")
+        or ""
+    ).strip()
+    if full_name:
+        return full_name.split()[0]
+
+    email = str(user.get("email") or "").strip()
+    if email:
+        candidate = email.split("@")[0]
+        candidate = candidate.replace(".", " ").replace("_", " ").replace("-", " ")
+        if candidate.strip():
+            return candidate.strip().split()[0].capitalize()
+
+    return "Mister"
+
+
+def _dynamic_greeting() -> str:
+    """Saluto in base all'ora italiana."""
+    try:
+        hour = datetime.now(ZoneInfo("Europe/Rome")).hour
+    except Exception:
+        hour = datetime.now().hour
+
+    if 5 <= hour < 12:
+        return "Buongiorno"
+    if 12 <= hour < 18:
+        return "Buon pomeriggio"
+    return "Buonasera"
+
+
+def render_authenticated_user_header(user: dict[str, Any]) -> None:
+    """Profilo minimale in alto a destra: saluto + avatar."""
+    first_name = escape(_first_name_from_user(user))
+    greeting = escape(_dynamic_greeting())
+    avatar = escape(_auth_avatar_url(user), quote=True)
+
+    avatar_html = (
+        f'<img class="rcd-profile-avatar" src="{avatar}" alt="Profilo">'
+        if avatar
+        else '<div class="rcd-profile-fallback">⚽</div>'
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        .rcd-user-topbar {{
+            display:flex;
+            align-items:center;
+            justify-content:flex-end;
+            gap:12px;
+            margin:-3.0rem 0 .55rem 0;
+            padding-right:.15rem;
+            min-height:54px;
+        }}
+        .rcd-user-greeting {{
+            display:flex;
+            align-items:center;
+            gap:8px;
+            font-size:1.02rem;
+            line-height:1;
+            font-weight:900;
+            color:#17325f !important;
+            white-space:nowrap;
+        }}
+        .rcd-user-ball {{
+            font-size:1.25rem;
+        }}
+        .rcd-profile-avatar,
+        .rcd-profile-fallback {{
+            width:46px;
+            height:46px;
+            border-radius:50%;
+            object-fit:cover;
+            border:3px solid #ffffff;
+            box-shadow:0 5px 16px rgba(30,64,175,.20);
+            background:#dbeafe;
+        }}
+        .rcd-profile-fallback {{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:1.25rem;
+        }}
+        @media (max-width: 720px) {{
+            .rcd-user-topbar {{
+                margin:-2.2rem 0 .45rem 0;
+            }}
+            .rcd-user-greeting {{
+                font-size:.90rem;
+            }}
+            .rcd-profile-avatar,
+            .rcd-profile-fallback {{
+                width:40px;
+                height:40px;
+            }}
+        }}
+        </style>
+        <div class="rcd-user-topbar">
+            <div class="rcd-user-greeting">
+                <span class="rcd-user-ball">⚽</span>
+                <span>{greeting} {first_name}!</span>
+            </div>
+            {avatar_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_logout_sidebar() -> None:
+    """Solo pulsante logout, senza Account/nome/email/avatar nella sidebar."""
     st.sidebar.markdown("---")
-    st.sidebar.markdown("#### 👤 Account")
-
-    if avatar:
-        st.sidebar.image(avatar, width=54)
-
-    st.sidebar.markdown(f"**{name}**")
-    if email and email != name:
-        st.sidebar.caption(email)
-
     if st.sidebar.button(
-        "Esci",
+        "↪ Esci",
         key="auth_logout",
         use_container_width=True,
     ):
@@ -1012,6 +1122,7 @@ def render_authenticated_user_sidebar(user: dict[str, Any]) -> None:
         st.rerun()
 
 
+
 def require_authentication() -> dict[str, Any]:
     """Gate dell'intera applicazione."""
     handle_oauth_callback()
@@ -1023,14 +1134,6 @@ def require_authentication() -> dict[str, Any]:
     render_login_page()
     st.stop()
     return {}
-
-
-# Controllo dipendenze principali per l'import XLSX.
-# Rimane discreto nella sidebar e aiuta a diagnosticare i deploy Streamlit.
-with st.sidebar.expander("🧩 Ambiente", expanded=False):
-    st.caption(f"openpyxl {openpyxl.__version__}")
-    st.caption(f"pandas {pd.__version__}")
-
 
 
 @st.cache_data(ttl=5)
@@ -4677,7 +4780,8 @@ def render_championship_lab_tab() -> None:
 def main() -> None:
 
     current_user = require_authentication()
-    render_authenticated_user_sidebar(current_user)
+    render_authenticated_user_header(current_user)
+    render_logout_sidebar()
 
     teams = load_teams()
     rosters = load_rosters()
