@@ -938,7 +938,7 @@ def render_login_page() -> None:
     login_html = (
         '<div class="login-shell">'
         '<div class="login-brand">'
-        '<div class="login-eyebrow">RCD ESCANYOL</div>'
+        '<div class="login-eyebrow">fantahe1per</div>'
         '<div class="login-title">⚽ Auction &amp; Season Center</div>'
         '<div class="login-subtitle">Asta, rosa, formazione e campionato in un unico posto.</div>'
         '</div>'
