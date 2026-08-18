@@ -2586,17 +2586,129 @@ def render_top5(
     preferred_players: set[Any],
     state: AuctionState | None = None,
 ) -> None:
-    st.sidebar.subheader("🔥 Top 5 Liberi (Ranking)")
+    """Top 5 liberi in formato card compatte e leggibili nella sidebar."""
+    st.sidebar.markdown(
+        """
+        <style>
+        .top5-title {
+            display:flex;
+            align-items:center;
+            gap:8px;
+            margin:.15rem 0 .65rem 0;
+            font-size:1.02rem;
+            font-weight:900;
+            color:#172033 !important;
+        }
+        .top5-stack {
+            display:flex;
+            flex-direction:column;
+            gap:8px;
+            margin-bottom:.65rem;
+        }
+        .top5-card {
+            display:grid;
+            grid-template-columns:38px minmax(0,1fr) auto;
+            grid-template-areas:
+                "rank name rating"
+                "rank meta price";
+            gap:2px 9px;
+            align-items:center;
+            padding:10px 11px;
+            border:1px solid #cfe0f8;
+            border-radius:13px;
+            background:linear-gradient(145deg,#ffffff 0%,#f1f6ff 100%);
+            box-shadow:0 4px 12px rgba(30,64,175,.055);
+        }
+        .top5-card:first-child {
+            border-color:#93c5fd;
+            background:
+                radial-gradient(circle at 92% 5%,rgba(59,130,246,.13),transparent 30%),
+                linear-gradient(145deg,#ffffff 0%,#edf5ff 100%);
+        }
+        .top5-rank {
+            grid-area:rank;
+            width:30px;
+            height:30px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            border-radius:9px;
+            background:#1d4ed8;
+            color:#ffffff !important;
+            font-weight:900;
+            font-size:.82rem;
+        }
+        .top5-name {
+            grid-area:name;
+            min-width:0;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+            font-weight:900;
+            font-size:.90rem;
+            color:#172033 !important;
+        }
+        .top5-meta {
+            grid-area:meta;
+            display:flex;
+            align-items:center;
+            gap:5px;
+            min-width:0;
+            font-size:.72rem;
+            font-weight:750;
+            color:#64748b !important;
+        }
+        .top5-role {
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            padding:1px 6px;
+            border-radius:6px;
+            background:#e8f0ff;
+            color:#315a9e !important;
+            font-weight:850;
+        }
+        .top5-tier {
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+        }
+        .top5-rating {
+            grid-area:rating;
+            white-space:nowrap;
+            font-size:.92rem;
+            font-weight:950;
+            color:#b45309 !important;
+        }
+        .top5-price {
+            grid-area:price;
+            white-space:nowrap;
+            font-size:.78rem;
+            font-weight:850;
+            color:#1d4ed8 !important;
+        }
+        .top5-pref {
+            color:#f59e0b !important;
+        }
+        </style>
+        <div class="top5-title">🔥 <span>Top 5 liberi</span></div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     players = load_players(role=role)
-
     available = [
         player for player in players
         if player["id"] not in bought_player_ids
     ]
 
-    goalkeeper_ranking = build_current_goalkeeper_ranking(state) if state else ALL_GOALKEEPER_RANKING
+    goalkeeper_ranking = (
+        build_current_goalkeeper_ranking(state)
+        if state
+        else ALL_GOALKEEPER_RANKING
+    )
     custom_modifiers = load_custom_modifiers()
+
     available.sort(
         key=lambda player: calculate_player_rating(
             player,
@@ -2607,25 +2719,46 @@ def render_top5(
         reverse=True,
     )
 
-    with st.sidebar.container(border=True):
-        if not available:
-            st.info("Nessun giocatore disponibile.")
-            return
+    if not available:
+        st.sidebar.info("Nessun giocatore disponibile.")
+        return
 
-        for index, player in enumerate(available[:5], start=1):
-            rating = calculate_player_rating(
-                player,
-                preferred_players,
-                custom_modifiers,
-                goalkeeper_ranking,
-            )
-            star = " ⭐" if player["id"] in preferred_players else ""
+    cards = ['<div class="top5-stack">']
 
-            st.markdown(
-                f"**{index}. {player['name']}**{star} "
-                f"`[{player['role']}]` ({player['team_nfl']}) — "
-                f"⭐️ **{rating}** | 💎 **{player['list_price']} cr**"
-            )
+    for index, player in enumerate(available[:5], start=1):
+        rating = calculate_player_rating(
+            player,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        tier = get_roster_tier(rating)
+        preferred = player["id"] in preferred_players
+
+        player_name = escape(str(player.get("name") or "—"))
+        player_role = escape(str(player.get("role") or "—"))
+        player_team = escape(str(player.get("team_nfl") or "—"))
+        list_price = int(player.get("list_price") or 0)
+        pref_html = '<span class="top5-pref">★</span>' if preferred else ""
+
+        card_html = (
+            '<div class="top5-card">'
+            f'<div class="top5-rank">{index}</div>'
+            f'<div class="top5-name">{player_name} {pref_html}</div>'
+            f'<div class="top5-rating">⭐ {rating:.1f}</div>'
+            '<div class="top5-meta">'
+            f'<span class="top5-role">{player_role}</span>'
+            f'<span>{player_team}</span>'
+            '<span>·</span>'
+            f'<span class="top5-tier">{escape(tier)}</span>'
+            '</div>'
+            f'<div class="top5-price">💎 {list_price} cr</div>'
+            '</div>'
+        )
+        cards.append(card_html)
+
+    cards.append("</div>")
+    st.sidebar.markdown("".join(cards), unsafe_allow_html=True)
 
 
 # ============================================================
