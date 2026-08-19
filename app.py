@@ -525,12 +525,33 @@ THREE_STARTERS_EXCLUDED_TOP_CLUBS = {
     "COM",  # Como
 }
 
-# Parametri esatti richiesti per il preset Bilanciato.
+# Budget consigliato su base 500 crediti.
+# Il preset Bilanciato parte dai range definiti dall'utente:
+# P 40–50, D 45–55, C 150–200; l'attacco riceve il residuo.
+STRATEGY_BUDGET_ALLOCATIONS = {
+    "Bilanciato": {
+        "P": 45,
+        "D": 50,
+        "C": 175,
+        "A": 230,
+    },
+    "Modificatore Difesa": {
+        "P": 55,
+        "D": 90,
+        "C": 155,
+        "A": 200,
+    },
+    "Bonus": {
+        "P": 30,
+        "D": 35,
+        "C": 190,
+        "A": 245,
+    },
+}
+
 BALANCED_BUDGET_TARGETS = {
-    "P": {"min": 40, "max": 50, "label": "40–50 cr · circa 8–10%"},
-    "D": {"min": 45, "max": 55, "label": "45–55 cr · circa 10–11%"},
-    "C": {"min": 150, "max": 200, "label": "150–200 cr · circa 30%"},
-    "A": {"min": None, "max": None, "label": "crediti rimanenti · circa 40%"},
+    role: {"target": credits}
+    for role, credits in STRATEGY_BUDGET_ALLOCATIONS["Bilanciato"].items()
 }
 
 CUSTOM_MODIFIERS = {
@@ -1164,11 +1185,11 @@ def render_login_page() -> None:
                 horizontal=True,
                 key="password_signup_credit_strategy",
             )
-            if selected_credit_strategy == "Bilanciato":
-                st.caption(
-                    "Bilanciato → P 40–50 cr · D 45–55 cr · "
-                    "C 150–200 cr · A: crediti rimanenti."
-                )
+            allocation = STRATEGY_BUDGET_ALLOCATIONS[selected_credit_strategy]
+            st.caption(
+                f"Budget consigliato → P {allocation['P']} · D {allocation['D']} · "
+                f"C {allocation['C']} · A {allocation['A']} cr"
+            )
 
         submit_label = "Accedi" if login_mode == "Accedi" else "Crea account"
         submitted = st.form_submit_button(
@@ -1937,11 +1958,11 @@ def require_user_team_assignment(
         horizontal=True,
         key="first_login_credit_strategy",
     )
-    if first_credit_strategy == "Bilanciato":
-        st.caption(
-            "P 40–50 cr · D 45–55 cr · C 150–200 cr · "
-            "A: crediti rimanenti."
-        )
+    first_allocation = STRATEGY_BUDGET_ALLOCATIONS[first_credit_strategy]
+    st.caption(
+        f"Budget consigliato → P {first_allocation['P']} · D {first_allocation['D']} · "
+        f"C {first_allocation['C']} · A {first_allocation['A']} cr"
+    )
 
     st.caption(
         "L'associazione e la strategia vengono ricordate ai prossimi accessi."
@@ -3701,20 +3722,11 @@ def build_smart_next_purchase_recommendation(
         )
         estimated_initial_budget = max(budget + total_spent, budget)
 
-        if credit_strategy == "Bilanciato":
-            goalkeeper_total_cap = BALANCED_BUDGET_TARGETS["P"]["max"]
-        elif credit_strategy == "Modificatore Difesa":
-            # Più libertà sul reparto arretrato, senza una soglia rigida dichiarata.
-            goalkeeper_total_cap = max(
-                6,
-                int(round(estimated_initial_budget * 0.12)),
-            )
-        else:
-            # Strategia Bonus: più conservativa sui portieri.
-            goalkeeper_total_cap = max(
-                6,
-                int(round(estimated_initial_budget * 0.08)),
-            )
+        # Il tetto portieri segue direttamente il piano crediti selezionato.
+        goalkeeper_total_cap = STRATEGY_BUDGET_ALLOCATIONS.get(
+            credit_strategy,
+            STRATEGY_BUDGET_ALLOCATIONS["Bilanciato"],
+        )["P"]
 
         # Manteniamo intenzionalmente una quota ampia del capitale per C/A:
         # il consiglio portieri non deve "mangiare" la possibilità di competere
@@ -6555,27 +6567,60 @@ def render_settings_page(
         key="settings_credit_strategy",
     )
 
-    if selected_credit == "Bilanciato":
-        st.markdown(
-            """
-            **Target Bilanciato**
+    allocation = STRATEGY_BUDGET_ALLOCATIONS[selected_credit]
+    allocation_total = sum(allocation.values())
+    role_meta = {
+        "P": ("🧤", "Portieri"),
+        "D": ("🛡️", "Difensori"),
+        "C": ("🎯", "Centrocampisti"),
+        "A": ("⚡", "Attaccanti"),
+    }
 
-            - 🧤 **Portieri:** 40–50 crediti (circa 8–10%)
-            - 🛡️ **Difensori:** 45–55 crediti (circa 10–11%)
-            - 🎯 **Centrocampisti:** 150–200 crediti (circa 30%)
-            - ⚡ **Attaccanti:** crediti rimanenti (circa 40%)
-            """
+    budget_chart_parts = [
+        "<style>"
+        ".budget-strategy-card{margin:14px 0 6px;padding:16px;border:1px solid #cbdcf5;"
+        "border-radius:18px;background:linear-gradient(145deg,#ffffff,#eef5ff);"
+        "box-shadow:0 7px 20px rgba(30,64,175,.07);}"
+        ".budget-chart-title{font-size:.76rem;font-weight:950;letter-spacing:.08em;"
+        "text-transform:uppercase;color:#315a9e!important;margin-bottom:12px;}"
+        ".budget-role-row{display:grid;grid-template-columns:165px 1fr 72px;gap:12px;"
+        "align-items:center;margin:10px 0;}"
+        ".budget-role-label{font-size:.86rem;font-weight:850;color:#172033!important;white-space:nowrap;}"
+        ".budget-role-track{height:13px;border-radius:999px;background:#e4ebf5;overflow:hidden;}"
+        ".budget-role-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#2563eb,#60a5fa);}"
+        ".budget-role-value{text-align:right;font-size:.88rem;font-weight:950;color:#172033!important;}"
+        ".budget-role-percent{font-size:.66rem;font-weight:750;color:#64748b!important;}"
+        ".budget-total{margin-top:13px;padding-top:10px;border-top:1px solid #d8e3f2;"
+        "display:flex;justify-content:space-between;font-size:.76rem;font-weight:850;color:#64748b!important;}"
+        "@media(max-width:720px){.budget-role-row{grid-template-columns:120px 1fr 62px;gap:8px;}"
+        ".budget-role-label{font-size:.76rem;}}"
+        "</style>"
+        f'<div class="budget-strategy-card">'
+        f'<div class="budget-chart-title">💰 Piano crediti · {escape(selected_credit)}</div>'
+    ]
+
+    for role in ("P", "D", "C", "A"):
+        icon, label = role_meta[role]
+        credits = int(allocation[role])
+        percent = (credits / allocation_total * 100) if allocation_total else 0
+        budget_chart_parts.append(
+            '<div class="budget-role-row">'
+            f'<div class="budget-role-label">{icon} {label}</div>'
+            '<div class="budget-role-track">'
+            f'<div class="budget-role-fill" style="width:{percent:.1f}%"></div>'
+            '</div>'
+            f'<div class="budget-role-value">{credits} cr'
+            f'<div class="budget-role-percent">{percent:.0f}%</div></div>'
+            '</div>'
         )
-    elif selected_credit == "Modificatore Difesa":
-        st.caption(
-            "Il motore darà più priorità qualitativa a portieri e difensori. "
-            "Non imposto ancora soglie rigide diverse da quelle Bilanciate."
-        )
-    else:
-        st.caption(
-            "Il motore privilegerà profili da bonus, rigoristi e qualità "
-            "offensiva soprattutto a centrocampo e in attacco."
-        )
+
+    budget_chart_parts.append(
+        '<div class="budget-total">'
+        '<span>Budget pianificato</span>'
+        f'<span>{allocation_total} crediti</span>'
+        '</div></div>'
+    )
+    st.markdown("".join(budget_chart_parts), unsafe_allow_html=True)
 
     st.divider()
 
