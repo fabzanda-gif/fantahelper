@@ -427,6 +427,14 @@ TEAM_GRADE_CALIBRATION_Y2 = 8.0
 DEFAULT_AUCTION_MULTIPLIER = 2.5
 MIN_HISTORY_FOR_ROLE_ESTIMATE = 2
 
+# Strategia di protezione budget durante l'asta.
+# I portieri devono restare un reparto relativamente economico per lasciare
+# margine sufficiente ai TOP di centrocampo e attacco.
+GOALKEEPER_TOTAL_BUDGET_SHARE = 0.14
+THIRD_GOALKEEPER_CURRENT_BUDGET_SHARE = 0.025
+SECOND_GOALKEEPER_CURRENT_BUDGET_SHARE = 0.08
+PREMIUM_C_A_RESERVE_SHARE = 0.58
+
 DRAFT_ORDER = ("P", "D", "C", "A")
 ROLE_NAMES = {
     "P": "Portieri",
@@ -3417,28 +3425,141 @@ def build_smart_next_purchase_recommendation(
 
     # 2) Goalkeeper-specific strategy.
     if role == "P":
+        # Quanto abbiamo già speso sui portieri.
+        team_purchases = state.team_purchases_map.get(team_name, [])
+        goalkeeper_spent = sum(
+            int(purchase.get("purchase_price") or 0)
+            for purchase in team_purchases
+            if (purchase.get("players") or {}).get("role") == "P"
+        )
+
+        # Stima del budget iniziale della squadra: residuo corrente + speso totale.
+        total_spent = sum(
+            int(purchase.get("purchase_price") or 0)
+            for purchase in team_purchases
+        )
+        estimated_initial_budget = max(budget + total_spent, budget)
+
+        goalkeeper_total_cap = max(
+            6,
+            int(round(estimated_initial_budget * GOALKEEPER_TOTAL_BUDGET_SHARE)),
+        )
+
+        # Manteniamo intenzionalmente una quota ampia del capitale per C/A:
+        # il consiglio portieri non deve "mangiare" la possibilità di competere
+        # per i profili premium più avanti nell'asta.
+        premium_future_reserve = int(
+            round(budget * PREMIUM_C_A_RESERVE_SHARE)
+        )
+
         if not owned_role:
             starters = [
                 p for p in available
                 if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
             ] or available
+
             rows = [
                 enrich(
                     p,
-                    "Primo portiere: parti dal profilo libero più forte, privilegiando una difesa affidabile.",
+                    "Primo portiere: cerca qualità, ma senza sovrainvestire. "
+                    "Il reparto portieri deve lasciare la maggior parte del budget "
+                    "disponibile per centrocampisti e attaccanti TOP.",
                     90,
                 )
                 for p in starters
             ]
+
+            # Primo portiere: qualità prima, ma il value rompe i pareggi.
             rows.sort(
                 key=lambda r: (
                     r["details"]["final_rating"],
                     r["value"],
+                    -r["estimate"]["estimated_price"],
                 ),
                 reverse=True,
             )
             return rows[0]
 
+        # ========================================================
+        # TERZO PORTIERE: deve essere un acquisto di copertura.
+        # Mai inseguire un altro TOP dopo aver già preso due P.
+        # ========================================================
+        if len(owned_role) >= 2:
+            owned_clubs = {
+                p.get("team_nfl")
+                for p in owned_role
+                if p.get("team_nfl")
+            }
+
+            # Prima scelta: riserva di un portiere che abbiamo già.
+            same_club_reserves = [
+                p for p in available
+                if p.get("status_titolarita") == "Riserva"
+                and p.get("team_nfl") in owned_clubs
+            ]
+
+            # Se non esiste, qualunque riserva economica è preferibile
+            # a spendere di nuovo per un portiere TOP.
+            reserve_pool = same_club_reserves or [
+                p for p in available
+                if p.get("status_titolarita") == "Riserva"
+            ]
+
+            # Ultimo fallback: portiere non-TOP più economico.
+            candidate_pool = reserve_pool or available
+
+            rows = [
+                enrich(
+                    p,
+                    (
+                        "Terzo portiere: ora la priorità è la copertura a basso costo, "
+                        "non aggiungere un altro TOP. Conserviamo crediti per poter "
+                        "competere sui migliori centrocampisti e attaccanti."
+                    ),
+                    110,
+                )
+                for p in candidate_pool
+            ]
+
+            third_keeper_cap = max(
+                2,
+                min(
+                    8,
+                    int(round(budget * THIRD_GOALKEEPER_CURRENT_BUDGET_SHARE)),
+                    max(2, goalkeeper_total_cap - goalkeeper_spent),
+                ),
+            )
+
+            affordable = [
+                r for r in rows
+                if int(r["estimate"]["estimated_price"]) <= third_keeper_cap
+            ]
+            if affordable:
+                rows = affordable
+
+            # Riserva dello stesso club > costo basso > rating.
+            rows.sort(
+                key=lambda r: (
+                    1 if r["player"].get("team_nfl") in owned_clubs else 0,
+                    1 if r["player"].get("status_titolarita") == "Riserva" else 0,
+                    -int(r["estimate"]["estimated_price"]),
+                    r["details"]["final_rating"],
+                ),
+                reverse=True,
+            )
+
+            best = rows[0]
+            best["reason"] = (
+                f"Terzo portiere: spenderei poco (target circa ≤ {third_keeper_cap} cr). "
+                f"Hai già due portieri: questo slot serve soprattutto come copertura. "
+                f"Obiettivo strategico: lasciare almeno ~{premium_future_reserve} cr "
+                "del budget attuale disponibili per costruire centrocampo e attacco."
+            )
+            return best
+
+        # ========================================================
+        # SECONDO PORTIERE
+        # ========================================================
         first_keeper = max(
             owned_role,
             key=lambda p: calculate_player_rating(
@@ -3468,20 +3589,24 @@ def build_smart_next_purchase_recommendation(
                 rows = [
                     enrich(
                         p,
-                        f"Hai già il portiere di {first_club}, una difesa sopra la media: prendere la sua riserva completa la copertura del blocco.",
-                        95,
+                        f"Hai già il portiere di {first_club}, una difesa sopra la media: "
+                        "la sua riserva completa il blocco spendendo poco e protegge "
+                        "il budget per i TOP di centrocampo e attacco.",
+                        105,
                     )
                     for p in same_club_reserves
                 ]
                 rows.sort(
                     key=lambda r: (
+                        -int(r["estimate"]["estimated_price"]),
                         r["details"]["final_rating"],
-                        -r["estimate"]["estimated_price"],
                     ),
                     reverse=True,
                 )
                 return rows[0]
 
+        # Se il primo portiere non appartiene a una difesa di prima fascia,
+        # cerchiamo un secondo TITOLARE, ma non un altro acquisto premium.
         other_starters = [
             p for p in available
             if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
@@ -3493,15 +3618,43 @@ def build_smart_next_purchase_recommendation(
             rows = [
                 enrich(
                     p,
-                    "Meglio aggiungere un altro portiere titolare: così puoi alternare più squadre invece di dipendere da una sola difesa.",
-                    85,
+                    "Secondo portiere: aggiungi un altro titolare di una squadra diversa, "
+                    "ma privilegiando rapporto qualità/prezzo. Due portieri TOP "
+                    "assorbirebbero troppo budget rispetto al vantaggio ottenuto.",
+                    90,
                 )
                 for p in other_starters
             ]
+
+            second_keeper_cap = max(
+                5,
+                min(
+                    20,
+                    int(round(budget * SECOND_GOALKEEPER_CURRENT_BUDGET_SHARE)),
+                    max(5, goalkeeper_total_cap - goalkeeper_spent),
+                ),
+            )
+
+            non_premium = [
+                r for r in rows
+                if float(r["details"]["final_rating"]) < 9.0
+                and int(r["estimate"]["estimated_price"]) <= second_keeper_cap
+            ]
+            affordable = [
+                r for r in rows
+                if int(r["estimate"]["estimated_price"]) <= second_keeper_cap
+            ]
+
+            if non_premium:
+                rows = non_premium
+            elif affordable:
+                rows = affordable
+
             rows.sort(
                 key=lambda r: (
-                    r["details"]["final_rating"],
                     r["value"],
+                    r["details"]["final_rating"],
+                    -int(r["estimate"]["estimated_price"]),
                 ),
                 reverse=True,
             )
