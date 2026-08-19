@@ -514,6 +514,17 @@ CREDIT_STRATEGY_OPTIONS = (
 DEFAULT_GOALKEEPER_STRATEGY = "Stessa Squadra"
 DEFAULT_CREDIT_STRATEGY = "Bilanciato"
 
+# Con la strategia "Tre titolari" evitiamo i portieri dei club TOP:
+# il vantaggio marginale non giustifica il costo e toglierebbe budget a C/A.
+THREE_STARTERS_EXCLUDED_TOP_CLUBS = {
+    "MIL",  # Milan
+    "INT",  # Inter
+    "JUV",  # Juventus
+    "NAP",  # Napoli
+    "ROM",  # Roma
+    "COM",  # Como
+}
+
 # Parametri esatti richiesti per il preset Bilanciato.
 BALANCED_BUDGET_TARGETS = {
     "P": {"min": 40, "max": 50, "label": "40–50 cr · circa 8–10%"},
@@ -3431,27 +3442,68 @@ def render_team_analysis(
             )
             st.sidebar.markdown(outlook_html, unsafe_allow_html=True)
         else:
+            # Durante l'asta mostriamo una card compatta invece dei box
+            # success/info/warning standard di Streamlit.
             if avg_score >= 8:
-                st.sidebar.success("Rosa da Scudetto!")
+                draft_icon = "🔥"
+                draft_title = "Rosa da Scudetto"
+                draft_text = "La qualità raccolta fin qui è da vertice."
+                draft_tone = "excellent"
             elif avg_score >= 6.5:
-                st.sidebar.info("Rosa competitiva.")
+                draft_icon = "⚔️"
+                draft_title = "Rosa competitiva"
+                draft_text = "La base è buona: ora conta come investi i crediti rimasti."
+                draft_tone = "competitive"
             else:
-                st.sidebar.warning("Rosa da rinforzare.")
+                draft_icon = "🛠️"
+                draft_title = "Rosa da rinforzare"
+                draft_text = "Hai ancora margine per alzare il livello nei prossimi acquisti."
+                draft_tone = "building"
+
+            avg_spendable = budget / max(1, slots_left)
+
+            draft_html = (
+                "<style>"
+                ".draft-status-card{padding:14px 15px;border-radius:16px;margin:11px 0 10px;"
+                "border:1px solid #cbdcf5;box-shadow:0 6px 18px rgba(30,64,175,.07);}"
+                ".draft-status-card.excellent{background:linear-gradient(135deg,#eafff2,#edf6ff);border-color:#9edab7;}"
+                ".draft-status-card.competitive{background:linear-gradient(135deg,#eef6ff,#f8fbff);border-color:#b9d5f5;}"
+                ".draft-status-card.building{background:linear-gradient(135deg,#fff8e8,#f4f8ff);border-color:#ead39a;}"
+                ".draft-status-head{display:flex;align-items:center;gap:9px;margin-bottom:5px;}"
+                ".draft-status-icon{font-size:1.35rem;line-height:1;}"
+                ".draft-status-title{font-size:1rem;font-weight:950;color:#172033!important;}"
+                ".draft-status-text{font-size:.75rem;line-height:1.35;color:#64748b!important;margin-bottom:11px;}"
+                ".draft-economy-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;}"
+                ".draft-economy-box{padding:9px 9px 8px;border-radius:11px;background:rgba(255,255,255,.72);"
+                "border:1px solid rgba(203,220,245,.85);}"
+                ".draft-economy-label{font-size:.62rem;font-weight:900;letter-spacing:.04em;"
+                "text-transform:uppercase;color:#7c8da8!important;margin-bottom:3px;}"
+                ".draft-economy-value{font-size:.95rem;font-weight:950;color:#172033!important;line-height:1.1;}"
+                ".draft-economy-sub{font-size:.65rem;font-weight:700;color:#64748b!important;margin-top:3px;}"
+                "</style>"
+                f'<div class="draft-status-card {draft_tone}">'
+                '<div class="draft-status-head">'
+                f'<span class="draft-status-icon">{draft_icon}</span>'
+                f'<span class="draft-status-title">{draft_title}</span>'
+                '</div>'
+                f'<div class="draft-status-text">{draft_text}</div>'
+                '<div class="draft-economy-grid">'
+                '<div class="draft-economy-box">'
+                '<div class="draft-economy-label">💰 Crediti</div>'
+                f'<div class="draft-economy-value">{budget} cr</div>'
+                f'<div class="draft-economy-sub">{credit_rank}° / {len(team_names)} per residuo</div>'
+                '</div>'
+                '<div class="draft-economy-box">'
+                '<div class="draft-economy-label">🎯 Margine slot</div>'
+                f'<div class="draft-economy-value">{avg_spendable:.1f} cr</div>'
+                f'<div class="draft-economy-sub">media · {slots_left} slot liberi</div>'
+                '</div>'
+                '</div></div>'
+            )
+            st.sidebar.markdown(draft_html, unsafe_allow_html=True)
     else:
         st.sidebar.metric("Rating Rosa", "N/D")
         st.sidebar.info("Assegna giocatori per calcolare il rating.")
-
-    # Il ranking crediti serve durante l'asta, non a rosa completa.
-    if slots_left:
-        st.sidebar.markdown(
-            f"💰 **Posizione Crediti:** {credit_rank}° su {len(team_names)} "
-            f"({budget} cr residui)"
-        )
-        avg_spendable = budget / slots_left
-        st.sidebar.caption(
-            f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** "
-            f"({slots_left} slot liberi)"
-        )
 
     st.sidebar.markdown("---")
 
@@ -3675,14 +3727,33 @@ def build_smart_next_purchase_recommendation(
             starters = [
                 p for p in available
                 if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
-            ] or available
+                and (
+                    goalkeeper_strategy != "Tre titolari"
+                    or p.get("team_nfl") not in THREE_STARTERS_EXCLUDED_TOP_CLUBS
+                )
+            ]
+
+            # Fallback tecnico solo se i dati non contengono alcun titolare
+            # compatibile: manteniamo comunque l'esclusione dei club TOP.
+            if not starters and goalkeeper_strategy == "Tre titolari":
+                starters = [
+                    p for p in available
+                    if p.get("team_nfl") not in THREE_STARTERS_EXCLUDED_TOP_CLUBS
+                ]
+            if not starters:
+                starters = available
 
             rows = [
                 enrich(
                     p,
-                    "Primo portiere: cerca qualità, ma senza sovrainvestire. "
-                    "Il reparto portieri deve lasciare la maggior parte del budget "
-                    "disponibile per centrocampisti e attaccanti TOP.",
+                    (
+                        "Primo portiere: nella strategia Tre titolari escludo i club TOP "
+                        "e cerco il miglior titolare fra le squadre più economiche. "
+                        if goalkeeper_strategy == "Tre titolari"
+                        else "Primo portiere: cerca qualità, ma senza sovrainvestire. "
+                        "Il reparto portieri deve lasciare la maggior parte del budget "
+                        "disponibile per centrocampisti e attaccanti TOP."
+                    ),
                     90,
                 )
                 for p in starters
@@ -3711,15 +3782,21 @@ def build_smart_next_purchase_recommendation(
             }
 
             if goalkeeper_strategy == "Tre titolari":
-                # Strategia esplicita: anche il terzo deve giocare.
+                # Strategia esplicita: anche il terzo deve giocare, ma mai da
+                # un club TOP perché il costo vanificherebbe il senso della strategia.
                 candidate_pool = [
                     p for p in available
                     if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
                     and p.get("team_nfl") not in owned_clubs
+                    and p.get("team_nfl") not in THREE_STARTERS_EXCLUDED_TOP_CLUBS
                 ] or [
                     p for p in available
                     if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
-                ] or available
+                    and p.get("team_nfl") not in THREE_STARTERS_EXCLUDED_TOP_CLUBS
+                ] or [
+                    p for p in available
+                    if p.get("team_nfl") not in THREE_STARTERS_EXCLUDED_TOP_CLUBS
+                ]
             else:
                 # Strategia blocco: prima scelta una riserva dello stesso club.
                 same_club_reserves = [
@@ -3838,6 +3915,10 @@ def build_smart_next_purchase_recommendation(
             and p.get("team_nfl") not in {
                 owned_player.get("team_nfl") for owned_player in owned_role
             }
+            and (
+                goalkeeper_strategy != "Tre titolari"
+                or p.get("team_nfl") not in THREE_STARTERS_EXCLUDED_TOP_CLUBS
+            )
         ]
         if other_starters:
             rows = [
@@ -6453,7 +6534,9 @@ def render_settings_page(
     if selected_gk == "Tre titolari":
         st.info(
             "🧤 **Tre titolari:** il motore cercherà tre portieri titolari "
-            "di squadre diverse, privilegiando rotazione e rapporto qualità/prezzo."
+            "di squadre diverse, escludendo Milan, Inter, Juventus, Napoli, Roma "
+            "e Como. L'obiettivo è spendere meno nel reparto e conservare crediti "
+            "per centrocampisti e attaccanti TOP."
         )
     else:
         st.info(
