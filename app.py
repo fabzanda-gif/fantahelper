@@ -3026,23 +3026,65 @@ def render_team_analysis(
         )
 
         if state.team_total_bought.get(selected_team, 0) >= TOTAL_SLOTS_PER_TEAM:
-            # A rosa completa la valutazione non usa più una soglia assoluta:
-            # conta il piazzamento rispetto alle altre 12 rose, quindi esprime
-            # direttamente il potenziale competitivo della squadra.
+            # A rosa completa il giudizio è relativo al ranking della lega.
             league_size = max(1, len(ratings))
 
             if rating_position == 1:
-                st.sidebar.success("🏆 Favorita per la vittoria.")
+                outlook_icon = "🏆"
+                outlook_title = "Favorita per la vittoria"
+                outlook_text = "La rosa parte davanti a tutte per qualità complessiva."
+                outlook_tone = "elite"
             elif rating_position <= max(2, round(league_size * 0.25)):
-                st.sidebar.success("🔥 Rosa da titolo.")
+                outlook_icon = "🔥"
+                outlook_title = "Rosa da titolo"
+                outlook_text = "Sei nel gruppo delle squadre con reali possibilità di vittoria."
+                outlook_tone = "strong"
             elif rating_position <= max(4, round(league_size * 0.42)):
-                st.sidebar.info("⚔️ Rosa da alta classifica.")
+                outlook_icon = "⚔️"
+                outlook_title = "Rosa da alta classifica"
+                outlook_text = "Rosa competitiva per stare stabilmente nelle prime posizioni."
+                outlook_tone = "good"
             elif rating_position <= max(6, round(league_size * 0.58)):
-                st.sidebar.info("📊 Rosa da metà classifica.")
+                outlook_icon = "📊"
+                outlook_title = "Rosa da metà classifica"
+                outlook_text = "Valore complessivo in linea con la zona centrale della lega."
+                outlook_tone = "mid"
             elif rating_position <= max(9, round(league_size * 0.75)):
-                st.sidebar.warning("📉 Rosa da medio-bassa classifica.")
+                outlook_icon = "📉"
+                outlook_title = "Rosa da medio-bassa classifica"
+                outlook_text = "Parte dietro alle rose più forti della lega."
+                outlook_tone = "warn"
             else:
-                st.sidebar.warning("⚠️ Rosa da bassa classifica.")
+                outlook_icon = "⚠️"
+                outlook_title = "Rosa da bassa classifica"
+                outlook_text = "Il rating complessivo la colloca tra le rose meno competitive."
+                outlook_tone = "bad"
+
+            outlook_html = (
+                "<style>"
+                ".roster-outlook{padding:15px 16px;border-radius:16px;margin:12px 0 8px;"
+                "border:1px solid #cbdcf5;box-shadow:0 7px 20px rgba(30,64,175,.07);}"
+                ".roster-outlook.elite{background:linear-gradient(135deg,#fff7d6,#eef5ff);border-color:#f4c95d;}"
+                ".roster-outlook.strong{background:linear-gradient(135deg,#e9fff3,#edf6ff);border-color:#9bd8b4;}"
+                ".roster-outlook.good{background:linear-gradient(135deg,#edf7ff,#f7fbff);border-color:#b9d5f5;}"
+                ".roster-outlook.mid{background:linear-gradient(135deg,#f3f6fb,#eef4ff);border-color:#cad6e8;}"
+                ".roster-outlook.warn{background:linear-gradient(135deg,#fff7df,#fffaf0);border-color:#e9cc83;}"
+                ".roster-outlook.bad{background:linear-gradient(135deg,#fff0f0,#fff7f7);border-color:#e7abab;}"
+                ".roster-outlook-top{display:flex;align-items:center;gap:10px;margin-bottom:6px;}"
+                ".roster-outlook-icon{font-size:1.45rem;line-height:1;}"
+                ".roster-outlook-title{font-size:1.02rem;font-weight:950;color:#172033!important;}"
+                ".roster-outlook-text{font-size:.78rem;line-height:1.35;color:#64748b!important;margin-bottom:8px;}"
+                ".roster-outlook-rank{display:inline-block;padding:4px 8px;border-radius:999px;"
+                "background:rgba(255,255,255,.72);font-size:.72rem;font-weight:850;color:#315a9e!important;}"
+                "</style>"
+                f"<div class=\"roster-outlook {outlook_tone}\">"
+                f"<div class=\"roster-outlook-top\"><span class=\"roster-outlook-icon\">{outlook_icon}</span>"
+                f"<span class=\"roster-outlook-title\">{outlook_title}</span></div>"
+                f"<div class=\"roster-outlook-text\">{outlook_text}</div>"
+                f"<span class=\"roster-outlook-rank\">Ranking rosa: {rating_position}° / {league_size}</span>"
+                "</div>"
+            )
+            st.sidebar.markdown(outlook_html, unsafe_allow_html=True)
         else:
             if avg_score >= 8:
                 st.sidebar.success("Rosa da Scudetto!")
@@ -3054,12 +3096,12 @@ def render_team_analysis(
         st.sidebar.metric("Rating Rosa", "N/D")
         st.sidebar.info("Assegna giocatori per calcolare il rating.")
 
-    st.sidebar.markdown(
-        f"💰 **Posizione Crediti:** {credit_rank}° su {len(team_names)} "
-        f"({budget} cr residui)"
-    )
-
+    # Il ranking crediti serve durante l'asta, non a rosa completa.
     if slots_left:
+        st.sidebar.markdown(
+            f"💰 **Posizione Crediti:** {credit_rank}° su {len(team_names)} "
+            f"({budget} cr residui)"
+        )
         avg_spendable = budget / slots_left
         st.sidebar.caption(
             f"Spesa media potenziale: **{avg_spendable:.1f} cr/slot** "
