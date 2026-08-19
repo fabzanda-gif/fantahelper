@@ -1255,8 +1255,8 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         }
         .rcd-profile-avatar,
         .rcd-profile-fallback {
-            width:56px;
-            height:56px;
+            width:70px;
+            height:70px;
             border-radius:50%;
             object-fit:cover;
             border:3px solid #ffffff;
@@ -1285,23 +1285,33 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
             background:#dbeafe !important;
             border-color:#93b6ea !important;
         }
-        /* Streamlit aggiunge un secondo chevron al trigger del popover:
-           lo nascondiamo e manteniamo soltanto la nostra freccia ⌄. */
-        .st-key-profile_nav_popover button svg {
-            display:none !important;
-        }
         .st-key-profile_nav_menu button {
             justify-content:flex-start !important;
             text-align:left !important;
             border-radius:10px !important;
             font-weight:700 !important;
         }
+        .st-key-profile_menu_logout button {
+            background:linear-gradient(135deg,#1d4ed8,#2563eb) !important;
+            border:1px solid #1d4ed8 !important;
+            color:#ffffff !important;
+            font-weight:850 !important;
+            border-radius:10px !important;
+            width:100% !important;
+        }
+        .st-key-profile_menu_logout button * {
+            color:#ffffff !important;
+        }
+        .st-key-profile_menu_logout button:hover {
+            background:linear-gradient(135deg,#1e40af,#1d4ed8) !important;
+            border-color:#1e40af !important;
+        }
         @media (max-width: 720px) {
             .rcd-nav-greeting { font-size:.90rem; }
             .rcd-profile-avatar,
             .rcd-profile-fallback {
-                width:50px;
-                height:50px;
+                width:60px;
+                height:60px;
             }
         }
         </style>
@@ -1310,7 +1320,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
     )
 
     _, greeting_col, menu_col, avatar_col = st.columns(
-        [7.9, 2.45, 0.42, 0.60],
+        [7.7, 2.45, 0.42, 0.78],
         gap="small",
         vertical_alignment="center",
     )
@@ -1322,7 +1332,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         )
 
     with menu_col:
-        with st.popover("⌄", key="profile_nav_popover", help="Apri menu"):
+        with st.popover(" ", key="profile_nav_popover"):
             st.markdown("**Navigazione**")
             with st.container(key="profile_nav_menu"):
                 for page, icon in pages.items():
@@ -1336,6 +1346,38 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
                     ):
                         st.session_state["active_page"] = page
                         st.rerun()
+
+            st.divider()
+            with st.container(key="profile_menu_logout"):
+                if st.button(
+                    "Logout",
+                    key="auth_logout_menu",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    try:
+                        flow_id = st.session_state.get("auth_flow_id") or "restored-session"
+                        auth_client = get_auth_flow_client(str(flow_id))
+                        access = st.session_state.get("auth_access_token")
+                        refresh = st.session_state.get("auth_refresh_token")
+                        if access and refresh:
+                            auth_client.auth.set_session(access, refresh)
+                        auth_client.auth.sign_out()
+                    except Exception:
+                        pass
+
+                    clear_auth_state()
+                    for key in (
+                        "current_user_team_id",
+                        "current_user_team_name",
+                        "_ui_defaults_for_team",
+                        "sidebar_team_analysis",
+                        "manual_target_team",
+                        "table_team_filter_tab2",
+                        "my_team_budget",
+                    ):
+                        st.session_state.pop(key, None)
+                    st.rerun()
 
     with avatar_col:
         if avatar:
@@ -5434,7 +5476,6 @@ def main() -> None:
     current_user = require_authentication()
     render_app_logo()
     active_page = render_authenticated_user_header(current_user)
-    render_logout_sidebar()
 
     teams = load_teams()
     require_user_team_assignment(current_user, teams)
