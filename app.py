@@ -499,6 +499,28 @@ SEASON_FILE = DATA_DIR / "season-2526.csv"
 # Richiede una tabella Supabase dedicata (SQL fornito sotto).
 CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
 USER_TEAM_TABLE = "user_team_assignments"
+USER_STRATEGY_TABLE = "user_strategy_settings"
+
+GOALKEEPER_STRATEGY_OPTIONS = (
+    "Tre titolari",
+    "Stessa Squadra",
+)
+CREDIT_STRATEGY_OPTIONS = (
+    "Modificatore Difesa",
+    "Bonus",
+    "Bilanciato",
+)
+
+DEFAULT_GOALKEEPER_STRATEGY = "Stessa Squadra"
+DEFAULT_CREDIT_STRATEGY = "Bilanciato"
+
+# Parametri esatti richiesti per il preset Bilanciato.
+BALANCED_BUDGET_TARGETS = {
+    "P": {"min": 40, "max": 50, "label": "40–50 cr · circa 8–10%"},
+    "D": {"min": 45, "max": 55, "label": "45–55 cr · circa 10–11%"},
+    "C": {"min": 150, "max": 200, "label": "150–200 cr · circa 30%"},
+    "A": {"min": None, "max": None, "label": "crediti rimanenti · circa 40%"},
+}
 
 CUSTOM_MODIFIERS = {
     "Nessuna modifica": {"key": None, "value": 0.0},
@@ -856,6 +878,8 @@ def sign_up_with_email_password(
     password: str,
     team_id: Any,
     team_name: str,
+    goalkeeper_strategy: str,
+    credit_strategy: str,
 ) -> tuple[bool, str]:
     """
     Registrazione Supabase email/password.
@@ -874,6 +898,8 @@ def sign_up_with_email_password(
                     "data": {
                         "signup_team_id": str(team_id),
                         "signup_team_name": team_name,
+                        "signup_goalkeeper_strategy": goalkeeper_strategy,
+                        "signup_credit_strategy": credit_strategy,
                     },
                     "email_redirect_to": get_public_app_url().rstrip("/") + "/",
                 },
@@ -914,6 +940,17 @@ def sign_up_with_email_password(
                         return False, (
                             "Account creato, ma non riesco ad associare la squadra: "
                             + error
+                        )
+
+                    strategy_ok, strategy_error = save_user_strategy_settings(
+                        user_id,
+                        goalkeeper_strategy,
+                        credit_strategy,
+                    )
+                    if not strategy_ok:
+                        return False, (
+                            "Account creato, ma non riesco a salvare la strategia: "
+                            + strategy_error
                         )
 
                 return True, "signed_in"
@@ -1059,6 +1096,8 @@ def render_login_page() -> None:
 
     registration_teams = load_registration_teams() if login_mode == "Registrati" else []
     selected_registration_team = None
+    selected_goalkeeper_strategy = DEFAULT_GOALKEEPER_STRATEGY
+    selected_credit_strategy = DEFAULT_CREDIT_STRATEGY
 
     with st.form("password_auth_form", clear_on_submit=False):
         email = st.text_input(
@@ -1095,6 +1134,31 @@ def render_login_page() -> None:
                     "La registrazione richiede la scelta della squadra."
                 )
 
+            st.markdown("##### 🎯 Strategia")
+            selected_goalkeeper_strategy = st.radio(
+                "Portieri",
+                GOALKEEPER_STRATEGY_OPTIONS,
+                index=GOALKEEPER_STRATEGY_OPTIONS.index(DEFAULT_GOALKEEPER_STRATEGY),
+                horizontal=True,
+                key="password_signup_goalkeeper_strategy",
+                help=(
+                    "Tre titolari: rotazione fra più squadre. "
+                    "Stessa Squadra: dopo il primo portiere, priorità alla copertura dello stesso club."
+                ),
+            )
+            selected_credit_strategy = st.radio(
+                "Bilanciamento crediti",
+                CREDIT_STRATEGY_OPTIONS,
+                index=CREDIT_STRATEGY_OPTIONS.index(DEFAULT_CREDIT_STRATEGY),
+                horizontal=True,
+                key="password_signup_credit_strategy",
+            )
+            if selected_credit_strategy == "Bilanciato":
+                st.caption(
+                    "Bilanciato → P 40–50 cr · D 45–55 cr · "
+                    "C 150–200 cr · A: crediti rimanenti."
+                )
+
         submit_label = "Accedi" if login_mode == "Accedi" else "Crea account"
         submitted = st.form_submit_button(
             submit_label,
@@ -1124,6 +1188,8 @@ def render_login_page() -> None:
                         password,
                         selected_registration_team["id"],
                         selected_registration_team["name"],
+                        selected_goalkeeper_strategy,
+                        selected_credit_strategy,
                     )
                     if not ok:
                         st.error(f"Registrazione non riuscita: {message}")
@@ -1244,6 +1310,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         "Giornate": "📥",
         "Formazione": "🧠",
         "Campionato": "🏆",
+        "Impostazioni": "⚙️",
     }
 
     if st.session_state.get("active_page") not in pages:
@@ -1565,6 +1632,124 @@ def get_current_user_team_id() -> str | None:
     return str(value) if value is not None else None
 
 
+def load_user_strategy_settings(user_id: str) -> dict[str, str]:
+    """Carica la strategia personale; usa default sicuri per utenti esistenti."""
+    try:
+        rows = (
+            supabase.table(USER_STRATEGY_TABLE)
+            .select("user_id, goalkeeper_strategy, credit_strategy")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            row = rows[0]
+            return {
+                "goalkeeper_strategy": (
+                    row.get("goalkeeper_strategy")
+                    if row.get("goalkeeper_strategy") in GOALKEEPER_STRATEGY_OPTIONS
+                    else DEFAULT_GOALKEEPER_STRATEGY
+                ),
+                "credit_strategy": (
+                    row.get("credit_strategy")
+                    if row.get("credit_strategy") in CREDIT_STRATEGY_OPTIONS
+                    else DEFAULT_CREDIT_STRATEGY
+                ),
+            }
+    except Exception as exc:
+        st.session_state["user_strategy_table_error"] = str(exc)
+
+    return {
+        "goalkeeper_strategy": DEFAULT_GOALKEEPER_STRATEGY,
+        "credit_strategy": DEFAULT_CREDIT_STRATEGY,
+    }
+
+
+def save_user_strategy_settings(
+    user_id: str,
+    goalkeeper_strategy: str,
+    credit_strategy: str,
+) -> tuple[bool, str]:
+    """Salva la strategia personale su Supabase."""
+    if goalkeeper_strategy not in GOALKEEPER_STRATEGY_OPTIONS:
+        goalkeeper_strategy = DEFAULT_GOALKEEPER_STRATEGY
+    if credit_strategy not in CREDIT_STRATEGY_OPTIONS:
+        credit_strategy = DEFAULT_CREDIT_STRATEGY
+
+    try:
+        (
+            supabase.table(USER_STRATEGY_TABLE)
+            .upsert(
+                {
+                    "user_id": user_id,
+                    "goalkeeper_strategy": goalkeeper_strategy,
+                    "credit_strategy": credit_strategy,
+                },
+                on_conflict="user_id",
+            )
+            .execute()
+        )
+        st.session_state["goalkeeper_strategy"] = goalkeeper_strategy
+        st.session_state["credit_strategy"] = credit_strategy
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def sync_user_strategy_session(user: dict[str, Any]) -> dict[str, str]:
+    """
+    Carica la strategia nel session_state.
+    Per una nuova registrazione usa anche i metadata come bootstrap.
+    """
+    user_id = str(user.get("id") or "").strip()
+    if not user_id:
+        return {
+            "goalkeeper_strategy": DEFAULT_GOALKEEPER_STRATEGY,
+            "credit_strategy": DEFAULT_CREDIT_STRATEGY,
+        }
+
+    settings = load_user_strategy_settings(user_id)
+
+    metadata = user.get("metadata") or {}
+    metadata_gk = metadata.get("signup_goalkeeper_strategy")
+    metadata_credit = metadata.get("signup_credit_strategy")
+
+    # Se esistono metadata di registrazione e non abbiamo ancora una riga
+    # persistente, proviamo a salvarli. Il fallback resta comunque funzionante.
+    table_error = st.session_state.get("user_strategy_table_error")
+    if metadata_gk in GOALKEEPER_STRATEGY_OPTIONS:
+        settings["goalkeeper_strategy"] = metadata_gk
+    if metadata_credit in CREDIT_STRATEGY_OPTIONS:
+        settings["credit_strategy"] = metadata_credit
+
+    if metadata_gk or metadata_credit:
+        save_user_strategy_settings(
+            user_id,
+            settings["goalkeeper_strategy"],
+            settings["credit_strategy"],
+        )
+
+    st.session_state["goalkeeper_strategy"] = settings["goalkeeper_strategy"]
+    st.session_state["credit_strategy"] = settings["credit_strategy"]
+    return settings
+
+
+def current_goalkeeper_strategy() -> str:
+    return str(
+        st.session_state.get("goalkeeper_strategy")
+        or DEFAULT_GOALKEEPER_STRATEGY
+    )
+
+
+def current_credit_strategy() -> str:
+    return str(
+        st.session_state.get("credit_strategy")
+        or DEFAULT_CREDIT_STRATEGY
+    )
+
+
 def load_user_team_assignment(user_id: str) -> dict[str, Any] | None:
     """Legge l'associazione persistente del solo utente autenticato."""
     try:
@@ -1726,13 +1911,33 @@ def require_user_team_assignment(
         if str(team["name"]) == selected_name
     )
 
+    st.markdown("#### 🎯 Strategia")
+    first_gk_strategy = st.radio(
+        "Portieri",
+        GOALKEEPER_STRATEGY_OPTIONS,
+        index=GOALKEEPER_STRATEGY_OPTIONS.index(DEFAULT_GOALKEEPER_STRATEGY),
+        horizontal=True,
+        key="first_login_goalkeeper_strategy",
+    )
+    first_credit_strategy = st.radio(
+        "Bilanciamento crediti",
+        CREDIT_STRATEGY_OPTIONS,
+        index=CREDIT_STRATEGY_OPTIONS.index(DEFAULT_CREDIT_STRATEGY),
+        horizontal=True,
+        key="first_login_credit_strategy",
+    )
+    if first_credit_strategy == "Bilanciato":
+        st.caption(
+            "P 40–50 cr · D 45–55 cr · C 150–200 cr · "
+            "A: crediti rimanenti."
+        )
+
     st.caption(
-        "L'associazione è personale: ai prossimi login l'app aprirà "
-        "automaticamente la tua squadra."
+        "L'associazione e la strategia vengono ricordate ai prossimi accessi."
     )
 
     if st.button(
-        "Conferma squadra",
+        "Conferma configurazione",
         type="primary",
         use_container_width=True,
         key="confirm_first_team_assignment",
@@ -1743,7 +1948,21 @@ def require_user_team_assignment(
             selected_name,
         )
         if ok:
-            st.success(f"Squadra associata: **{selected_name}**")
+            strategy_ok, strategy_error = save_user_strategy_settings(
+                user_id,
+                first_gk_strategy,
+                first_credit_strategy,
+            )
+            if not strategy_ok:
+                st.error(
+                    "Squadra associata, ma non riesco a salvare la strategia: "
+                    f"{strategy_error}"
+                )
+                st.stop()
+
+            st.success(
+                f"Configurazione salvata per **{selected_name}**."
+            )
             st.rerun()
         else:
             if "duplicate" in error.lower() or "unique" in error.lower():
@@ -3412,6 +3631,9 @@ def build_smart_next_purchase_recommendation(
 
     # 2) Goalkeeper-specific strategy.
     if role == "P":
+        goalkeeper_strategy = current_goalkeeper_strategy()
+        credit_strategy = current_credit_strategy()
+
         # Quanto abbiamo già speso sui portieri.
         team_purchases = state.team_purchases_map.get(team_name, [])
         goalkeeper_spent = sum(
@@ -3427,10 +3649,20 @@ def build_smart_next_purchase_recommendation(
         )
         estimated_initial_budget = max(budget + total_spent, budget)
 
-        goalkeeper_total_cap = max(
-            6,
-            int(round(estimated_initial_budget * GOALKEEPER_TOTAL_BUDGET_SHARE)),
-        )
+        if credit_strategy == "Bilanciato":
+            goalkeeper_total_cap = BALANCED_BUDGET_TARGETS["P"]["max"]
+        elif credit_strategy == "Modificatore Difesa":
+            # Più libertà sul reparto arretrato, senza una soglia rigida dichiarata.
+            goalkeeper_total_cap = max(
+                6,
+                int(round(estimated_initial_budget * 0.12)),
+            )
+        else:
+            # Strategia Bonus: più conservativa sui portieri.
+            goalkeeper_total_cap = max(
+                6,
+                int(round(estimated_initial_budget * 0.08)),
+            )
 
         # Manteniamo intenzionalmente una quota ampia del capitale per C/A:
         # il consiglio portieri non deve "mangiare" la possibilità di competere
@@ -3478,22 +3710,28 @@ def build_smart_next_purchase_recommendation(
                 if p.get("team_nfl")
             }
 
-            # Prima scelta: riserva di un portiere che abbiamo già.
-            same_club_reserves = [
-                p for p in available
-                if p.get("status_titolarita") == "Riserva"
-                and p.get("team_nfl") in owned_clubs
-            ]
-
-            # Se non esiste, qualunque riserva economica è preferibile
-            # a spendere di nuovo per un portiere TOP.
-            reserve_pool = same_club_reserves or [
-                p for p in available
-                if p.get("status_titolarita") == "Riserva"
-            ]
-
-            # Ultimo fallback: portiere non-TOP più economico.
-            candidate_pool = reserve_pool or available
+            if goalkeeper_strategy == "Tre titolari":
+                # Strategia esplicita: anche il terzo deve giocare.
+                candidate_pool = [
+                    p for p in available
+                    if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
+                    and p.get("team_nfl") not in owned_clubs
+                ] or [
+                    p for p in available
+                    if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
+                ] or available
+            else:
+                # Strategia blocco: prima scelta una riserva dello stesso club.
+                same_club_reserves = [
+                    p for p in available
+                    if p.get("status_titolarita") == "Riserva"
+                    and p.get("team_nfl") in owned_clubs
+                ]
+                reserve_pool = same_club_reserves or [
+                    p for p in available
+                    if p.get("status_titolarita") == "Riserva"
+                ]
+                candidate_pool = reserve_pool or available
 
             rows = [
                 enrich(
@@ -3566,7 +3804,7 @@ def build_smart_next_purchase_recommendation(
             and first_ga <= ga_median
         )
 
-        if strong_defence:
+        if strong_defence or goalkeeper_strategy == "Stessa Squadra":
             same_club_reserves = [
                 p for p in available
                 if p.get("team_nfl") == first_club
@@ -3654,6 +3892,7 @@ def build_smart_next_purchase_recommendation(
     )
     role_limit = ROLE_LIMITS.get(role, 1)
     role_coverage_ratio = starters_owned / max(1, role_limit)
+    credit_strategy = current_credit_strategy()
 
     slots_left = max(1, TOTAL_SLOTS_PER_TEAM - total_count)
     avg_budget_per_slot = budget / slots_left if budget else 0
@@ -3701,14 +3940,35 @@ def build_smart_next_purchase_recommendation(
     if not rows:
         return None
 
-    rows.sort(
-        key=lambda r: (
-            r["details"]["final_rating"],
-            r["value"],
-            -r["estimate"]["estimated_price"],
-        ),
-        reverse=True,
-    )
+    if credit_strategy == "Bonus" and role in {"C", "A"}:
+        rows.sort(
+            key=lambda r: (
+                1 if r["player"].get("rigorista") else 0,
+                r["details"]["final_rating"],
+                r["value"],
+                -r["estimate"]["estimated_price"],
+            ),
+            reverse=True,
+        )
+    elif credit_strategy == "Modificatore Difesa" and role == "D":
+        rows.sort(
+            key=lambda r: (
+                r["details"]["final_rating"],
+                1 if r["player"].get("status_titolarita") == "Titolare" else 0,
+                r["value"],
+                -r["estimate"]["estimated_price"],
+            ),
+            reverse=True,
+        )
+    else:
+        rows.sort(
+            key=lambda r: (
+                r["details"]["final_rating"],
+                r["value"],
+                -r["estimate"]["estimated_price"],
+            ),
+            reverse=True,
+        )
     return rows[0]
 
 
@@ -6133,6 +6393,155 @@ def render_championship_lab_tab() -> None:
     )
 
 
+def render_settings_page(
+    user: dict[str, Any],
+    teams: list[dict[str, Any]],
+) -> None:
+    """Impostazioni account, squadra e strategia d'asta."""
+    st.markdown(
+        '<div class="rcd-section">⚙️ Impostazioni</div>',
+        unsafe_allow_html=True,
+    )
+
+    user_id = str(user.get("id") or "").strip()
+    if not user_id:
+        st.error("Utente non identificato.")
+        return
+
+    current_team_id = get_current_user_team_id()
+    current_team_name = get_current_user_team_name()
+
+    team_names = [str(team.get("name") or "") for team in teams]
+    current_index = 0
+    for i, team in enumerate(teams):
+        if (
+            str(team.get("id")) == str(current_team_id)
+            or str(team.get("name")) == current_team_name
+        ):
+            current_index = i
+            break
+
+    settings = {
+        "goalkeeper_strategy": current_goalkeeper_strategy(),
+        "credit_strategy": current_credit_strategy(),
+    }
+
+    st.markdown("### 👕 Squadra")
+    selected_team_name = st.selectbox(
+        "Fantasquadra associata",
+        team_names,
+        index=current_index if team_names else 0,
+        key="settings_team",
+        help="Una fantasquadra può essere associata a un solo account.",
+    )
+    selected_team = next(
+        (team for team in teams if str(team.get("name")) == selected_team_name),
+        None,
+    )
+
+    st.markdown("### 🎯 Strategia portieri")
+    selected_gk = st.radio(
+        "Come vuoi costruire il reparto?",
+        GOALKEEPER_STRATEGY_OPTIONS,
+        index=GOALKEEPER_STRATEGY_OPTIONS.index(
+            settings["goalkeeper_strategy"]
+        ),
+        horizontal=True,
+        key="settings_goalkeeper_strategy",
+    )
+
+    if selected_gk == "Tre titolari":
+        st.info(
+            "🧤 **Tre titolari:** il motore cercherà tre portieri titolari "
+            "di squadre diverse, privilegiando rotazione e rapporto qualità/prezzo."
+        )
+    else:
+        st.info(
+            "🧤 **Stessa Squadra:** dopo il primo portiere, il motore darà "
+            "priorità alle sue riserve per completare il blocco a costi contenuti."
+        )
+
+    st.markdown("### 💰 Bilanciamento crediti")
+    selected_credit = st.radio(
+        "Priorità di spesa",
+        CREDIT_STRATEGY_OPTIONS,
+        index=CREDIT_STRATEGY_OPTIONS.index(
+            settings["credit_strategy"]
+        ),
+        horizontal=True,
+        key="settings_credit_strategy",
+    )
+
+    if selected_credit == "Bilanciato":
+        st.markdown(
+            """
+            **Target Bilanciato**
+
+            - 🧤 **Portieri:** 40–50 crediti (circa 8–10%)
+            - 🛡️ **Difensori:** 45–55 crediti (circa 10–11%)
+            - 🎯 **Centrocampisti:** 150–200 crediti (circa 30%)
+            - ⚡ **Attaccanti:** crediti rimanenti (circa 40%)
+            """
+        )
+    elif selected_credit == "Modificatore Difesa":
+        st.caption(
+            "Il motore darà più priorità qualitativa a portieri e difensori. "
+            "Non imposto ancora soglie rigide diverse da quelle Bilanciate."
+        )
+    else:
+        st.caption(
+            "Il motore privilegerà profili da bonus, rigoristi e qualità "
+            "offensiva soprattutto a centrocampo e in attacco."
+        )
+
+    st.divider()
+
+    if st.button(
+        "Salva impostazioni",
+        type="primary",
+        use_container_width=True,
+        key="save_settings",
+    ):
+        if selected_team is None:
+            st.error("Seleziona una squadra valida.")
+            return
+
+        team_ok, team_error = save_user_team_assignment(
+            user_id,
+            selected_team["id"],
+            selected_team_name,
+        )
+        if not team_ok:
+            if "duplicate" in team_error.lower() or "unique" in team_error.lower():
+                st.error(
+                    "Questa squadra è già associata a un altro account."
+                )
+            else:
+                st.error(f"Non riesco a salvare la squadra: {team_error}")
+            return
+
+        strategy_ok, strategy_error = save_user_strategy_settings(
+            user_id,
+            selected_gk,
+            selected_credit,
+        )
+        if not strategy_ok:
+            st.error(f"Non riesco a salvare la strategia: {strategy_error}")
+            return
+
+        # Nuovi default UI coerenti con la nuova squadra.
+        for key in (
+            "_ui_defaults_for_team",
+            "sidebar_team_analysis",
+            "manual_target_team",
+            "table_team_filter_tab2",
+        ):
+            st.session_state.pop(key, None)
+
+        st.success("Impostazioni salvate.")
+        st.rerun()
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -6145,6 +6554,7 @@ def main() -> None:
 
     teams = load_teams()
     require_user_team_assignment(current_user, teams)
+    sync_user_strategy_session(current_user)
     rosters = load_rosters()
 
     # Il budget visualizzato/usato dall'asta viene ricostruito dagli acquisti:
@@ -6309,6 +6719,12 @@ def main() -> None:
 
     elif active_page == "Campionato":
         render_championship_lab_tab()
+
+    elif active_page == "Impostazioni":
+        render_settings_page(
+            current_user,
+            teams,
+        )
 
 
 if __name__ == "__main__":
