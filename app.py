@@ -6183,12 +6183,6 @@ def main() -> None:
         else 0
     )
 
-    render_team_analysis(
-        teams_df,
-        state,
-        ratings,
-    )
-
     sidebar_role = get_my_team_draft_role(state)
     if not auction_finished and sidebar_role:
         render_smart_next_purchase_card(
@@ -6203,6 +6197,12 @@ def main() -> None:
             preferred_players,
             state,
         )
+
+    render_team_analysis(
+        teams_df,
+        state,
+        ratings,
+    )
 
     if active_page == "Asta":
         render_auction_dashboard_header(teams_df, state, ratings)
