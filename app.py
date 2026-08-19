@@ -1255,8 +1255,8 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         }
         .rcd-profile-avatar,
         .rcd-profile-fallback {
-            width:46px;
-            height:46px;
+            width:56px;
+            height:56px;
             border-radius:50%;
             object-fit:cover;
             border:3px solid #ffffff;
@@ -1285,6 +1285,11 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
             background:#dbeafe !important;
             border-color:#93b6ea !important;
         }
+        /* Streamlit aggiunge un secondo chevron al trigger del popover:
+           lo nascondiamo e manteniamo soltanto la nostra freccia ⌄. */
+        .st-key-profile_nav_popover button svg {
+            display:none !important;
+        }
         .st-key-profile_nav_menu button {
             justify-content:flex-start !important;
             text-align:left !important;
@@ -1295,8 +1300,8 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
             .rcd-nav-greeting { font-size:.90rem; }
             .rcd-profile-avatar,
             .rcd-profile-fallback {
-                width:40px;
-                height:40px;
+                width:50px;
+                height:50px;
             }
         }
         </style>
@@ -1305,7 +1310,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
     )
 
     _, greeting_col, menu_col, avatar_col = st.columns(
-        [8.0, 2.45, 0.42, 0.48],
+        [7.9, 2.45, 0.42, 0.60],
         gap="small",
         vertical_alignment="center",
     )
