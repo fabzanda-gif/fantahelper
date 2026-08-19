@@ -3067,41 +3067,155 @@ def render_team_analysis(
         )
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**📊 Cruscotto Rischi Rosa:**")
 
     risks = get_team_risk_counts(players)
 
     block_status = (
-        "👍 Ottimale" if risks["max_block"] < 4
-        else "👎 Rischio Blocco"
+        "Ottimale" if risks["max_block"] < 4
+        else "Rischio blocco"
     )
-    st.sidebar.write(
-        f"🚨 **Blocco Squadra:** {risks['max_block']} max | {block_status}"
-    )
+    block_tone = "good" if risks["max_block"] < 4 else "bad"
 
     ballot_status = risk_label(
         risks["ballottaggio"], 3, 6,
-        "👍 Ottimale", "🟡 Moderato", "👎 Troppi",
+        "Ottimale", "Moderato", "Troppi",
     )
-    st.sidebar.write(
-        f"⚠️ **Ballottaggi:** {risks['ballottaggio']} giocatori | "
-        f"{ballot_status}"
+    ballot_tone = (
+        "good" if risks["ballottaggio"] < 3
+        else "warn" if risks["ballottaggio"] < 6
+        else "bad"
     )
 
     card_status = risk_label(
         risks["cartellini"], 2, 4,
-        "👍 Pulita", "🟡 Attenzione", "👎 Troppi Malus",
+        "Pulita", "Attenzione", "Troppi malus",
     )
-    st.sidebar.write(
-        f"🟨 **A rischio malus:** {risks['cartellini']} | {card_status}"
+    card_tone = (
+        "good" if risks["cartellini"] < 2
+        else "warn" if risks["cartellini"] < 4
+        else "bad"
     )
 
     rookie_status = risk_label(
         risks["rookie"], 2, 4,
-        "👍 Esperti", "🟡 Equilibrato", "👎 Troppi Rookie",
+        "Esperti", "Equilibrato", "Troppi rookie",
     )
-    st.sidebar.write(
-        f"👶 **Primo anno in A:** {risks['rookie']} | {rookie_status}"
+    rookie_tone = (
+        "good" if risks["rookie"] < 2
+        else "warn" if risks["rookie"] < 4
+        else "bad"
+    )
+
+    st.sidebar.markdown(
+        f"""
+        <style>
+        .risk-dashboard-title {{
+            display:flex;
+            align-items:center;
+            gap:8px;
+            margin:.1rem 0 .65rem;
+            font-size:1rem;
+            font-weight:900;
+            color:#172033 !important;
+        }}
+        .risk-grid {{
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:8px;
+            margin-bottom:.6rem;
+        }}
+        .risk-card {{
+            min-width:0;
+            padding:10px 10px 9px;
+            border:1px solid #cfddf1;
+            border-radius:13px;
+            background:linear-gradient(145deg,#ffffff,#eef5ff);
+            box-shadow:0 4px 12px rgba(30,64,175,.05);
+        }}
+        .risk-card-head {{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:5px;
+            margin-bottom:5px;
+        }}
+        .risk-card-label {{
+            min-width:0;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+            font-size:.73rem;
+            font-weight:850;
+            color:#64748b !important;
+        }}
+        .risk-card-value {{
+            font-size:1.25rem;
+            line-height:1;
+            font-weight:950;
+            color:#172033 !important;
+        }}
+        .risk-chip {{
+            display:inline-block;
+            max-width:100%;
+            padding:3px 6px;
+            border-radius:999px;
+            font-size:.64rem;
+            line-height:1.15;
+            font-weight:850;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+        }}
+        .risk-chip.good {{
+            background:#dcfce7;
+            color:#166534 !important;
+        }}
+        .risk-chip.warn {{
+            background:#fef3c7;
+            color:#92400e !important;
+        }}
+        .risk-chip.bad {{
+            background:#fee2e2;
+            color:#991b1b !important;
+        }}
+        </style>
+
+        <div class="risk-dashboard-title">📊 <span>Rischi rosa</span></div>
+        <div class="risk-grid">
+            <div class="risk-card">
+                <div class="risk-card-head">
+                    <div class="risk-card-label">🚨 Blocco club</div>
+                    <div class="risk-card-value">{risks['max_block']}</div>
+                </div>
+                <span class="risk-chip {block_tone}">{block_status}</span>
+            </div>
+
+            <div class="risk-card">
+                <div class="risk-card-head">
+                    <div class="risk-card-label">⚠️ Ballottaggi</div>
+                    <div class="risk-card-value">{risks['ballottaggio']}</div>
+                </div>
+                <span class="risk-chip {ballot_tone}">{ballot_status}</span>
+            </div>
+
+            <div class="risk-card">
+                <div class="risk-card-head">
+                    <div class="risk-card-label">🟨 Cartellini</div>
+                    <div class="risk-card-value">{risks['cartellini']}</div>
+                </div>
+                <span class="risk-chip {card_tone}">{card_status}</span>
+            </div>
+
+            <div class="risk-card">
+                <div class="risk-card-head">
+                    <div class="risk-card-label">👶 Rookie</div>
+                    <div class="risk-card-value">{risks['rookie']}</div>
+                </div>
+                <span class="risk-chip {rookie_tone}">{rookie_status}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -4969,26 +5083,6 @@ def render_my_team_evaluation(
         else:
             st.caption("Non ci sono obiettivi compatibili disponibili per questo ruolo.")
 
-    # Classifica portieri solo quando almeno un portiere è stato acquistato.
-    ranking = build_current_goalkeeper_ranking(state)
-    if counts.get("P", 0) > 0 and ranking:
-        goalkeeper_rows = []
-        for code, position in sorted(ranking.items(), key=lambda item: item[1]):
-            goalkeeper_rows.append({
-                "Pos.": position,
-                "Squadra": code,
-                "Gol subiti": GOALS_CONCEDED.get(code, 0),
-                "Mod. P": GOALKEEPER_GOALS_CONCEDED_MODIFIERS.get(position, 0.0),
-            })
-        with st.expander("🧤 Strategia portieri / difese scelte"):
-            st.dataframe(
-                pd.DataFrame(goalkeeper_rows),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Mod. P": st.column_config.NumberColumn(format="%+.1f"),
-                },
-            )
 
 
 def render_my_roster(
@@ -5045,6 +5139,10 @@ def render_my_roster(
                 "Rating": details["final_rating"],
                 "Fascia": get_roster_tier(details["final_rating"]),
                 "Squadra": player.get("team_nfl", "—"),
+                "Titolarità": player.get("status_titolarita") or "—",
+                "Rigorista": "✅ Sì" if player.get("rigorista") else "—",
+                "Rookie": "🆕 Sì" if player.get("primo_anno_serie_a") else "—",
+                "Cartellini": player.get("propensione_cartellini") or "—",
                 "Crediti Spesi": int(purchase.get("purchase_price") or 0),
                 "Crediti Dichiarati": int(player.get("list_price") or 0),
                 "Moltiplicatore Asta": round(
@@ -5081,15 +5179,23 @@ def render_my_roster(
             display = pd.DataFrame(role_rows).drop(columns=["_sort_rating"])
             compact_cols = [
                 "Nome", "Rating", "Fascia", "Squadra",
-                "Crediti Spesi", "Bonus/Malus",
+                "Titolarità", "Rigorista", "Rookie",
+                "Cartellini", "Bonus/Malus",
             ]
             st.dataframe(
                 display[compact_cols],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Rating": st.column_config.NumberColumn(format="%.1f"),
-                    "Crediti Spesi": st.column_config.NumberColumn(format="%d cr"),
+                    "Nome": st.column_config.TextColumn(width="medium"),
+                    "Rating": st.column_config.NumberColumn(format="%.1f", width="small"),
+                    "Fascia": st.column_config.TextColumn(width="medium"),
+                    "Squadra": st.column_config.TextColumn(width="small"),
+                    "Titolarità": st.column_config.TextColumn(width="medium"),
+                    "Rigorista": st.column_config.TextColumn(width="small"),
+                    "Rookie": st.column_config.TextColumn(width="small"),
+                    "Cartellini": st.column_config.TextColumn(width="medium"),
+                    "Bonus/Malus": st.column_config.TextColumn(width="medium"),
                 },
             )
             with st.expander("Dettagli economici", expanded=False):
