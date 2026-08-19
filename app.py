@@ -2808,6 +2808,79 @@ def build_auction_state(
     )
 
 
+def _role_club_key(player: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(player.get("team_nfl") or ""),
+        str(player.get("role") or ""),
+    )
+
+
+def count_role_coverage_synergies(players: list[dict[str, Any]]) -> dict[str, int]:
+    """
+    Counts useful same-club/same-role cover combinations.
+
+    - starter + reserve: useful direct cover
+    - two ballot players: the pair covers the same starting slot uncertainty
+    """
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for player in players:
+        key = _role_club_key(player)
+        if not all(key):
+            continue
+        groups.setdefault(key, []).append(player)
+
+    starter_reserve_pairs = 0
+    ballot_pairs = 0
+
+    for group in groups.values():
+        starters = sum(
+            p.get("status_titolarita") == "Titolare"
+            for p in group
+        )
+        reserves = sum(
+            p.get("status_titolarita") == "Riserva"
+            for p in group
+        )
+        ballots = sum(
+            p.get("status_titolarita") == "Ballottaggio"
+            for p in group
+        )
+
+        starter_reserve_pairs += min(starters, reserves)
+        ballot_pairs += ballots // 2
+
+    return {
+        "starter_reserve_pairs": starter_reserve_pairs,
+        "ballot_pairs": ballot_pairs,
+    }
+
+
+def get_uncovered_ballot_players(
+    players: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Returns only ballot players that are not protected by another ballot
+    from the same Serie A club and role.
+
+    A pair of ballot players in the same club/role is treated as coverage,
+    therefore neither contributes to the ballot alert.
+    """
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for player in players:
+        if player.get("status_titolarita") != "Ballottaggio":
+            continue
+        key = _role_club_key(player)
+        groups.setdefault(key, []).append(player)
+
+    uncovered: list[dict[str, Any]] = []
+    for group in groups.values():
+        # Every complete pair is considered covered.
+        if len(group) % 2:
+            uncovered.append(group[-1])
+
+    return uncovered
+
+
 def player_team_weight(rating: float) -> float:
     """Peso del giocatore nella valutazione della rosa."""
     if rating >= 9.0:
@@ -2874,7 +2947,18 @@ def calculate_single_team_rating(
     # Profili deboli continuano a pesare, ma meno dei TOP in positivo.
     weak_penalty = min(1.20, weak_count * WEAK_PLAYER_PENALTY)
 
-    final = amplified + star_bonus - weak_penalty
+    coverage = count_role_coverage_synergies(players)
+
+    # A reserve behind our own starter, or a paired ballot from the same
+    # club/role, has more practical value than two unrelated uncertain slots.
+    # Keep the bonus deliberately modest so player quality remains dominant.
+    coverage_bonus = min(
+        0.45,
+        coverage["starter_reserve_pairs"] * 0.08
+        + coverage["ballot_pairs"] * 0.12,
+    )
+
+    final = amplified + star_bonus + coverage_bonus - weak_penalty
 
     return round(
         max(TEAM_RATING_MIN, min(TEAM_RATING_MAX, final)),
@@ -2955,10 +3039,7 @@ def get_team_risk_counts(players: list[dict[str, Any]]) -> dict[str, int]:
 
     return {
         "max_block": max(club_counts.values(), default=0),
-        "ballottaggio": sum(
-            player.get("status_titolarita") == "Ballottaggio"
-            for player in players
-        ),
+        "ballottaggio": len(get_uncovered_ballot_players(players)),
         "cartellini": sum(
             player.get("propensione_cartellini") == "A rischio malus"
             for player in players
@@ -3186,6 +3267,306 @@ def render_team_analysis(
         "</div>"
     )
     st.sidebar.markdown(risk_html, unsafe_allow_html=True)
+
+
+def build_smart_next_purchase_recommendation(
+    state: AuctionState,
+    rosters: list[dict[str, Any]],
+    preferred_players: set[Any],
+    role: str | None,
+) -> dict[str, Any] | None:
+    """
+    Chooses ONE next purchase using roster structure before pure value.
+
+    Priority:
+    1. Complete a same-club/same-role ballot pair.
+    2. Goalkeepers: after a keeper from a strong defence, prefer his reserve;
+       otherwise prefer another strong starting keeper.
+    3. In D/C/A, keep chasing strong options first.
+    4. If budget is tight and starters already cover the role, allow a cheap
+       same-club reserve to preserve credits for later premium slots.
+    """
+    if not role:
+        return None
+
+    team_name = get_my_team_name_from_state(state)
+    if not team_name:
+        return None
+
+    owned = state.team_players_map.get(team_name, [])
+    owned_role = [p for p in owned if p.get("role") == role]
+    budget = int(st.session_state.get("my_team_budget") or 0)
+    total_count = state.team_total_bought.get(team_name, 0)
+    slots_after = max(0, TOTAL_SLOTS_PER_TEAM - total_count - 1)
+
+    available = [
+        p for p in load_players(role=role)
+        if p.get("id") not in state.bought_player_ids
+    ]
+    if not available:
+        return None
+
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+
+    def enrich(player: dict[str, Any], reason: str, priority: int) -> dict[str, Any]:
+        details = calculate_player_rating_detailed(
+            player,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        estimate = estimate_auction_price(
+            player,
+            rosters,
+            budget=budget,
+            slots_left_after_purchase=slots_after,
+        )
+        return {
+            "player": player,
+            "details": details,
+            "estimate": estimate,
+            "reason": reason,
+            "priority": priority,
+            "value": get_price_value_score(
+                float(details["final_rating"]),
+                int(estimate["estimated_price"]),
+                int(player.get("list_price") or 1),
+            ),
+        }
+
+    # 1) Complete a ballot pair before generic recommendations.
+    ballot_keys = {
+        _role_club_key(p)
+        for p in owned_role
+        if p.get("status_titolarita") == "Ballottaggio"
+    }
+    paired_candidates = [
+        p for p in available
+        if p.get("status_titolarita") == "Ballottaggio"
+        and _role_club_key(p) in ballot_keys
+    ]
+    if paired_candidates:
+        rows = [
+            enrich(
+                p,
+                "Completa un ballottaggio che hai già in rosa: stessa squadra e stesso ruolo, quindi riduci il rischio di perdere il titolare.",
+                100,
+            )
+            for p in paired_candidates
+        ]
+        rows.sort(
+            key=lambda r: (
+                r["details"]["final_rating"],
+                r["value"],
+                -r["estimate"]["estimated_price"],
+            ),
+            reverse=True,
+        )
+        return rows[0]
+
+    # 2) Goalkeeper-specific strategy.
+    if role == "P":
+        if not owned_role:
+            starters = [
+                p for p in available
+                if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
+            ] or available
+            rows = [
+                enrich(
+                    p,
+                    "Primo portiere: parti dal profilo libero più forte, privilegiando una difesa affidabile.",
+                    90,
+                )
+                for p in starters
+            ]
+            rows.sort(
+                key=lambda r: (
+                    r["details"]["final_rating"],
+                    r["value"],
+                ),
+                reverse=True,
+            )
+            return rows[0]
+
+        first_keeper = max(
+            owned_role,
+            key=lambda p: calculate_player_rating(
+                p,
+                preferred_players,
+                custom_modifiers,
+                goalkeeper_ranking,
+            ),
+        )
+        first_club = first_keeper.get("team_nfl")
+        ga_values = list(GOALS_CONCEDED.values())
+        ga_median = float(pd.Series(ga_values).median()) if ga_values else None
+        first_ga = GOALS_CONCEDED.get(first_club)
+        strong_defence = (
+            first_ga is not None
+            and ga_median is not None
+            and first_ga <= ga_median
+        )
+
+        if strong_defence:
+            same_club_reserves = [
+                p for p in available
+                if p.get("team_nfl") == first_club
+                and p.get("status_titolarita") == "Riserva"
+            ]
+            if same_club_reserves:
+                rows = [
+                    enrich(
+                        p,
+                        f"Hai già il portiere di {first_club}, una difesa sopra la media: prendere la sua riserva completa la copertura del blocco.",
+                        95,
+                    )
+                    for p in same_club_reserves
+                ]
+                rows.sort(
+                    key=lambda r: (
+                        r["details"]["final_rating"],
+                        -r["estimate"]["estimated_price"],
+                    ),
+                    reverse=True,
+                )
+                return rows[0]
+
+        other_starters = [
+            p for p in available
+            if p.get("status_titolarita") in {"Titolare", "Ballottaggio"}
+            and p.get("team_nfl") not in {
+                owned_player.get("team_nfl") for owned_player in owned_role
+            }
+        ]
+        if other_starters:
+            rows = [
+                enrich(
+                    p,
+                    "Meglio aggiungere un altro portiere titolare: così puoi alternare più squadre invece di dipendere da una sola difesa.",
+                    85,
+                )
+                for p in other_starters
+            ]
+            rows.sort(
+                key=lambda r: (
+                    r["details"]["final_rating"],
+                    r["value"],
+                ),
+                reverse=True,
+            )
+            return rows[0]
+
+    # 3/4) Movement roles.
+    starters_owned = sum(
+        p.get("status_titolarita") == "Titolare"
+        for p in owned_role
+    )
+    role_limit = ROLE_LIMITS.get(role, 1)
+    role_coverage_ratio = starters_owned / max(1, role_limit)
+
+    slots_left = max(1, TOTAL_SLOTS_PER_TEAM - total_count)
+    avg_budget_per_slot = budget / slots_left if budget else 0
+    low_budget = budget > 0 and avg_budget_per_slot <= 4.0
+
+    if low_budget and role_coverage_ratio >= 0.5:
+        starter_keys = {
+            _role_club_key(p)
+            for p in owned_role
+            if p.get("status_titolarita") == "Titolare"
+        }
+        cheap_covers = [
+            p for p in available
+            if p.get("status_titolarita") == "Riserva"
+            and _role_club_key(p) in starter_keys
+        ]
+        if cheap_covers:
+            rows = [
+                enrich(
+                    p,
+                    "Budget stretto e ruolo già abbastanza coperto: questa riserva copre un tuo titolare a basso costo e conserva crediti per colpi più forti.",
+                    80,
+                )
+                for p in cheap_covers
+            ]
+            rows.sort(
+                key=lambda r: (
+                    r["estimate"]["estimated_price"],
+                    -r["details"]["final_rating"],
+                )
+            )
+            return rows[0]
+
+    # Default: quality first, then price/value. Never recommend below 6.5.
+    rows = []
+    for p in available:
+        row = enrich(
+            p,
+            "Priorità alla qualità nel ruolo: tra i profili forti privilegio quello con il miglior equilibrio fra rating e costo stimato.",
+            50,
+        )
+        if float(row["details"]["final_rating"]) >= 6.5:
+            rows.append(row)
+
+    if not rows:
+        return None
+
+    rows.sort(
+        key=lambda r: (
+            r["details"]["final_rating"],
+            r["value"],
+            -r["estimate"]["estimated_price"],
+        ),
+        reverse=True,
+    )
+    return rows[0]
+
+
+def render_smart_next_purchase_card(
+    state: AuctionState,
+    rosters: list[dict[str, Any]],
+    preferred_players: set[Any],
+    role: str | None,
+) -> None:
+    recommendation = build_smart_next_purchase_recommendation(
+        state,
+        rosters,
+        preferred_players,
+        role,
+    )
+    if not recommendation:
+        return
+
+    player = recommendation["player"]
+    details = recommendation["details"]
+    estimate = recommendation["estimate"]
+    reason = escape(str(recommendation["reason"]))
+    name = escape(str(player.get("name") or "—"))
+    club = escape(str(player.get("team_nfl") or "—"))
+    status = escape(str(player.get("status_titolarita") or "—"))
+    rating = float(details["final_rating"])
+
+    html = (
+        "<style>"
+        ".next-buy-card{padding:13px 14px;border:1px solid #9fc2f4;border-radius:15px;"
+        "background:radial-gradient(circle at 95% 5%,rgba(59,130,246,.14),transparent 32%),"
+        "linear-gradient(145deg,#ffffff,#edf5ff);box-shadow:0 7px 20px rgba(30,64,175,.07);"
+        "margin:.2rem 0 .85rem;}"
+        ".next-buy-kicker{font-size:.68rem;font-weight:950;letter-spacing:.08em;color:#2563eb!important;}"
+        ".next-buy-name{font-size:1.02rem;font-weight:950;color:#172033!important;margin:3px 0;}"
+        ".next-buy-meta{font-size:.72rem;font-weight:750;color:#64748b!important;margin-bottom:7px;}"
+        ".next-buy-reason{font-size:.74rem;line-height:1.35;color:#334155!important;}"
+        "</style>"
+        "<div class=\"next-buy-card\">"
+        "<div class=\"next-buy-kicker\">🎯 PROSSIMO ACQUISTO CONSIGLIATO</div>"
+        f"<div class=\"next-buy-name\">{name} · ⭐ {rating:.1f}</div>"
+        f"<div class=\"next-buy-meta\">{club} · {status} · "
+        f"Listino {int(player.get('list_price') or 0)} cr · "
+        f"Stima {int(estimate['estimated_price'])} cr</div>"
+        f"<div class=\"next-buy-reason\">{reason}</div>"
+        "</div>"
+    )
+    st.sidebar.markdown(html, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -3924,8 +4305,7 @@ def build_team_alerts(
 
     ballotaggio = [
         f"{player.get('name')} [{player.get('role')}]"
-        for player in players
-        if player.get("status_titolarita") == "Ballottaggio"
+        for player in get_uncovered_ballot_players(players)
     ]
     if bought >= 5 and len(ballotaggio) >= bought * 0.4:
         alerts.append(
@@ -5647,8 +6027,14 @@ def main() -> None:
             rosters,
         )
 
-        # La Top 5 serve solo durante l'asta.
+        # Consiglio strutturale prima della Top 5 generica.
         if not auction_finished:
+            render_smart_next_purchase_card(
+                state,
+                rosters,
+                preferred_players,
+                current_role,
+            )
             render_top5(
                 current_role,
                 state.bought_player_ids,
