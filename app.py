@@ -1253,20 +1253,42 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
             white-space:nowrap;
             padding-top:4px;
         }
-        .rcd-profile-avatar,
-        .rcd-profile-fallback {
+        .rcd-profile-avatar-wrap {
             width:70px;
             height:70px;
+            aspect-ratio:1 / 1;
+            flex:0 0 70px;
             border-radius:50%;
-            object-fit:cover;
-            border:3px solid #ffffff;
+            overflow:hidden;
+            border:4px solid #ffffff;
             box-shadow:0 5px 16px rgba(30,64,175,.20);
             background:#dbeafe;
-        }
-        .rcd-profile-avatar-wrap {
             display:flex;
-            justify-content:flex-end;
             align-items:center;
+            justify-content:center;
+        }
+        .rcd-profile-avatar {
+            display:block;
+            width:100% !important;
+            height:100% !important;
+            min-width:100% !important;
+            min-height:100% !important;
+            max-width:none !important;
+            max-height:none !important;
+            aspect-ratio:1 / 1;
+            object-fit:cover !important;
+            object-position:center center;
+            border:0 !important;
+            border-radius:0 !important;
+            clip-path:none !important;
+        }
+        .rcd-profile-fallback {
+            width:100%;
+            height:100%;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:1.5rem;
         }
         .st-key-profile_nav_popover button {
             width:38px !important;
@@ -1308,10 +1330,10 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         }
         @media (max-width: 720px) {
             .rcd-nav-greeting { font-size:.90rem; }
-            .rcd-profile-avatar,
-            .rcd-profile-fallback {
+            .rcd-profile-avatar-wrap {
                 width:60px;
                 height:60px;
+                flex-basis:60px;
             }
         }
         </style>
@@ -1390,8 +1412,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         else:
             st.markdown(
                 '<div class="rcd-profile-avatar-wrap">'
-                '<div class="rcd-profile-fallback" '
-                'style="display:flex;align-items:center;justify-content:center;">⚽</div>'
+                '<div class="rcd-profile-fallback">⚽</div>'
                 '</div>',
                 unsafe_allow_html=True,
             )
