@@ -1222,45 +1222,39 @@ def render_app_logo() -> None:
 
 
 
-def render_authenticated_user_header(user: dict[str, Any]) -> None:
-    """Profilo minimale in alto a destra: saluto + avatar."""
+def render_authenticated_user_header(user: dict[str, Any]) -> str:
+    """Header con saluto, menu a tendina e avatar."""
     first_name = escape(_first_name_from_user(user))
     greeting = escape(_dynamic_greeting())
     avatar = escape(_auth_avatar_url(user), quote=True)
 
-    avatar_html = (
-        f'<img class="rcd-profile-avatar" src="{avatar}" alt="Profilo">'
-        if avatar
-        else '<div class="rcd-profile-fallback">⚽</div>'
-    )
+    pages = {
+        "Asta": "🎯",
+        "Lega": "📊",
+        "Giocatori": "⭐",
+        "Bonus / Malus": "⚙️",
+        "Giornate": "📥",
+        "Formazione": "🧠",
+        "Campionato": "🏆",
+    }
+
+    if st.session_state.get("active_page") not in pages:
+        st.session_state["active_page"] = "Asta"
 
     st.markdown(
-        f"""
+        """
         <style>
-        .rcd-user-topbar {{
-            display:flex;
-            align-items:center;
-            justify-content:flex-end;
-            gap:12px;
-            margin:.35rem 0 .75rem 0;
-            padding-right:.15rem;
-            min-height:54px;
-        }}
-        .rcd-user-greeting {{
-            display:flex;
-            align-items:center;
-            gap:8px;
+        .rcd-nav-greeting {
+            text-align:right;
             font-size:1.02rem;
             line-height:1;
             font-weight:900;
             color:#17325f !important;
             white-space:nowrap;
-        }}
-        .rcd-user-ball {{
-            font-size:1.25rem;
-        }}
+            padding-top:4px;
+        }
         .rcd-profile-avatar,
-        .rcd-profile-fallback {{
+        .rcd-profile-fallback {
             width:46px;
             height:46px;
             border-radius:50%;
@@ -1268,37 +1262,95 @@ def render_authenticated_user_header(user: dict[str, Any]) -> None:
             border:3px solid #ffffff;
             box-shadow:0 5px 16px rgba(30,64,175,.20);
             background:#dbeafe;
-        }}
-        .rcd-profile-fallback {{
+        }
+        .rcd-profile-avatar-wrap {
             display:flex;
+            justify-content:flex-end;
             align-items:center;
-            justify-content:center;
-            font-size:1.25rem;
-        }}
-        @media (max-width: 720px) {{
-            .rcd-user-topbar {{
-                margin:.25rem 0 .65rem 0;
-            }}
-            .rcd-user-greeting {{
-                font-size:.90rem;
-            }}
+        }
+        .st-key-profile_nav_popover button {
+            width:38px !important;
+            min-width:38px !important;
+            height:38px !important;
+            min-height:38px !important;
+            padding:0 !important;
+            border-radius:50% !important;
+            border:1px solid #bfd2ee !important;
+            background:#eef5ff !important;
+            color:#17325f !important;
+            font-size:1.1rem !important;
+            box-shadow:0 4px 12px rgba(30,64,175,.10) !important;
+        }
+        .st-key-profile_nav_popover button:hover {
+            background:#dbeafe !important;
+            border-color:#93b6ea !important;
+        }
+        .st-key-profile_nav_menu button {
+            justify-content:flex-start !important;
+            text-align:left !important;
+            border-radius:10px !important;
+            font-weight:700 !important;
+        }
+        @media (max-width: 720px) {
+            .rcd-nav-greeting { font-size:.90rem; }
             .rcd-profile-avatar,
-            .rcd-profile-fallback {{
+            .rcd-profile-fallback {
                 width:40px;
                 height:40px;
-            }}
-        }}
+            }
+        }
         </style>
-        <div class="rcd-user-topbar">
-            <div class="rcd-user-greeting">
-                <span class="rcd-user-ball">⚽</span>
-                <span>{greeting} {first_name}!</span>
-            </div>
-            {avatar_html}
-        </div>
         """,
         unsafe_allow_html=True,
     )
+
+    _, greeting_col, menu_col, avatar_col = st.columns(
+        [8.0, 2.45, 0.42, 0.48],
+        gap="small",
+        vertical_alignment="center",
+    )
+
+    with greeting_col:
+        st.markdown(
+            f'<div class="rcd-nav-greeting">⚽ {greeting} {first_name}!</div>',
+            unsafe_allow_html=True,
+        )
+
+    with menu_col:
+        with st.popover("⌄", key="profile_nav_popover", help="Apri menu"):
+            st.markdown("**Navigazione**")
+            with st.container(key="profile_nav_menu"):
+                for page, icon in pages.items():
+                    active = page == st.session_state["active_page"]
+                    label = f"{icon} {page}" + ("  ✓" if active else "")
+                    if st.button(
+                        label,
+                        key=f"nav_page_{normalize_string(page)}",
+                        use_container_width=True,
+                        type="primary" if active else "secondary",
+                    ):
+                        st.session_state["active_page"] = page
+                        st.rerun()
+
+    with avatar_col:
+        if avatar:
+            st.markdown(
+                f'<div class="rcd-profile-avatar-wrap">'
+                f'<img class="rcd-profile-avatar" src="{avatar}" alt="Profilo">'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="rcd-profile-avatar-wrap">'
+                '<div class="rcd-profile-fallback" '
+                'style="display:flex;align-items:center;justify-content:center;">⚽</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+    return st.session_state["active_page"]
+
 
 
 def render_logout_sidebar() -> None:
@@ -5376,7 +5428,7 @@ def main() -> None:
 
     current_user = require_authentication()
     render_app_logo()
-    render_authenticated_user_header(current_user)
+    active_page = render_authenticated_user_header(current_user)
     render_logout_sidebar()
 
     teams = load_teams()
@@ -5403,19 +5455,7 @@ def main() -> None:
     auction_finished = is_auction_finished(state)
 
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-        [
-            "🎯 Asta",
-            "📊 Lega",
-            "⭐ Giocatori",
-            "⚙️ Bonus / Malus",
-            "📥 Giornate",
-            "🧠 Formazione",
-            "🏆 Campionato",
-        ]
-    )
-
-    with tab1:
+    if active_page == "Asta":
         render_auction_dashboard_header(teams_df, state, ratings)
 
         # Mostrato dopo il rerun dell'acquisto.
@@ -5509,7 +5549,7 @@ def main() -> None:
                 state,
             )
 
-    with tab2:
+    elif active_page == "Lega":
         render_team_overview(
             teams_df,
             state,
@@ -5524,19 +5564,19 @@ def main() -> None:
             ratings,
         )
 
-    with tab3:
+    elif active_page == "Giocatori":
         render_all_players_tab()
 
-    with tab4:
+    elif active_page == "Bonus / Malus":
         render_player_modifiers_tab()
 
-    with tab5:
+    elif active_page == "Giornate":
         render_matchday_import_tab()
 
-    with tab6:
+    elif active_page == "Formazione":
         render_formation_lab_tab(state)
 
-    with tab7:
+    elif active_page == "Campionato":
         render_championship_lab_tab()
 
 
