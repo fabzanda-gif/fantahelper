@@ -1979,30 +1979,30 @@ def queue_purchase_banner(
     if rating >= 9.0:
         level = "massive"
         title = "🏆 COLPO TOP!"
-        message = (
-            f"**{player_name}** entra nella rosa **{team_name}** · "
-            f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
-        )
+        lead = "entra nella rosa"
+        closing = ""
     elif rating >= 8.0:
         level = "great"
         title = "✨ PRIMA FASCIA!"
-        message = (
-            f"Acquistato **{player_name}** · Rating **{rating:.1f}** · "
-            f"Prezzo **{purchase_price} cr**. Innesto di livello."
-        )
+        lead = "entra nella rosa"
+        closing = "Innesto di livello."
     else:
         level = "normal"
         title = "✅ ACQUISTO COMPLETATO"
-        message = (
-            f"**{player_name}** è un nuovo giocatore di **{team_name}** · "
-            f"Rating **{rating:.1f}** · Pagato **{purchase_price} cr**."
-        )
+        lead = "è un nuovo giocatore di"
+        closing = ""
 
     st.session_state["pending_purchase_banner"] = {
         "level": level,
         "title": title,
-        "message": message,
+        "player_name": player_name,
+        "team_name": team_name,
+        "rating": float(rating),
+        "purchase_price": int(purchase_price),
+        "lead": lead,
+        "closing": closing,
     }
+
 
 
 def render_pending_purchase_banner() -> None:
@@ -2011,72 +2011,59 @@ def render_pending_purchase_banner() -> None:
     if not banner:
         return
 
-    # Evita che il banner venga riprodotto ad ogni rerun, ma lo mantiene
-    # abbastanza a lungo da poter essere visualizzato anche se la pagina
-    # ricostruisce più volte la UI.
     st.session_state.pop("pending_purchase_banner", None)
-    level = banner["level"]
-    text = f"**{banner['title']}** — {banner['message']}"
 
-    # Banner visivo indipendente dai widget di Streamlit: rimane visibile
-    # anche se il browser blocca l'autoplay dell'audio.
+    level = banner["level"]
     banner_class = {
         "massive": "massive",
         "great": "great",
         "normal": "normal",
     }.get(level, "normal")
-    st.markdown(
-        f"""
-        <div class=\"auction-banner {banner_class}\">
-            <div class=\"auction-banner-title\">{banner['title']}</div>
-            <div class=\"auction-banner-text\">{banner['message']}</div>
-        </div>
-        <style>
-        .auction-banner {{
-            padding: 22px 28px; margin: 12px 0 22px; border-radius: 18px;
-            text-align: center; font-size: 1.15rem;
-            border: 2px solid rgba(255,255,255,.55);
-            box-shadow: 0 10px 30px rgba(0,0,0,.16);
-            animation: auctionPulse 1.1s ease-in-out 2;
-        }}
-        .auction-banner.massive {{
-            background: radial-gradient(circle at 90% 10%, rgba(250,204,21,.35), transparent 28%),
-                        linear-gradient(135deg,#4c1d95,#1e3a8a);
-            color:white;
-        }}
-        .auction-banner.great {{
-            background: radial-gradient(circle at 90% 10%, rgba(74,222,128,.30), transparent 30%),
-                        linear-gradient(135deg,#064e3b,#0f766e);
-            color:white;
-        }}
-        .auction-banner.normal {{
-            background: linear-gradient(135deg,#1e3a8a,#0f172a);
-            color:white;
-        }}
-        .auction-banner,
-        .auction-banner *,
-        .auction-banner-title,
-        .auction-banner-text {{
-            color: #ffffff !important;
-        }}
-        .auction-banner-title {{
-            font-size: 1.8rem;
-            font-weight: 900;
-            margin-bottom: 6px;
-            letter-spacing:.02em;
-        }}
-        .auction-banner-text {{
-            font-weight: 650;
-            color: #ffffff !important;
-        }}
-        @keyframes auctionPulse {{
-            0%,100% {{ transform: scale(1); }}
-            50% {{ transform: scale(1.025); }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+
+    player_name = escape(str(banner.get("player_name") or "—"))
+    team_name = escape(str(banner.get("team_name") or "—"))
+    rating = float(banner.get("rating") or 0.0)
+    purchase_price = int(banner.get("purchase_price") or 0)
+    lead = escape(str(banner.get("lead") or "entra nella rosa"))
+    closing = escape(str(banner.get("closing") or ""))
+
+    closing_html = (
+        f'<span class="auction-banner-closing">{closing}</span>'
+        if closing
+        else ""
     )
+
+    banner_html = (
+        "<style>"
+        ".auction-banner{padding:22px 28px;margin:12px 0 22px;border-radius:18px;"
+        "text-align:center;border:2px solid rgba(255,255,255,.55);"
+        "box-shadow:0 10px 30px rgba(0,0,0,.16);animation:auctionPulse 1.1s ease-in-out 2;}"
+        ".auction-banner.massive{background:radial-gradient(circle at 90% 10%,rgba(250,204,21,.35),transparent 28%),"
+        "linear-gradient(135deg,#4c1d95,#1e3a8a);}"
+        ".auction-banner.great{background:radial-gradient(circle at 90% 10%,rgba(74,222,128,.30),transparent 30%),"
+        "linear-gradient(135deg,#064e3b,#0f766e);}"
+        ".auction-banner.normal{background:linear-gradient(135deg,#1e3a8a,#0f172a);}"
+        ".auction-banner,.auction-banner *{color:#fff!important;}"
+        ".auction-banner-title{font-size:1.8rem;font-weight:900;margin-bottom:8px;letter-spacing:.02em;}"
+        ".auction-banner-text{font-size:1.06rem;font-weight:600;line-height:1.45;}"
+        ".auction-banner-text strong{font-weight:900;}"
+        ".auction-banner-dot{opacity:.72;padding:0 5px;}"
+        ".auction-banner-closing{display:block;margin-top:5px;font-size:.88rem;opacity:.9;}"
+        "@keyframes auctionPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.025)}}"
+        "</style>"
+        f'<div class="auction-banner {banner_class}">'
+        f'<div class="auction-banner-title">{escape(str(banner["title"]))}</div>'
+        '<div class="auction-banner-text">'
+        f'<strong>{player_name}</strong> {lead} <strong>{team_name}</strong>'
+        '<span class="auction-banner-dot">·</span>'
+        f'Rating <strong>{rating:.1f}</strong>'
+        '<span class="auction-banner-dot">·</span>'
+        f'Pagato <strong>{purchase_price} cr</strong>'
+        f'{closing_html}'
+        '</div></div>'
+    )
+
+    st.markdown(banner_html, unsafe_allow_html=True)
 
     if level == "massive":
         st.balloons()
@@ -6183,6 +6170,39 @@ def main() -> None:
     completed_roles = calculate_completed_roles(state)
     auction_finished = is_auction_finished(state)
 
+    # Sidebar persistente: resta disponibile in tutte le sezioni dell'app.
+    my_team_name = get_my_team_name_from_state(state)
+    my_team_row = (
+        teams_df[teams_df["name"] == my_team_name]
+        if my_team_name
+        else pd.DataFrame()
+    )
+    st.session_state["my_team_budget"] = (
+        int(my_team_row.iloc[0]["remaining_budget"])
+        if not my_team_row.empty
+        else 0
+    )
+
+    render_team_analysis(
+        teams_df,
+        state,
+        ratings,
+    )
+
+    sidebar_role = get_my_team_draft_role(state)
+    if not auction_finished and sidebar_role:
+        render_smart_next_purchase_card(
+            state,
+            rosters,
+            preferred_players,
+            sidebar_role,
+        )
+        render_top5(
+            sidebar_role,
+            state.bought_player_ids,
+            preferred_players,
+            state,
+        )
 
     if active_page == "Asta":
         render_auction_dashboard_header(teams_df, state, ratings)
@@ -6208,10 +6228,6 @@ def main() -> None:
             current_role = "ALL"
 
         # Il pannello contiene tutti e 5 i dropdown/controlli sulla stessa riga.
-        my_team_name = get_my_team_name_from_state(state)
-        my_team_row = teams_df[teams_df["name"] == my_team_name] if my_team_name else pd.DataFrame()
-        st.session_state["my_team_budget"] = int(my_team_row.iloc[0]["remaining_budget"]) if not my_team_row.empty else 0
-
         draft_role = get_my_team_draft_role(state)
         if draft_role:
             draft_label = role_label(draft_role)
@@ -6233,21 +6249,6 @@ def main() -> None:
             current_role,
             rosters,
         )
-
-        # Consiglio strutturale prima della Top 5 generica.
-        if not auction_finished:
-            render_smart_next_purchase_card(
-                state,
-                rosters,
-                preferred_players,
-                current_role,
-            )
-            render_top5(
-                current_role,
-                state.bought_player_ids,
-                preferred_players,
-                state,
-            )
 
         resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
         if resolved_my_team:
@@ -6274,11 +6275,6 @@ def main() -> None:
         render_my_roster(state)
 
         with st.expander("🛠️ Strumenti asta e diagnostica", expanded=False):
-            render_team_analysis(
-                teams_df,
-                state,
-                ratings,
-            )
             render_admin_tools(
                 teams_df,
                 state,
