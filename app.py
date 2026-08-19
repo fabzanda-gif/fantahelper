@@ -3106,117 +3106,44 @@ def render_team_analysis(
         else "bad"
     )
 
-    st.sidebar.markdown(
-        f"""
-        <style>
-        .risk-dashboard-title {{
-            display:flex;
-            align-items:center;
-            gap:8px;
-            margin:.1rem 0 .65rem;
-            font-size:1rem;
-            font-weight:900;
-            color:#172033 !important;
-        }}
-        .risk-grid {{
-            display:grid;
-            grid-template-columns:1fr 1fr;
-            gap:8px;
-            margin-bottom:.6rem;
-        }}
-        .risk-card {{
-            min-width:0;
-            padding:10px 10px 9px;
-            border:1px solid #cfddf1;
-            border-radius:13px;
-            background:linear-gradient(145deg,#ffffff,#eef5ff);
-            box-shadow:0 4px 12px rgba(30,64,175,.05);
-        }}
-        .risk-card-head {{
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            gap:5px;
-            margin-bottom:5px;
-        }}
-        .risk-card-label {{
-            min-width:0;
-            overflow:hidden;
-            text-overflow:ellipsis;
-            white-space:nowrap;
-            font-size:.73rem;
-            font-weight:850;
-            color:#64748b !important;
-        }}
-        .risk-card-value {{
-            font-size:1.25rem;
-            line-height:1;
-            font-weight:950;
-            color:#172033 !important;
-        }}
-        .risk-chip {{
-            display:inline-block;
-            max-width:100%;
-            padding:3px 6px;
-            border-radius:999px;
-            font-size:.64rem;
-            line-height:1.15;
-            font-weight:850;
-            white-space:nowrap;
-            overflow:hidden;
-            text-overflow:ellipsis;
-        }}
-        .risk-chip.good {{
-            background:#dcfce7;
-            color:#166534 !important;
-        }}
-        .risk-chip.warn {{
-            background:#fef3c7;
-            color:#92400e !important;
-        }}
-        .risk-chip.bad {{
-            background:#fee2e2;
-            color:#991b1b !important;
-        }}
-        </style>
-
-        <div class="risk-dashboard-title">📊 <span>Rischi rosa</span></div>
-        <div class="risk-grid">
-            <div class="risk-card">
-                <div class="risk-card-head">
-                    <div class="risk-card-label">🚨 Blocco club</div>
-                    <div class="risk-card-value">{risks['max_block']}</div>
-                </div>
-                <span class="risk-chip {block_tone}">{block_status}</span>
-            </div>
-
-            <div class="risk-card">
-                <div class="risk-card-head">
-                    <div class="risk-card-label">⚠️ Ballottaggi</div>
-                    <div class="risk-card-value">{risks['ballottaggio']}</div>
-                </div>
-                <span class="risk-chip {ballot_tone}">{ballot_status}</span>
-            </div>
-
-            <div class="risk-card">
-                <div class="risk-card-head">
-                    <div class="risk-card-label">🟨 Cartellini</div>
-                    <div class="risk-card-value">{risks['cartellini']}</div>
-                </div>
-                <span class="risk-chip {card_tone}">{card_status}</span>
-            </div>
-
-            <div class="risk-card">
-                <div class="risk-card-head">
-                    <div class="risk-card-label">👶 Rookie</div>
-                    <div class="risk-card-value">{risks['rookie']}</div>
-                </div>
-                <span class="risk-chip {rookie_tone}">{rookie_status}</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    risk_html = (
+        "<style>"
+        ".risk-dashboard-title{display:flex;align-items:center;gap:8px;margin:.1rem 0 .65rem;"
+        "font-size:1rem;font-weight:900;color:#172033!important;}"
+        ".risk-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:.6rem;}"
+        ".risk-card{min-width:0;padding:10px 10px 9px;border:1px solid #cfddf1;border-radius:13px;"
+        "background:linear-gradient(145deg,#ffffff,#eef5ff);box-shadow:0 4px 12px rgba(30,64,175,.05);}"
+        ".risk-card-head{display:flex;align-items:center;justify-content:space-between;gap:5px;margin-bottom:5px;}"
+        ".risk-card-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+        "font-size:.73rem;font-weight:850;color:#64748b!important;}"
+        ".risk-card-value{font-size:1.25rem;line-height:1;font-weight:950;color:#172033!important;}"
+        ".risk-chip{display:inline-block;max-width:100%;padding:3px 6px;border-radius:999px;"
+        "font-size:.64rem;line-height:1.15;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+        ".risk-chip.good{background:#dcfce7;color:#166534!important;}"
+        ".risk-chip.warn{background:#fef3c7;color:#92400e!important;}"
+        ".risk-chip.bad{background:#fee2e2;color:#991b1b!important;}"
+        "</style>"
+        "<div class=\"risk-dashboard-title\">📊 <span>Rischi rosa</span></div>"
+        "<div class=\"risk-grid\">"
+        f"<div class=\"risk-card\"><div class=\"risk-card-head\">"
+        f"<div class=\"risk-card-label\">🚨 Blocco club</div>"
+        f"<div class=\"risk-card-value\">{risks['max_block']}</div></div>"
+        f"<span class=\"risk-chip {block_tone}\">{block_status}</span></div>"
+        f"<div class=\"risk-card\"><div class=\"risk-card-head\">"
+        f"<div class=\"risk-card-label\">⚠️ Ballottaggi</div>"
+        f"<div class=\"risk-card-value\">{risks['ballottaggio']}</div></div>"
+        f"<span class=\"risk-chip {ballot_tone}\">{ballot_status}</span></div>"
+        f"<div class=\"risk-card\"><div class=\"risk-card-head\">"
+        f"<div class=\"risk-card-label\">🟨 Cartellini</div>"
+        f"<div class=\"risk-card-value\">{risks['cartellini']}</div></div>"
+        f"<span class=\"risk-chip {card_tone}\">{card_status}</span></div>"
+        f"<div class=\"risk-card\"><div class=\"risk-card-head\">"
+        f"<div class=\"risk-card-label\">👶 Rookie</div>"
+        f"<div class=\"risk-card-value\">{risks['rookie']}</div></div>"
+        f"<span class=\"risk-chip {rookie_tone}\">{rookie_status}</span></div>"
+        "</div>"
     )
+    st.sidebar.markdown(risk_html, unsafe_allow_html=True)
 
 
 # ============================================================
