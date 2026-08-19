@@ -1497,6 +1497,56 @@ def load_teams() -> list[dict[str, Any]]:
 
 
 
+def reconcile_team_budgets_from_rosters(
+    teams: list[dict[str, Any]],
+    rosters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Ricostruisce il budget residuo dalla fonte più affidabile:
+    budget iniziale - somma degli acquisti registrati.
+
+    Questo evita che un remaining_budget azzerato/obsoleto in `teams`
+    faccia apparire tutte le squadre a 0 crediti.
+    """
+    spent_by_team_id: dict[Any, int] = {}
+    spent_by_team_name: dict[str, int] = {}
+
+    for roster in rosters:
+        price = int(roster.get("purchase_price") or 0)
+        team_id = roster.get("team_id")
+        team_data = roster.get("teams") or {}
+        team_name = str(team_data.get("name") or "")
+
+        if team_id is not None:
+            spent_by_team_id[team_id] = spent_by_team_id.get(team_id, 0) + price
+        if team_name:
+            spent_by_team_name[team_name] = spent_by_team_name.get(team_name, 0) + price
+
+    reconciled: list[dict[str, Any]] = []
+    for team in teams:
+        row = dict(team)
+        initial = int(row.get("initial_budget") or 0)
+        team_id = row.get("id")
+        team_name = str(row.get("name") or "")
+
+        spent = (
+            spent_by_team_id.get(team_id)
+            if team_id in spent_by_team_id
+            else spent_by_team_name.get(team_name, 0)
+        )
+        spent = int(spent or 0)
+
+        # Se conosciamo il budget iniziale, il residuo corretto è deterministico.
+        if initial > 0:
+            row["remaining_budget"] = max(0, initial - spent)
+        else:
+            row["remaining_budget"] = max(0, int(row.get("remaining_budget") or 0))
+
+        reconciled.append(row)
+
+    return reconciled
+
+
 def get_current_user_team_name() -> str:
     """Restituisce esclusivamente la squadra associata al login corrente."""
     return str(st.session_state.get("current_user_team_name") or "")
@@ -5957,6 +6007,10 @@ def main() -> None:
     require_user_team_assignment(current_user, teams)
     rosters = load_rosters()
 
+    # Il budget visualizzato/usato dall'asta viene ricostruito dagli acquisti:
+    # initial_budget - purchase_price. In questo modo un remaining_budget
+    # accidentalmente azzerato nel DB non porta tutte le squadre a 0 crediti.
+    teams = reconcile_team_budgets_from_rosters(teams, rosters)
     teams_df = pd.DataFrame(teams)
     state = build_auction_state(teams, rosters)
 
