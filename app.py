@@ -2855,6 +2855,106 @@ def apply_player_source_preview(
     return updated, errors
 
 
+
+def _unmatched_source_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """Traduce il tipo di fonte in campi giocatore applicabili."""
+    source = str(item.get("source") or "")
+    payload: dict[str, Any] = {
+        "team_nfl": item.get("team"),
+        "data_source": PLAYER_DATA_SOURCE_LABEL,
+        "source_updated_at": datetime.now(
+            ZoneInfo("Europe/Rome")
+        ).isoformat(),
+    }
+    if source == "Probabile XI":
+        payload["status_titolarita"] = "Titolare"
+    elif source == "Ballottaggio":
+        payload["status_titolarita"] = "Ballottaggio"
+    elif source == "Rigoristi":
+        payload["rigorista"] = True
+    elif source == "Calci da fermo":
+        payload["piazzati"] = True
+    return payload
+
+
+def apply_unmatched_resolutions(
+    unmatched: list[dict[str, Any]],
+    resolutions: dict[int, dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """
+    Risolve manualmente i nomi non riconosciuti:
+    - associa a un giocatore esistente, oppure
+    - crea un nuovo giocatore e lo marca rookie Serie A.
+    """
+    associated = 0
+    created = 0
+    errors: list[str] = []
+
+    for idx, item in enumerate(unmatched):
+        resolution = resolutions.get(idx) or {}
+        action = resolution.get("action", "Ignora")
+        if action == "Ignora":
+            continue
+
+        payload = _unmatched_source_payload(item)
+
+        try:
+            if action == "Associa a esistente":
+                player_id = resolution.get("player_id")
+                if player_id is None:
+                    errors.append(
+                        f"{item.get('name')}: nessun giocatore selezionato."
+                    )
+                    continue
+                (
+                    supabase.table("players")
+                    .update(payload)
+                    .eq("id", player_id)
+                    .execute()
+                )
+                associated += 1
+
+            elif action == "Nuovo giocatore":
+                role = str(resolution.get("role") or "").strip()
+                if role not in {"P", "D", "C", "A"}:
+                    errors.append(
+                        f"{item.get('name')}: ruolo P/D/C/A obbligatorio."
+                    )
+                    continue
+
+                new_payload = {
+                    "name": _clean_source_player_name(item.get("name", "")),
+                    "team_nfl": item.get("team"),
+                    "role": role,
+                    "list_price": int(resolution.get("list_price") or 1),
+                    "status_titolarita": payload.get(
+                        "status_titolarita", "Riserva"
+                    ),
+                    "rigorista": bool(payload.get("rigorista", False)),
+                    "piazzati": bool(payload.get("piazzati", False)),
+                    # Nuovo rispetto al DB corrente = nuovo ingresso Serie A
+                    # confermato manualmente dall'admin.
+                    "primo_anno_serie_a": True,
+                    "data_source": PLAYER_DATA_SOURCE_LABEL,
+                    "source_updated_at": payload["source_updated_at"],
+                }
+                (
+                    supabase.table("players")
+                    .insert(new_payload)
+                    .execute()
+                )
+                created += 1
+
+        except Exception as exc:
+            errors.append(f"{item.get('name')}: {exc}")
+
+    if associated or created:
+        invalidate_data_cache()
+
+    return associated, created, errors
+
+
+
 def _is_player_data_admin(user: dict[str, Any]) -> bool:
     """
     Pagina updater riservata agli admin configurati nei secrets.
@@ -3020,13 +3120,145 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
     if unmatched:
         with st.expander(
             f"⚠️ Giocatori da verificare manualmente ({len(unmatched)})",
-            expanded=False,
+            expanded=True,
         ):
-            st.dataframe(
-                pd.DataFrame(unmatched),
-                use_container_width=True,
-                hide_index=True,
+            st.caption(
+                "Per ogni nome puoi associarlo a un giocatore già presente, "
+                "segnalarlo come nuovo giocatore oppure ignorarlo. "
+                "I nuovi giocatori vengono marcati automaticamente come rookie "
+                "al primo anno in Serie A."
             )
+
+            db_players_for_resolution = load_players()
+            player_options = {
+                (
+                    f"{player.get('name')} · {player.get('team_nfl')} · "
+                    f"{player.get('role')}"
+                ): player.get("id")
+                for player in db_players_for_resolution
+            }
+            player_labels = list(player_options.keys())
+
+            resolutions: dict[int, dict[str, Any]] = {}
+
+            for idx, item in enumerate(unmatched):
+                st.markdown(
+                    f"**{escape(str(item.get('name') or '—'))}** "
+                    f"· {escape(str(item.get('team') or '—'))} "
+                    f"· {escape(str(item.get('source') or '—'))}"
+                )
+
+                action = st.radio(
+                    "Come vuoi gestirlo?",
+                    ("Ignora", "Associa a esistente", "Nuovo giocatore"),
+                    horizontal=True,
+                    key=f"unmatched_action_{idx}",
+                    label_visibility="collapsed",
+                )
+
+                resolution: dict[str, Any] = {"action": action}
+
+                if action == "Associa a esistente":
+                    suggested = 0
+                    source_name = str(item.get("name") or "")
+                    source_team = str(item.get("team") or "")
+                    if player_labels:
+                        ranked = sorted(
+                            enumerate(player_labels),
+                            key=lambda pair: (
+                                1 if f"· {source_team} ·" in pair[1] else 0,
+                                _name_similarity(
+                                    source_name,
+                                    pair[1].split(" · ")[0],
+                                ),
+                            ),
+                            reverse=True,
+                        )
+                        suggested = ranked[0][0]
+
+                    selected_label = st.selectbox(
+                        "Giocatore esistente",
+                        player_labels,
+                        index=suggested if player_labels else 0,
+                        key=f"unmatched_existing_{idx}",
+                    )
+                    resolution["player_id"] = player_options.get(
+                        selected_label
+                    )
+
+                elif action == "Nuovo giocatore":
+                    c_role, c_price = st.columns(2)
+                    with c_role:
+                        resolution["role"] = st.selectbox(
+                            "Ruolo",
+                            ("P", "D", "C", "A"),
+                            key=f"unmatched_role_{idx}",
+                        )
+                    with c_price:
+                        resolution["list_price"] = st.number_input(
+                            "Quotazione iniziale",
+                            min_value=1,
+                            max_value=100,
+                            value=1,
+                            step=1,
+                            key=f"unmatched_price_{idx}",
+                        )
+
+                    st.success(
+                        "🌱 Verrà creato nel database con "
+                        "**Rookie Serie A = Sì**."
+                    )
+
+                resolutions[idx] = resolution
+                st.divider()
+
+            st.session_state["player_unmatched_resolutions"] = resolutions
+
+            actionable = sum(
+                1
+                for resolution in resolutions.values()
+                if resolution.get("action") != "Ignora"
+            )
+            st.caption(
+                f"{actionable} giocatori selezionati per la risoluzione manuale."
+            )
+
+            if st.button(
+                "🔗 Applica associazioni / crea nuovi giocatori",
+                type="primary",
+                use_container_width=True,
+                disabled=actionable == 0,
+                key="apply_unmatched_resolutions",
+            ):
+                associated, created, resolution_errors = (
+                    apply_unmatched_resolutions(
+                        unmatched,
+                        resolutions,
+                    )
+                )
+
+                if resolution_errors:
+                    st.error(
+                        f"Associati {associated} · Creati {created} · "
+                        f"Errori {len(resolution_errors)}"
+                    )
+                    st.write(resolution_errors)
+                else:
+                    st.success(
+                        f"Associati {associated} giocatori · "
+                        f"Creati {created} nuovi rookie."
+                    )
+
+                # Rimuove dalla lista quelli gestiti con successo; al prossimo
+                # fetch la fonte verrà nuovamente confrontata col DB aggiornato.
+                if not resolution_errors:
+                    st.session_state["player_source_unmatched"] = [
+                        item
+                        for item_idx, item in enumerate(unmatched)
+                        if resolutions.get(item_idx, {}).get("action")
+                        == "Ignora"
+                    ]
+                    st.rerun()
 
     if not preview:
         st.success("Nessuna modifica da applicare.")
