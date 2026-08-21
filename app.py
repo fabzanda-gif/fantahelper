@@ -5,6 +5,11 @@ import random
 import re
 import unicodedata
 import uuid
+import json
+from difflib import SequenceMatcher
+
+import requests
+from bs4 import BeautifulSoup
 from html import escape
 from dataclasses import dataclass
 from pathlib import Path
@@ -463,8 +468,17 @@ ROLE_LABELS = {
 PLAYER_FIELDS = (
     "id, name, role, team_nfl, list_price, status_titolarita, "
     "rigorista, affidabilita_fisica, propensione_cartellini, "
-    "slot_fantacalcio, primo_anno_serie_a"
+    "slot_fantacalcio, primo_anno_serie_a, "
+    "ballottaggio_con, rigorista_ordine, piazzati, piazzati_ordine, "
+    "quotazione_fc, fvm_fc, data_source, source_updated_at"
 )
+
+FANTACALCIO_FORMATIONS_URL = (
+    "https://www.fantacalcio.it/news/calcio-italia/06_08_2026/"
+    "asta-fantacalcio-le-probabili-formazioni-della-serie-a-enilive-2026-27-495558"
+)
+FANTACALCIO_QUOTES_URL = "https://www.fantacalcio.it/quotazioni-fantacalcio/2026-27"
+PLAYER_DATA_SOURCE_LABEL = "Fantacalcio.it 2026/27"
 
 RATING_CONFIG = {
     "base": 6.5,
@@ -488,6 +502,7 @@ TEAM_MAP = {
     "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
     "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
     "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS",
+    "Frosinone": "FRO", "Monza": "MON",
 }
 
 DATA_DIR = Path(__file__).resolve().parent
@@ -1343,6 +1358,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         "Formazione": "🧠",
         "Campionato": "🏆",
         "Impostazioni": "⚙️",
+        "Dati giocatori": "🔄",
     }
 
     if st.session_state.get("active_page") not in pages:
@@ -2324,6 +2340,726 @@ def render_pending_purchase_banner() -> None:
         play_sound(SOUND_URLS["great"])
     else:
         play_sound(SOUND_URLS["normal"])
+
+
+# ============================================================
+# AGGIORNAMENTO DATI GIOCATORI — FONTI ESTERNE
+# ============================================================
+
+def _source_http_get(url: str, timeout: int = 20) -> str:
+    """Scarica una pagina pubblica con user-agent browser e controlli minimi."""
+    response = requests.get(
+        url,
+        timeout=timeout,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 Chrome/140 Safari/537.36"
+            ),
+            "Accept-Language": "it-IT,it;q=0.9,en;q=0.7",
+        },
+    )
+    response.raise_for_status()
+    return response.text
+
+
+def _clean_source_player_name(value: str) -> str:
+    value = re.sub(r"\([^)]*\)", "", str(value or ""))
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" ,.;:-–—")
+
+
+def _split_source_names(value: str) -> list[str]:
+    """Divide elenchi Fantacalcio separati da virgola/punto e virgola."""
+    cleaned = re.sub(r"\([^)]*\)", "", str(value or ""))
+    chunks = re.split(r"[;,]", cleaned)
+    result: list[str] = []
+    for chunk in chunks:
+        name = _clean_source_player_name(chunk)
+        if name:
+            result.append(name)
+    return result
+
+
+def _team_code_from_heading(team_name: str) -> str:
+    clean = str(team_name or "").strip().title()
+    if clean in TEAM_MAP:
+        return TEAM_MAP[clean]
+    # Alcuni heading possono essere già codici.
+    normalized = normalize_string(clean)
+    for full_name, code_value in TEAM_MAP.items():
+        if normalize_string(full_name) == normalized:
+            return code_value
+    return clean.upper()[:3]
+
+
+def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
+    """
+    Estrae dall'articolo Fantacalcio:
+    XI probabile, ballottaggi, rigoristi e calci da fermo.
+
+    Il parser lavora sugli H2 delle squadre e sui blocchi testuali successivi,
+    quindi non dipende dalle classi CSS del sito.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    parsed: dict[str, dict[str, Any]] = {}
+
+    headings = soup.find_all(["h2", "h3"])
+    for heading in headings:
+        team_heading = heading.get_text(" ", strip=True)
+        team_code = _team_code_from_heading(team_heading)
+        if team_code not in set(TEAM_MAP.values()):
+            continue
+
+        pieces: list[str] = []
+        node = heading.find_next_sibling()
+        while node is not None:
+            if getattr(node, "name", None) in {"h2", "h3"}:
+                break
+            text = node.get_text(" ", strip=True) if hasattr(node, "get_text") else ""
+            if text:
+                pieces.append(text)
+            node = node.find_next_sibling()
+
+        block = "\n".join(pieces)
+        if "Probabile formazione" not in block:
+            continue
+
+        formation_match = re.search(
+            r"Probabile formazione[^:]*:\s*(.+?)(?=\n|Ballottaggi:|Rigoristi:|Calci da fermo:)",
+            block,
+            flags=re.I | re.S,
+        )
+        ballot_match = re.search(
+            r"Ballottaggi:\s*(.+?)(?=\n|Rigoristi:|Calci da fermo:)",
+            block,
+            flags=re.I | re.S,
+        )
+        penalty_match = re.search(
+            r"Rigoristi:\s*(.+?)(?=\n|Calci da fermo:)",
+            block,
+            flags=re.I | re.S,
+        )
+        set_piece_match = re.search(
+            r"Calci da fermo:\s*(.+?)(?=\n|$)",
+            block,
+            flags=re.I | re.S,
+        )
+
+        formation_text = formation_match.group(1) if formation_match else ""
+        # XI: i ";" dividono i reparti, le virgole i giocatori.
+        starters: list[str] = []
+        for part in re.split(r"[;,]", formation_text):
+            name = _clean_source_player_name(part)
+            if name:
+                starters.append(name)
+
+        ballot_groups: list[list[str]] = []
+        ballot_text = ballot_match.group(1) if ballot_match else ""
+        ballot_text = re.sub(r"\([^)]*\)", "", ballot_text)
+        for chunk in re.split(r"[;,]", ballot_text):
+            names = [
+                _clean_source_player_name(name)
+                for name in chunk.split("/")
+                if _clean_source_player_name(name)
+            ]
+            if len(names) >= 2:
+                ballot_groups.append(names)
+
+        penalties = _split_source_names(
+            penalty_match.group(1) if penalty_match else ""
+        )
+        set_pieces = _split_source_names(
+            set_piece_match.group(1) if set_piece_match else ""
+        )
+
+        parsed[team_code] = {
+            "team_name": team_heading.title(),
+            "starters": starters,
+            "ballot_groups": ballot_groups,
+            "penalties": penalties,
+            "set_pieces": set_pieces,
+        }
+
+    return parsed
+
+
+def parse_fantacalcio_quotations(html: str) -> list[dict[str, Any]]:
+    """
+    Best-effort parser del Listone ufficiale.
+
+    Serve soprattutto a verificare il club attuale e, quando disponibili
+    come testo HTML, quotazione/FVM. Non inserisce automaticamente nuovi
+    giocatori: quelli non presenti in Supabase vengono segnalati.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[dict[str, Any]] = []
+
+    # Strategia 1: tabelle HTML reali.
+    for table in soup.find_all("table"):
+        headers = [
+            th.get_text(" ", strip=True)
+            for th in table.find_all("th")
+        ]
+        header_norm = [normalize_string(h) for h in headers]
+        if not any("calciatore" in h for h in header_norm):
+            continue
+
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            if len(cells) < 3:
+                continue
+
+            # Euristica: nome è il campo testuale più lungo tra i primi,
+            # squadra è un codice di 3 lettere.
+            team_code = next(
+                (
+                    c.strip().upper()
+                    for c in cells
+                    if re.fullmatch(r"[A-Z]{3}", c.strip().upper())
+                ),
+                "",
+            )
+            text_cells = [
+                c.strip()
+                for c in cells
+                if c.strip()
+                and not re.fullmatch(r"\d+(?:[.,]\d+)?", c.strip())
+                and not re.fullmatch(r"[A-Z]{3}", c.strip().upper())
+            ]
+            if not team_code or not text_cells:
+                continue
+
+            player_name = max(text_cells, key=len)
+            numbers = [
+                int(float(c.replace(",", ".")))
+                for c in cells
+                if re.fullmatch(r"\d+(?:[.,]\d+)?", c.strip())
+            ]
+
+            rows.append(
+                {
+                    "name": player_name,
+                    "team_nfl": team_code,
+                    "quotazione_fc": numbers[0] if numbers else None,
+                    "fvm_fc": numbers[2] if len(numbers) >= 3 else (
+                        numbers[-1] if len(numbers) >= 2 else None
+                    ),
+                }
+            )
+
+    return rows
+
+
+def _name_similarity(left: str, right: str) -> float:
+    return SequenceMatcher(
+        None,
+        normalize_string(left),
+        normalize_string(right),
+    ).ratio()
+
+
+def _best_player_match(
+    source_name: str,
+    db_players: list[dict[str, Any]],
+    team_code: str | None = None,
+    min_score: float = 0.78,
+) -> tuple[dict[str, Any] | None, float]:
+    """Exact-first matching, poi fuzzy entro lo stesso club quando possibile."""
+    source_norm = normalize_string(source_name)
+    if not source_norm:
+        return None, 0.0
+
+    candidates = db_players
+    if team_code:
+        team_candidates = [
+            player for player in db_players
+            if str(player.get("team_nfl") or "") == team_code
+        ]
+        if team_candidates:
+            candidates = team_candidates
+
+    for player in candidates:
+        if normalize_string(player.get("name", "")) == source_norm:
+            return player, 1.0
+
+    best = None
+    best_score = 0.0
+    for player in candidates:
+        score = _name_similarity(source_name, str(player.get("name") or ""))
+        if score > best_score:
+            best = player
+            best_score = score
+
+    if best_score >= min_score:
+        return best, best_score
+    return None, best_score
+
+
+def build_player_source_preview(
+    db_players: list[dict[str, Any]],
+    formations: dict[str, dict[str, Any]],
+    quotations: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Produce modifiche candidate senza scrivere nulla su Supabase.
+
+    La preview è intenzionalmente conservativa:
+    - aggiorna solo giocatori già presenti nel DB;
+    - mostra i nuovi/non riconosciuti come unmatched;
+    - ballottaggio prevale su titolare;
+    - rigoristi e piazzati hanno ordine esplicito.
+    """
+    updates_by_id: dict[Any, dict[str, Any]] = {}
+    unmatched: list[dict[str, Any]] = []
+    now_iso = datetime.now(ZoneInfo("Europe/Rome")).isoformat()
+
+    def ensure_update(player: dict[str, Any], confidence: float) -> dict[str, Any]:
+        player_id = player.get("id")
+        if player_id not in updates_by_id:
+            updates_by_id[player_id] = {
+                "player_id": player_id,
+                "name": player.get("name"),
+                "old_team": player.get("team_nfl"),
+                "new_team": player.get("team_nfl"),
+                "old_status": player.get("status_titolarita"),
+                "new_status": player.get("status_titolarita"),
+                "old_rigorista": bool(player.get("rigorista")),
+                "new_rigorista": False,
+                "old_ballottaggio_con": player.get("ballottaggio_con"),
+                "new_ballottaggio_con": None,
+                "old_quotazione_fc": player.get("quotazione_fc"),
+                "new_quotazione_fc": player.get("quotazione_fc"),
+                "old_fvm_fc": player.get("fvm_fc"),
+                "new_fvm_fc": player.get("fvm_fc"),
+                "rigorista_ordine": None,
+                "piazzati": False,
+                "piazzati_ordine": None,
+                "confidence": confidence,
+                "data_source": PLAYER_DATA_SOURCE_LABEL,
+                "source_updated_at": now_iso,
+            }
+        else:
+            updates_by_id[player_id]["confidence"] = max(
+                float(updates_by_id[player_id]["confidence"]),
+                confidence,
+            )
+        return updates_by_id[player_id]
+
+    # 1. Quotazioni/listone: club corrente e quotazione/FVM.
+    for source in quotations:
+        match, confidence = _best_player_match(
+            source.get("name", ""),
+            db_players,
+            source.get("team_nfl"),
+            min_score=0.82,
+        )
+        if match is None:
+            unmatched.append(
+                {
+                    "source": "Quotazioni",
+                    "team": source.get("team_nfl"),
+                    "name": source.get("name"),
+                    "reason": f"Nessun match (score {confidence:.2f})",
+                }
+            )
+            continue
+
+        row = ensure_update(match, confidence)
+        if source.get("team_nfl"):
+            row["new_team"] = source["team_nfl"]
+        if source.get("quotazione_fc") is not None:
+            row["new_quotazione_fc"] = source["quotazione_fc"]
+        if source.get("fvm_fc") is not None:
+            row["new_fvm_fc"] = source["fvm_fc"]
+
+    # 2. Gerarchie articolo.
+    for team_code, data in formations.items():
+        team_db_players = [
+            player for player in db_players
+            if str(player.get("team_nfl") or "") == team_code
+        ]
+
+        matched_ids: set[Any] = set()
+        ballot_partner_map: dict[Any, list[str]] = {}
+
+        # XI probabile.
+        for source_name in data.get("starters", []):
+            match, confidence = _best_player_match(
+                source_name,
+                db_players,
+                team_code,
+            )
+            if match is None:
+                unmatched.append(
+                    {
+                        "source": "Probabile XI",
+                        "team": team_code,
+                        "name": source_name,
+                        "reason": f"Nessun match (score {confidence:.2f})",
+                    }
+                )
+                continue
+            matched_ids.add(match.get("id"))
+            row = ensure_update(match, confidence)
+            row["new_status"] = "Titolare"
+
+        # Ballottaggi: tutti i membri diventano Ballottaggio.
+        for group in data.get("ballot_groups", []):
+            matched_group: list[tuple[dict[str, Any], str, float]] = []
+            for source_name in group:
+                match, confidence = _best_player_match(
+                    source_name,
+                    db_players,
+                    team_code,
+                )
+                if match is None:
+                    unmatched.append(
+                        {
+                            "source": "Ballottaggio",
+                            "team": team_code,
+                            "name": source_name,
+                            "reason": f"Nessun match (score {confidence:.2f})",
+                        }
+                    )
+                    continue
+                matched_group.append((match, source_name, confidence))
+
+            for match, source_name, confidence in matched_group:
+                matched_ids.add(match.get("id"))
+                row = ensure_update(match, confidence)
+                row["new_status"] = "Ballottaggio"
+                partners = [
+                    other_name
+                    for other_match, other_name, _ in matched_group
+                    if other_match.get("id") != match.get("id")
+                ]
+                ballot_partner_map.setdefault(match.get("id"), []).extend(partners)
+
+        for player_id, partners in ballot_partner_map.items():
+            updates_by_id[player_id]["new_ballottaggio_con"] = ", ".join(
+                dict.fromkeys(partners)
+            )
+
+        # Rigoristi.
+        for order, source_name in enumerate(data.get("penalties", []), start=1):
+            match, confidence = _best_player_match(
+                source_name,
+                db_players,
+                team_code,
+            )
+            if match is None:
+                unmatched.append(
+                    {
+                        "source": "Rigoristi",
+                        "team": team_code,
+                        "name": source_name,
+                        "reason": f"Nessun match (score {confidence:.2f})",
+                    }
+                )
+                continue
+            row = ensure_update(match, confidence)
+            row["new_rigorista"] = True
+            row["rigorista_ordine"] = order
+
+        # Piazzati.
+        for order, source_name in enumerate(data.get("set_pieces", []), start=1):
+            match, confidence = _best_player_match(
+                source_name,
+                db_players,
+                team_code,
+            )
+            if match is None:
+                unmatched.append(
+                    {
+                        "source": "Calci da fermo",
+                        "team": team_code,
+                        "name": source_name,
+                        "reason": f"Nessun match (score {confidence:.2f})",
+                    }
+                )
+                continue
+            row = ensure_update(match, confidence)
+            row["piazzati"] = True
+            row["piazzati_ordine"] = order
+
+        # Solo per club effettivamente presenti nell'articolo:
+        # chi non è XI né ballottaggio viene trattato come riserva.
+        for player in team_db_players:
+            player_id = player.get("id")
+            if player_id not in matched_ids:
+                row = ensure_update(player, 1.0)
+                row["new_status"] = "Riserva"
+                row["new_ballottaggio_con"] = None
+
+    preview = list(updates_by_id.values())
+
+    # Mostriamo solo righe con almeno una variazione utile o nuovi metadata.
+    filtered: list[dict[str, Any]] = []
+    for row in preview:
+        changed = any(
+            (
+                row.get("old_team") != row.get("new_team"),
+                row.get("old_status") != row.get("new_status"),
+                bool(row.get("old_rigorista")) != bool(row.get("new_rigorista")),
+                (row.get("old_ballottaggio_con") or None)
+                != (row.get("new_ballottaggio_con") or None),
+                row.get("old_quotazione_fc") != row.get("new_quotazione_fc"),
+                row.get("old_fvm_fc") != row.get("new_fvm_fc"),
+                row.get("rigorista_ordine") is not None,
+                bool(row.get("piazzati")),
+            )
+        )
+        if changed:
+            filtered.append(row)
+
+    filtered.sort(key=lambda r: (str(r.get("new_team") or ""), str(r.get("name") or "")))
+    unmatched.sort(key=lambda r: (str(r.get("team") or ""), str(r.get("name") or "")))
+    return filtered, unmatched
+
+
+def apply_player_source_preview(
+    preview: list[dict[str, Any]],
+) -> tuple[int, list[str]]:
+    """Applica su Supabase solo la preview già approvata."""
+    updated = 0
+    errors: list[str] = []
+
+    for row in preview:
+        payload = {
+            "team_nfl": row.get("new_team"),
+            "status_titolarita": row.get("new_status"),
+            "rigorista": bool(row.get("new_rigorista")),
+            "rigorista_ordine": row.get("rigorista_ordine"),
+            "ballottaggio_con": row.get("new_ballottaggio_con"),
+            "piazzati": bool(row.get("piazzati")),
+            "piazzati_ordine": row.get("piazzati_ordine"),
+            "quotazione_fc": row.get("new_quotazione_fc"),
+            "fvm_fc": row.get("new_fvm_fc"),
+            "data_source": row.get("data_source"),
+            "source_updated_at": row.get("source_updated_at"),
+        }
+        try:
+            (
+                supabase.table("players")
+                .update(payload)
+                .eq("id", row["player_id"])
+                .execute()
+            )
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{row.get('name')}: {exc}")
+
+    if updated:
+        invalidate_data_cache()
+    return updated, errors
+
+
+def _is_player_data_admin(user: dict[str, Any]) -> bool:
+    """
+    Pagina updater riservata agli admin configurati nei secrets.
+    Esempio:
+    ADMIN_EMAILS = "mail1@example.com,mail2@example.com"
+    """
+    configured = str(st.secrets.get("ADMIN_EMAILS", "") or "").strip()
+    if not configured:
+        return False
+    allowed = {
+        item.strip().lower()
+        for item in configured.split(",")
+        if item.strip()
+    }
+    email = str(user.get("email") or "").strip().lower()
+    return bool(email and email in allowed)
+
+
+def render_player_data_updater_page(user: dict[str, Any]) -> None:
+    st.markdown(
+        '<div class="rcd-section">🔄 Aggiornamento dati giocatori</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        "Fonte primaria: Fantacalcio.it 2026/27. "
+        "Il sistema genera prima una preview: nessun dato viene scritto "
+        "su Supabase finché non confermi esplicitamente."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.link_button(
+            "Apri probabili formazioni",
+            FANTACALCIO_FORMATIONS_URL,
+            use_container_width=True,
+        )
+    with c2:
+        st.link_button(
+            "Apri quotazioni ufficiali",
+            FANTACALCIO_QUOTES_URL,
+            use_container_width=True,
+        )
+
+    if not _is_player_data_admin(user):
+        st.warning(
+            "La preview è disponibile agli admin. Per abilitare questa pagina "
+            "aggiungi la tua email in `.streamlit/secrets.toml` come "
+            '`ADMIN_EMAILS = "tua@email"`.'
+        )
+        return
+
+    if st.button(
+        "🌐 Leggi fonti e prepara anteprima",
+        type="primary",
+        use_container_width=True,
+        key="fetch_player_sources",
+    ):
+        with st.spinner("Leggo Fantacalcio.it e confronto con Supabase..."):
+            try:
+                formation_html = _source_http_get(FANTACALCIO_FORMATIONS_URL)
+                quote_html = _source_http_get(FANTACALCIO_QUOTES_URL)
+
+                formations = parse_fantacalcio_formations(formation_html)
+                quotations = parse_fantacalcio_quotations(quote_html)
+                db_players = load_players()
+
+                preview, unmatched = build_player_source_preview(
+                    db_players,
+                    formations,
+                    quotations,
+                )
+
+                st.session_state["player_source_preview"] = preview
+                st.session_state["player_source_unmatched"] = unmatched
+                st.session_state["player_source_stats"] = {
+                    "teams_found": len(formations),
+                    "quotes_found": len(quotations),
+                    "changes": len(preview),
+                    "unmatched": len(unmatched),
+                    "fetched_at": datetime.now(
+                        ZoneInfo("Europe/Rome")
+                    ).strftime("%d/%m/%Y %H:%M"),
+                }
+            except Exception as exc:
+                st.error(f"Errore durante la lettura delle fonti: {exc}")
+
+    stats = st.session_state.get("player_source_stats")
+    preview = st.session_state.get("player_source_preview") or []
+    unmatched = st.session_state.get("player_source_unmatched") or []
+
+    if not stats:
+        st.info(
+            "Premi il pulsante sopra. Vedrai prima tutte le modifiche proposte, "
+            "incluse quelle di titolarità, ballottaggi, rigoristi e piazzati."
+        )
+        return
+
+    st.markdown("### Anteprima")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Squadre lette", stats["teams_found"])
+    s2.metric("Righe listone", stats["quotes_found"])
+    s3.metric("Modifiche", stats["changes"])
+    s4.metric("Da verificare", stats["unmatched"])
+    st.caption(f"Ultima lettura: {stats['fetched_at']}")
+
+    if preview:
+        preview_df = pd.DataFrame(preview)
+        visible_cols = [
+            "name",
+            "old_team",
+            "new_team",
+            "old_status",
+            "new_status",
+            "old_rigorista",
+            "new_rigorista",
+            "new_ballottaggio_con",
+            "rigorista_ordine",
+            "piazzati",
+            "piazzati_ordine",
+            "new_quotazione_fc",
+            "new_fvm_fc",
+            "confidence",
+        ]
+        visible_cols = [
+            col for col in visible_cols
+            if col in preview_df.columns
+        ]
+        st.dataframe(
+            preview_df[visible_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "name": "Giocatore",
+                "old_team": "Club prima",
+                "new_team": "Club nuovo",
+                "old_status": "Status prima",
+                "new_status": "Status nuovo",
+                "old_rigorista": "Rig. prima",
+                "new_rigorista": "Rigorista",
+                "new_ballottaggio_con": "Ballottaggio con",
+                "rigorista_ordine": "Ord. rigori",
+                "piazzati": "Piazzati",
+                "piazzati_ordine": "Ord. piazzati",
+                "new_quotazione_fc": "Quotazione FC",
+                "new_fvm_fc": "FVM FC",
+                "confidence": st.column_config.NumberColumn(
+                    "Confidenza",
+                    format="%.2f",
+                ),
+            },
+        )
+
+        csv_data = preview_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Scarica anteprima CSV",
+            data=csv_data,
+            file_name="fantahe1per_player_update_preview.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    if unmatched:
+        with st.expander(
+            f"⚠️ Giocatori da verificare manualmente ({len(unmatched)})",
+            expanded=False,
+        ):
+            st.dataframe(
+                pd.DataFrame(unmatched),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    if not preview:
+        st.success("Nessuna modifica da applicare.")
+        return
+
+    st.divider()
+    confirmed = st.checkbox(
+        "Ho controllato l'anteprima e voglio applicare queste modifiche a Supabase.",
+        key="confirm_player_source_apply",
+    )
+    if st.button(
+        "✅ Applica aggiornamento a Supabase",
+        type="primary",
+        use_container_width=True,
+        disabled=not confirmed,
+        key="apply_player_source_update",
+    ):
+        with st.spinner("Aggiorno i giocatori..."):
+            updated, errors = apply_player_source_preview(preview)
+
+        if errors:
+            st.error(
+                f"Aggiornati {updated} giocatori, con {len(errors)} errori."
+            )
+            with st.expander("Errori"):
+                st.write(errors)
+        else:
+            st.success(f"Aggiornati correttamente {updated} giocatori.")
+
+        st.session_state.pop("player_source_preview", None)
+        st.session_state.pop("player_source_unmatched", None)
+        st.session_state.pop("player_source_stats", None)
+        st.session_state["confirm_player_source_apply"] = False
 
 
 # ============================================================
@@ -6853,6 +7589,9 @@ def main() -> None:
             current_user,
             teams,
         )
+
+    elif active_page == "Dati giocatori":
+        render_player_data_updater_page(current_user)
 
 
 if __name__ == "__main__":
