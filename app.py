@@ -435,7 +435,6 @@ MIN_HISTORY_FOR_ROLE_ESTIMATE = 2
 # Strategia di protezione budget durante l'asta.
 # I portieri devono restare un reparto relativamente economico per lasciare
 # margine sufficiente ai TOP di centrocampo e attacco.
-GOALKEEPER_TOTAL_BUDGET_SHARE = 0.14
 THIRD_GOALKEEPER_CURRENT_BUDGET_SHARE = 0.025
 SECOND_GOALKEEPER_CURRENT_BUDGET_SHARE = 0.08
 PREMIUM_C_A_RESERVE_SHARE = 0.58
@@ -479,22 +478,6 @@ FANTACALCIO_FORMATIONS_URL = (
 )
 FANTACALCIO_QUOTES_URL = "https://www.fantacalcio.it/quotazioni-fantacalcio/2026-27"
 PLAYER_DATA_SOURCE_LABEL = "Fantacalcio.it 2026/27"
-
-RATING_CONFIG = {
-    "base": 6.5,
-    "list_price_bonus": (
-        (30, 3.5),
-        (20, 2.5),
-        (10, 1.0),
-        (5, 0.5),
-    ),
-    "titolare": 1.5,
-    "riserva": -1.5,
-    "rigorista": 1.5,
-    "cartellini": -0.3,
-    "rookie": -0.2,
-    "preferito": 0.8,
-}
 
 TEAM_MAP = {
     "Napoli": "NAP", "Juventus": "JUV", "Milan": "MIL", "Inter": "INT",
@@ -564,10 +547,6 @@ STRATEGY_BUDGET_ALLOCATIONS = {
     },
 }
 
-BALANCED_BUDGET_TARGETS = {
-    role: {"target": credits}
-    for role, credits in STRATEGY_BUDGET_ALLOCATIONS["Bilanciato"].items()
-}
 
 CUSTOM_MODIFIERS = {
     "Nessuna modifica": {"key": None, "value": 0.0},
@@ -683,17 +662,6 @@ def _minimal_user_dict(user: Any) -> dict[str, Any]:
         "metadata": dict(metadata) if isinstance(metadata, dict) else {},
         "identities": identities,
     }
-
-
-def _auth_display_name(user: dict[str, Any]) -> str:
-    metadata = user.get("metadata") or {}
-    return str(
-        metadata.get("full_name")
-        or metadata.get("name")
-        or metadata.get("user_name")
-        or user.get("email")
-        or "Utente"
-    )
 
 
 def _auth_avatar_url(user: dict[str, Any]) -> str:
@@ -1353,13 +1321,13 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         "Asta": "🎯",
         "Lega": "📊",
         "Giocatori": "⭐",
-        "Bonus / Malus": "⚙️",
         "Giornate": "📥",
         "Formazione": "🧠",
         "Campionato": "🏆",
         "Impostazioni": "⚙️",
-        "Dati giocatori": "🔄",
     }
+    if _is_player_data_admin(user):
+        pages["Dati giocatori"] = "🔄"
 
     if st.session_state.get("active_page") not in pages:
         st.session_state["active_page"] = "Asta"
@@ -1520,6 +1488,8 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
                         "manual_target_team",
                         "table_team_filter_tab2",
                         "my_team_budget",
+                        "goalkeeper_strategy",
+                        "credit_strategy",
                     ):
                         st.session_state.pop(key, None)
                     st.rerun()
@@ -1541,58 +1511,6 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
             )
 
     return st.session_state["active_page"]
-
-
-
-def render_logout_sidebar() -> None:
-    """Solo pulsante logout, senza Account/nome/email/avatar nella sidebar."""
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        """
-        <style>
-        /* Solo il widget con key="auth_logout" */
-        .st-key-auth_logout button,
-        .st-key-auth_logout button[data-testid="stBaseButton-primary"] {
-            background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
-            border: 1px solid #1d4ed8 !important;
-            color: #ffffff !important;
-            font-weight: 850 !important;
-            box-shadow: 0 6px 16px rgba(37,99,235,.22) !important;
-        }
-        .st-key-auth_logout button *,
-        .st-key-auth_logout button p,
-        .st-key-auth_logout button span {
-            color: #ffffff !important;
-        }
-        .st-key-auth_logout button:hover {
-            background: linear-gradient(135deg, #1e40af, #1d4ed8) !important;
-            border-color: #1e40af !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if st.sidebar.button(
-        "Logout",
-        key="auth_logout",
-        type="primary",
-        use_container_width=True,
-    ):
-        try:
-            flow_id = st.session_state.get("auth_flow_id") or "restored-session"
-            auth_client = get_auth_flow_client(str(flow_id))
-
-            access = st.session_state.get("auth_access_token")
-            refresh = st.session_state.get("auth_refresh_token")
-            if access and refresh:
-                auth_client.auth.set_session(access, refresh)
-            auth_client.auth.sign_out()
-        except Exception:
-            pass
-
-        clear_auth_state()
-        st.rerun()
 
 
 
@@ -1680,8 +1598,8 @@ def get_current_user_team_id() -> str | None:
     return str(value) if value is not None else None
 
 
-def load_user_strategy_settings(user_id: str) -> dict[str, str]:
-    """Carica la strategia personale; usa default sicuri per utenti esistenti."""
+def load_user_strategy_settings(user_id: str) -> dict[str, Any]:
+    """Carica la strategia personale e indica se esiste già una riga persistente."""
     try:
         rows = (
             supabase.table(USER_STRATEGY_TABLE)
@@ -1695,6 +1613,7 @@ def load_user_strategy_settings(user_id: str) -> dict[str, str]:
         if rows:
             row = rows[0]
             return {
+                "exists": True,
                 "goalkeeper_strategy": (
                     row.get("goalkeeper_strategy")
                     if row.get("goalkeeper_strategy") in GOALKEEPER_STRATEGY_OPTIONS
@@ -1710,6 +1629,7 @@ def load_user_strategy_settings(user_id: str) -> dict[str, str]:
         st.session_state["user_strategy_table_error"] = str(exc)
 
     return {
+        "exists": False,
         "goalkeeper_strategy": DEFAULT_GOALKEEPER_STRATEGY,
         "credit_strategy": DEFAULT_CREDIT_STRATEGY,
     }
@@ -1760,24 +1680,24 @@ def sync_user_strategy_session(user: dict[str, Any]) -> dict[str, str]:
 
     settings = load_user_strategy_settings(user_id)
 
-    metadata = user.get("metadata") or {}
-    metadata_gk = metadata.get("signup_goalkeeper_strategy")
-    metadata_credit = metadata.get("signup_credit_strategy")
+    # I metadata di registrazione sono solo bootstrap iniziale.
+    # Se esiste già una riga in user_strategy_settings, quella è la source of truth.
+    if not settings.get("exists"):
+        metadata = user.get("metadata") or {}
+        metadata_gk = metadata.get("signup_goalkeeper_strategy")
+        metadata_credit = metadata.get("signup_credit_strategy")
 
-    # Se esistono metadata di registrazione e non abbiamo ancora una riga
-    # persistente, proviamo a salvarli. Il fallback resta comunque funzionante.
-    table_error = st.session_state.get("user_strategy_table_error")
-    if metadata_gk in GOALKEEPER_STRATEGY_OPTIONS:
-        settings["goalkeeper_strategy"] = metadata_gk
-    if metadata_credit in CREDIT_STRATEGY_OPTIONS:
-        settings["credit_strategy"] = metadata_credit
+        if metadata_gk in GOALKEEPER_STRATEGY_OPTIONS:
+            settings["goalkeeper_strategy"] = metadata_gk
+        if metadata_credit in CREDIT_STRATEGY_OPTIONS:
+            settings["credit_strategy"] = metadata_credit
 
-    if metadata_gk or metadata_credit:
-        save_user_strategy_settings(
-            user_id,
-            settings["goalkeeper_strategy"],
-            settings["credit_strategy"],
-        )
+        if metadata_gk or metadata_credit:
+            save_user_strategy_settings(
+                user_id,
+                settings["goalkeeper_strategy"],
+                settings["credit_strategy"],
+            )
 
     st.session_state["goalkeeper_strategy"] = settings["goalkeeper_strategy"]
     st.session_state["credit_strategy"] = settings["credit_strategy"]
@@ -5803,59 +5723,66 @@ def reset_auction(teams_df: pd.DataFrame) -> None:
 def render_admin_tools(
     teams_df: pd.DataFrame,
     state: AuctionState,
+    user: dict[str, Any],
 ) -> None:
-    st.sidebar.divider()
-    st.sidebar.subheader("🛠️ Strumenti Mockup & Admin")
+    """Strumenti distruttivi/mockup: disponibili esclusivamente agli admin."""
+    if not _is_player_data_admin(user):
+        st.warning("Strumenti amministrativi non disponibili per questo account.")
+        return
 
-    role_filter = st.sidebar.selectbox(
+    st.subheader("🛠️ Strumenti Mockup & Admin")
+
+    role_filter = st.selectbox(
         "Completa ruolo (Mockup)",
         ["Tutti"] + list(ROLE_LIMITS),
+        key="admin_autofill_role",
     )
 
-    st.sidebar.caption(
+    st.caption(
         "Nel mockup i TOP vengono assegnati prima delle fasce inferiori, "
         "così non restano irrealisticamente svincolati."
     )
 
-    if st.sidebar.button("🎲 Autocompila rose (Intermedio)"):
+    if st.button(
+        "🎲 Autocompila rose (Intermedio)",
+        key="admin_autofill_rosters",
+    ):
         if perform_autofill(
             teams_df.to_dict("records"),
             state,
             role_filter,
         ):
-            st.sidebar.success("Rose autocompilate con successo!")
+            st.success("Rose autocompilate con successo!")
             invalidate_data_cache()
             st.rerun()
         else:
-            st.sidebar.warning(
-                "Nessun inserimento possibile o limiti già raggiunti."
-            )
+            st.warning("Nessun inserimento possibile o limiti già raggiunti.")
 
-    if st.sidebar.button(
+    if st.button(
         "🗑️ Svuota tutte le rose (Reset)",
         type="primary",
+        key="admin_reset_rosters",
     ):
         st.session_state["confirm_reset"] = True
 
     if st.session_state.get("confirm_reset"):
-        st.sidebar.warning(
+        st.warning(
             "Questa operazione cancellerà tutti gli acquisti e "
             "ripristinerà i budget iniziali."
         )
 
-        confirm_col, cancel_col = st.sidebar.columns(2)
+        confirm_col, cancel_col = st.columns(2)
 
         with confirm_col:
             if st.button("Conferma reset", key="confirm_reset_button"):
                 reset_auction(teams_df)
-                st.session_state["confirm_reset"] = False
+                st.session_state.pop("confirm_reset", None)
                 invalidate_data_cache()
-                st.sidebar.success("Asta resettata.")
                 st.rerun()
 
         with cancel_col:
             if st.button("Annulla", key="cancel_reset_button"):
-                st.session_state["confirm_reset"] = False
+                st.session_state.pop("confirm_reset", None)
                 st.rerun()
 
 
@@ -8012,7 +7939,6 @@ def main() -> None:
         goalkeeper_ranking,
     )
 
-    completed_roles = calculate_completed_roles(state)
     auction_finished = is_auction_finished(state)
 
     # Sidebar persistente: resta disponibile in tutte le sezioni dell'app.
@@ -8119,11 +8045,13 @@ def main() -> None:
 
         render_my_roster(state)
 
-        with st.expander("🛠️ Strumenti asta e diagnostica", expanded=False):
-            render_admin_tools(
-                teams_df,
-                state,
-            )
+        if _is_player_data_admin(current_user):
+            with st.expander("🛠️ Strumenti asta e diagnostica", expanded=False):
+                render_admin_tools(
+                    teams_df,
+                    state,
+                    current_user,
+                )
 
     elif active_page == "Lega":
         render_team_overview(
@@ -8143,9 +8071,6 @@ def main() -> None:
     elif active_page == "Giocatori":
         render_all_players_tab()
 
-    elif active_page == "Bonus / Malus":
-        render_player_modifiers_tab()
-
     elif active_page == "Giornate":
         render_matchday_import_tab()
 
@@ -8162,7 +8087,13 @@ def main() -> None:
         )
 
     elif active_page == "Dati giocatori":
-        render_player_data_updater_page(current_user)
+        if _is_player_data_admin(current_user):
+            render_player_data_updater_page(current_user)
+            with st.expander(
+                "🛠️ Correzioni manuali rating (legacy / emergenza)",
+                expanded=False,
+            ):
+                render_player_modifiers_tab()
 
 
 if __name__ == "__main__":
