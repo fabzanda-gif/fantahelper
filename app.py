@@ -2906,6 +2906,20 @@ def apply_unmatched_resolutions(
                         f"{item.get('name')}: nessun giocatore selezionato."
                     )
                     continue
+
+                source_team = str(item.get("team") or "").strip().upper()
+                if not source_team:
+                    errors.append(
+                        f"{item.get('name')}: la fonte non contiene una squadra valida."
+                    )
+                    continue
+
+                # L'associazione manuale certifica che il record esistente e il
+                # nome trovato dalla fonte sono lo stesso calciatore. Di conseguenza
+                # il club Serie A del record esistente deve essere aggiornato al club
+                # corrente indicato dalla fonte.
+                payload["team_nfl"] = source_team
+
                 (
                     supabase.table("players")
                     .update(payload)
@@ -3185,6 +3199,28 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                     resolution["player_id"] = player_options.get(
                         selected_label
                     )
+
+                    selected_existing = next(
+                        (
+                            player
+                            for player in db_players_for_resolution
+                            if player.get("id") == resolution["player_id"]
+                        ),
+                        None,
+                    )
+                    old_team = str(
+                        (selected_existing or {}).get("team_nfl") or "—"
+                    )
+                    new_team = str(item.get("team") or "—")
+                    if old_team != new_team:
+                        st.info(
+                            f"🔄 La squadra verrà aggiornata: "
+                            f"**{old_team} → {new_team}**"
+                        )
+                    else:
+                        st.caption(
+                            f"Squadra già corretta: **{new_team}**."
+                        )
 
                 elif action == "Nuovo giocatore":
                     c_role, c_price = st.columns(2)
