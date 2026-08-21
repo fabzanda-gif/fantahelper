@@ -3625,7 +3625,12 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         st.session_state.pop("player_source_stats", None)
         st.session_state.pop("player_missing_candidates", None)
         st.session_state.pop("player_missing_check", None)
-        st.session_state["confirm_player_source_apply"] = False
+        # Il checkbox con key="confirm_player_source_apply" è già stato creato
+        # in questo run: assegnargli un valore qui genera StreamlitAPIException.
+        # Rimuoviamo invece la chiave e lasciamo che il prossimo rerun
+        # ricrei il widget nel suo stato di default.
+        st.session_state.pop("confirm_player_source_apply", None)
+        st.rerun()
 
 
 # ============================================================
