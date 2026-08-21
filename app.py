@@ -2969,6 +2969,178 @@ def apply_unmatched_resolutions(
 
 
 
+
+def build_missing_from_source_candidates(
+    db_players: list[dict[str, Any]],
+    quotations: list[dict[str, Any]],
+    rosters: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Trova giocatori presenti in Supabase ma non nel Listone ufficiale letto.
+
+    Sicurezza:
+    - il controllo viene considerato affidabile solo se il Listone contiene
+      abbastanza righe e una copertura ampia di squadre;
+    - nessun giocatore viene eliminato automaticamente;
+    - i giocatori già presenti in una rosa vengono marcati come protetti.
+    """
+    rosters = rosters or []
+
+    source_names_by_team: dict[str, list[str]] = {}
+    source_teams: set[str] = set()
+
+    for row in quotations:
+        team = str(row.get("team_nfl") or "").strip().upper()
+        name = str(row.get("name") or "").strip()
+        if not team or not name:
+            continue
+        source_teams.add(team)
+        source_names_by_team.setdefault(team, []).append(name)
+
+    # Un listone Serie A completo dovrebbe essere ampiamente sopra 300 righe
+    # e coprire praticamente tutte le 20 squadre.
+    source_is_complete_enough = (
+        len(quotations) >= 300
+        and len(source_teams) >= 18
+    )
+
+    rostered_player_ids = {
+        roster.get("player_id")
+        for roster in rosters
+        if roster.get("player_id") is not None
+    }
+
+    candidates: list[dict[str, Any]] = []
+
+    if not source_is_complete_enough:
+        return candidates, {
+            "safe": False,
+            "rows": len(quotations),
+            "teams": len(source_teams),
+            "reason": (
+                "Il Listone letto non sembra abbastanza completo per usare "
+                "l'assenza come indicazione di possibile uscita dalla Serie A."
+            ),
+        }
+
+    for player in db_players:
+        player_id = player.get("id")
+        team = str(player.get("team_nfl") or "").strip().upper()
+        name = str(player.get("name") or "").strip()
+
+        # Se il club stesso non compare nella fonte, non assumiamo nulla.
+        if not team or team not in source_names_by_team or not name:
+            continue
+
+        source_team_names = source_names_by_team[team]
+
+        exact = any(
+            normalize_string(source_name) == normalize_string(name)
+            for source_name in source_team_names
+        )
+        if exact:
+            continue
+
+        best_score = max(
+            (
+                _name_similarity(name, source_name)
+                for source_name in source_team_names
+            ),
+            default=0.0,
+        )
+
+        # Soglia abbastanza permissiva per evitare falsi positivi dovuti
+        # a abbreviazioni, apostrofi o traslitterazioni.
+        if best_score >= 0.86:
+            continue
+
+        candidates.append(
+            {
+                "player_id": player_id,
+                "name": name,
+                "team_nfl": team,
+                "role": player.get("role"),
+                "status_titolarita": player.get("status_titolarita"),
+                "in_roster": player_id in rostered_player_ids,
+                "best_source_similarity": round(best_score, 2),
+                "suggested_action": (
+                    "Verifica manuale — presente in una rosa"
+                    if player_id in rostered_player_ids
+                    else "Possibile rimozione"
+                ),
+            }
+        )
+
+    candidates.sort(
+        key=lambda row: (
+            bool(row["in_roster"]),
+            str(row["team_nfl"]),
+            str(row["name"]),
+        )
+    )
+
+    return candidates, {
+        "safe": True,
+        "rows": len(quotations),
+        "teams": len(source_teams),
+        "reason": "",
+    }
+
+
+def delete_verified_missing_players(
+    candidates: list[dict[str, Any]],
+    selected_ids: set[Any],
+) -> tuple[int, list[str]]:
+    """
+    Elimina solo giocatori selezionati manualmente e non presenti in rose.
+
+    Se esiste ancora una riga in rosters per il giocatore, l'eliminazione viene
+    bloccata anche se la UI era obsoleta.
+    """
+    deleted = 0
+    errors: list[str] = []
+
+    for row in candidates:
+        player_id = row.get("player_id")
+        if player_id not in selected_ids:
+            continue
+
+        name = str(row.get("name") or player_id)
+
+        try:
+            linked = (
+                supabase.table("rosters")
+                .select("id")
+                .eq("player_id", player_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if linked:
+                errors.append(
+                    f"{name}: non eliminato perché è ancora presente in una rosa."
+                )
+                continue
+
+            (
+                supabase.table("players")
+                .delete()
+                .eq("id", player_id)
+                .execute()
+            )
+            deleted += 1
+
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+
+    if deleted:
+        invalidate_data_cache()
+
+    return deleted, errors
+
+
+
 def _is_player_data_admin(user: dict[str, Any]) -> bool:
     """
     Pagina updater riservata agli admin configurati nei secrets.
@@ -3042,8 +3214,19 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                     quotations,
                 )
 
+                current_rosters = load_rosters()
+                missing_candidates, missing_check = (
+                    build_missing_from_source_candidates(
+                        db_players,
+                        quotations,
+                        current_rosters,
+                    )
+                )
+
                 st.session_state["player_source_preview"] = preview
                 st.session_state["player_source_unmatched"] = unmatched
+                st.session_state["player_missing_candidates"] = missing_candidates
+                st.session_state["player_missing_check"] = missing_check
                 st.session_state["player_source_stats"] = {
                     "teams_found": len(formations),
                     "quotes_found": len(quotations),
@@ -3059,6 +3242,12 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
     stats = st.session_state.get("player_source_stats")
     preview = st.session_state.get("player_source_preview") or []
     unmatched = st.session_state.get("player_source_unmatched") or []
+    missing_candidates = (
+        st.session_state.get("player_missing_candidates") or []
+    )
+    missing_check = (
+        st.session_state.get("player_missing_check") or {}
+    )
 
     if not stats:
         st.info(
@@ -3296,8 +3485,115 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                     ]
                     st.rerun()
 
+    st.markdown("### 🧹 Secondo controllo — possibili giocatori da rimuovere")
+
+    if not missing_check.get("safe"):
+        st.warning(
+            "Non uso ancora l'assenza dal Listone come criterio di rimozione: "
+            f"ho letto {missing_check.get('rows', 0)} righe e "
+            f"{missing_check.get('teams', 0)} squadre. "
+            "Per sicurezza il controllo si attiva solo quando il Listone "
+            "sembra sufficientemente completo."
+        )
+    elif not missing_candidates:
+        st.success(
+            "Tutti i giocatori presenti in Supabase risultano compatibili "
+            "con il Listone ufficiale letto."
+        )
+    else:
+        st.caption(
+            "Questi giocatori sono presenti in Supabase ma non sono stati "
+            "riconosciuti nel Listone ufficiale della loro squadra. "
+            "Non vengono eliminati automaticamente."
+        )
+
+        protected_count = sum(
+            bool(row.get("in_roster"))
+            for row in missing_candidates
+        )
+        removable_count = len(missing_candidates) - protected_count
+
+        m1, m2 = st.columns(2)
+        m1.metric("Da verificare", len(missing_candidates))
+        m2.metric("Eliminabili", removable_count)
+
+        with st.expander(
+            f"Mostra candidati ({len(missing_candidates)})",
+            expanded=True,
+        ):
+            selected_delete_ids: set[Any] = set()
+
+            for idx, row in enumerate(missing_candidates):
+                c1, c2 = st.columns([4, 1])
+
+                with c1:
+                    st.markdown(
+                        f"**{escape(str(row.get('name') or '—'))}** "
+                        f"· {escape(str(row.get('team_nfl') or '—'))} "
+                        f"· {escape(str(row.get('role') or '—'))}"
+                    )
+                    if row.get("in_roster"):
+                        st.caption(
+                            "🔒 Presente in una rosa: eliminazione bloccata."
+                        )
+                    else:
+                        st.caption(
+                            "Non trovato nel Listone letto. "
+                            f"Somiglianza migliore: "
+                            f"{float(row.get('best_source_similarity') or 0):.2f}"
+                        )
+
+                with c2:
+                    remove = st.checkbox(
+                        "Elimina",
+                        value=False,
+                        disabled=bool(row.get("in_roster")),
+                        key=f"missing_delete_{idx}",
+                    )
+                    if remove:
+                        selected_delete_ids.add(row.get("player_id"))
+
+            if selected_delete_ids:
+                st.warning(
+                    f"Hai selezionato {len(selected_delete_ids)} giocatori. "
+                    "Questa operazione li cancellerà dalla tabella players."
+                )
+                confirm_delete = st.checkbox(
+                    "Confermo di aver verificato che questi giocatori "
+                    "non appartengano più alla Serie A.",
+                    key="confirm_missing_delete",
+                )
+
+                if st.button(
+                    "🗑️ Elimina giocatori verificati",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not confirm_delete,
+                    key="delete_verified_missing_players",
+                ):
+                    deleted, delete_errors = delete_verified_missing_players(
+                        missing_candidates,
+                        selected_delete_ids,
+                    )
+                    if delete_errors:
+                        st.error(
+                            f"Eliminati {deleted} giocatori · "
+                            f"{len(delete_errors)} errori."
+                        )
+                        st.write(delete_errors)
+                    else:
+                        st.success(
+                            f"Eliminati {deleted} giocatori verificati."
+                        )
+
+                    # Rifare il fetch è il modo più sicuro per riallineare
+                    # l'intera preview dopo una cancellazione.
+                    st.session_state.pop("player_missing_candidates", None)
+                    st.session_state.pop("player_missing_check", None)
+                    st.rerun()
+
     if not preview:
-        st.success("Nessuna modifica da applicare.")
+        st.success("Nessuna modifica principale da applicare.")
         return
 
     st.divider()
@@ -3327,6 +3623,8 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         st.session_state.pop("player_source_preview", None)
         st.session_state.pop("player_source_unmatched", None)
         st.session_state.pop("player_source_stats", None)
+        st.session_state.pop("player_missing_candidates", None)
+        st.session_state.pop("player_missing_check", None)
         st.session_state["confirm_player_source_apply"] = False
 
 
