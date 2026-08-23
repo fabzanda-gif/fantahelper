@@ -469,7 +469,7 @@ PLAYER_FIELDS = (
     "rigorista, affidabilita_fisica, propensione_cartellini, "
     "slot_fantacalcio, primo_anno_serie_a, "
     "ballottaggio_con, rigorista_ordine, piazzati, piazzati_ordine, "
-    "quotazione_fc, fvm_fc, data_source, source_updated_at"
+    "quotazione_fc, fvm_fc, data_source, source_updated_at, source_aliases"
 )
 
 FANTACALCIO_FORMATIONS_URL = (
@@ -485,7 +485,7 @@ TEAM_MAP = {
     "Torino": "TOR", "Bologna": "BOL", "Genoa": "GEN", "Sassuolo": "SAS",
     "Udinese": "UDI", "Cagliari": "CAG", "Verona": "VER", "Lecce": "LEC",
     "Cremonese": "CRE", "Parma": "PAR", "Como": "COM", "Pisa": "PIS",
-    "Frosinone": "FRO", "Monza": "MON",
+    "Frosinone": "FRO", "Monza": "MON", "Venezia": "VEN",
 }
 
 DATA_DIR = Path(__file__).resolve().parent
@@ -2471,6 +2471,26 @@ def parse_fantacalcio_quotations(html: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _source_alias_token(source_name: str, team_code: str | None) -> str:
+    """Alias stabile per ricordare associazioni manuali fonte -> giocatore."""
+    return (
+        f"{str(team_code or '').strip().upper()}|"
+        f"{normalize_string(source_name)}"
+    )
+
+
+def _player_has_source_alias(
+    player: dict[str, Any],
+    source_name: str,
+    team_code: str | None,
+) -> bool:
+    token = _source_alias_token(source_name, team_code)
+    aliases = player.get("source_aliases") or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    return token in {str(alias) for alias in aliases}
+
+
 def _name_similarity(left: str, right: str) -> float:
     return SequenceMatcher(
         None,
@@ -2489,6 +2509,13 @@ def _best_player_match(
     source_norm = normalize_string(source_name)
     if not source_norm:
         return None, 0.0
+
+    # Le associazioni confermate manualmente hanno precedenza assoluta.
+    # Il controllo avviene prima del filtro squadra: se un giocatore cambia club,
+    # l'alias continua a identificarlo e il nuovo team può essere aggiornato.
+    for player in db_players:
+        if _player_has_source_alias(player, source_name, team_code):
+            return player, 1.0
 
     candidates = db_players
     if team_code:
@@ -2797,6 +2824,55 @@ def _unmatched_source_payload(item: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _compose_new_player_name(
+    source_name: str,
+    first_initial: str | None = None,
+) -> str:
+    """
+    Builds the final database name for a new player.
+
+    If the source only exposes a surname (e.g. "Tourè") and a homonym exists,
+    we store "A. Tourè" using the admin-supplied initial.
+    """
+    base = _clean_source_player_name(source_name)
+    initial = str(first_initial or "").strip().upper()[:1]
+
+    # If source already looks like "A. Surname" or contains multiple words,
+    # keep it as-is unless an explicit initial was supplied.
+    if initial:
+        surname = base.split()[-1] if base else ""
+        return f"{initial}. {surname}".strip()
+
+    return base
+
+
+def _existing_name_conflicts(
+    source_name: str,
+    db_players: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Returns existing DB players with the same normalized surname/name.
+    Useful when Fantacalcio exposes only a surname.
+    """
+    base = _clean_source_player_name(source_name)
+    source_norm = normalize_string(base)
+    source_surname = normalize_string(base.split()[-1] if base else "")
+
+    conflicts: list[dict[str, Any]] = []
+    for player in db_players:
+        db_name = str(player.get("name") or "")
+        db_norm = normalize_string(db_name)
+        db_surname = normalize_string(db_name.split()[-1] if db_name else "")
+
+        if db_norm == source_norm or (
+            source_surname
+            and db_surname == source_surname
+        ):
+            conflicts.append(player)
+
+    return conflicts
+
+
 def apply_unmatched_resolutions(
     unmatched: list[dict[str, Any]],
     resolutions: dict[int, dict[str, Any]],
@@ -2835,10 +2911,36 @@ def apply_unmatched_resolutions(
                     continue
 
                 # L'associazione manuale certifica che il record esistente e il
-                # nome trovato dalla fonte sono lo stesso calciatore. Di conseguenza
-                # il club Serie A del record esistente deve essere aggiornato al club
-                # corrente indicato dalla fonte.
+                # nome trovato dalla fonte sono lo stesso calciatore.
                 payload["team_nfl"] = source_team
+
+                existing_player = (
+                    supabase.table("players")
+                    .select("id, source_aliases")
+                    .eq("id", player_id)
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+                existing_aliases = (
+                    existing_player[0].get("source_aliases") or []
+                    if existing_player
+                    else []
+                )
+                if isinstance(existing_aliases, str):
+                    existing_aliases = [existing_aliases]
+
+                alias_token = _source_alias_token(
+                    str(item.get("name") or ""),
+                    source_team,
+                )
+                payload["source_aliases"] = list(
+                    dict.fromkeys(
+                        [str(alias) for alias in existing_aliases]
+                        + [alias_token]
+                    )
+                )
 
                 (
                     supabase.table("players")
@@ -2856,8 +2958,18 @@ def apply_unmatched_resolutions(
                     )
                     continue
 
+                final_name = _compose_new_player_name(
+                    str(item.get("name") or ""),
+                    resolution.get("first_initial"),
+                )
+                if not final_name:
+                    errors.append(
+                        f"{item.get('name')}: nome giocatore non valido."
+                    )
+                    continue
+
                 new_payload = {
-                    "name": _clean_source_player_name(item.get("name", "")),
+                    "name": final_name,
                     "team_nfl": item.get("team"),
                     "role": role,
                     "list_price": int(resolution.get("list_price") or 1),
@@ -2866,18 +2978,39 @@ def apply_unmatched_resolutions(
                     ),
                     "rigorista": bool(payload.get("rigorista", False)),
                     "piazzati": bool(payload.get("piazzati", False)),
-                    # Nuovo rispetto al DB corrente = nuovo ingresso Serie A
-                    # confermato manualmente dall'admin.
-                    "primo_anno_serie_a": True,
+                    "primo_anno_serie_a": bool(
+                        resolution.get("rookie", True)
+                    ),
                     "data_source": PLAYER_DATA_SOURCE_LABEL,
                     "source_updated_at": payload["source_updated_at"],
+                    "source_aliases": [
+                        _source_alias_token(
+                            str(item.get("name") or ""),
+                            str(item.get("team") or ""),
+                        )
+                    ],
                 }
-                (
-                    supabase.table("players")
-                    .insert(new_payload)
-                    .execute()
-                )
-                created += 1
+
+                try:
+                    (
+                        supabase.table("players")
+                        .insert(new_payload)
+                        .execute()
+                    )
+                    created += 1
+                except Exception as exc:
+                    message = str(exc)
+                    if (
+                        "players_name_unique" in message
+                        or "duplicate key value" in message.lower()
+                    ):
+                        errors.append(
+                            f"{item.get('name')}: esiste già un giocatore con "
+                            f"nome `{final_name}`. Usa l'iniziale del nome oppure "
+                            "associalo al record esistente."
+                        )
+                    else:
+                        raise
 
         except Exception as exc:
             errors.append(f"{item.get('name')}: {exc}")
@@ -3149,6 +3282,7 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                 st.session_state["player_missing_check"] = missing_check
                 st.session_state["player_source_stats"] = {
                     "teams_found": len(formations),
+                    "team_codes_found": sorted(formations.keys()),
                     "quotes_found": len(quotations),
                     "changes": len(preview),
                     "unmatched": len(unmatched),
@@ -3183,6 +3317,18 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
     s3.metric("Modifiche", stats["changes"])
     s4.metric("Da verificare", stats["unmatched"])
     st.caption(f"Ultima lettura: {stats['fetched_at']}")
+
+    expected_team_codes = {
+        "ATA", "BOL", "CAG", "COM", "FIO", "FRO", "GEN", "INT", "JUV", "LAZ",
+        "LEC", "MIL", "MON", "NAP", "PAR", "ROM", "SAS", "TOR", "UDI", "VEN",
+    }
+    found_team_codes = set(stats.get("team_codes_found") or [])
+    missing_team_codes = sorted(expected_team_codes - found_team_codes)
+    if missing_team_codes:
+        st.warning(
+            "Squadre non lette dalla fonte: "
+            + ", ".join(missing_team_codes)
+        )
 
     if preview:
         preview_df = pd.DataFrame(preview)
@@ -3248,8 +3394,9 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
             st.caption(
                 "Per ogni nome puoi associarlo a un giocatore già presente, "
                 "segnalarlo come nuovo giocatore oppure ignorarlo. "
-                "I nuovi giocatori vengono marcati automaticamente come rookie "
-                "al primo anno in Serie A."
+                "L'associazione a un giocatore esistente viene ricordata anche "
+                "nei controlli successivi. I nuovi giocatori vengono marcati "
+                "automaticamente come rookie al primo anno in Serie A."
             )
 
             db_players_for_resolution = load_players()
@@ -3332,6 +3479,30 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                         )
 
                 elif action == "Nuovo giocatore":
+                    conflicts = _existing_name_conflicts(
+                        str(item.get("name") or ""),
+                        db_players_for_resolution,
+                    )
+
+                    if conflicts:
+                        conflict_labels = ", ".join(
+                            f"{player.get('name')} ({player.get('team_nfl')})"
+                            for player in conflicts[:5]
+                        )
+                        st.warning(
+                            "Ho trovato almeno un omonimo/cognome già presente: "
+                            f"**{conflict_labels}**. "
+                            "Inserisci l'iniziale del nome per distinguere il nuovo giocatore."
+                        )
+                        resolution["first_initial"] = st.text_input(
+                            "Iniziale nome",
+                            max_chars=1,
+                            placeholder="Es. A",
+                            key=f"unmatched_initial_{idx}",
+                        ).strip().upper()
+                    else:
+                        resolution["first_initial"] = ""
+
                     c_role, c_price = st.columns(2)
                     with c_role:
                         resolution["role"] = st.selectbox(
@@ -3349,9 +3520,18 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                             key=f"unmatched_price_{idx}",
                         )
 
-                    st.success(
-                        "🌱 Verrà creato nel database con "
-                        "**Rookie Serie A = Sì**."
+                    resolution["rookie"] = st.checkbox(
+                        "Primo anno in Serie A",
+                        value=True,
+                        key=f"unmatched_rookie_{idx}",
+                    )
+
+                    preview_name = _compose_new_player_name(
+                        str(item.get("name") or ""),
+                        resolution.get("first_initial"),
+                    )
+                    st.caption(
+                        f"Nome che verrà salvato: **{preview_name or '—'}**"
                     )
 
                 resolutions[idx] = resolution
@@ -3359,11 +3539,23 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
 
             st.session_state["player_unmatched_resolutions"] = resolutions
 
-            actionable = sum(
-                1
-                for resolution in resolutions.values()
-                if resolution.get("action") != "Ignora"
-            )
+            actionable = 0
+            for item_idx, resolution in resolutions.items():
+                action = resolution.get("action")
+                if action == "Ignora":
+                    continue
+
+                if action == "Nuovo giocatore":
+                    conflicts = _existing_name_conflicts(
+                        str(unmatched[item_idx].get("name") or ""),
+                        db_players_for_resolution,
+                    )
+                    if conflicts and not str(
+                        resolution.get("first_initial") or ""
+                    ).strip():
+                        continue
+
+                actionable += 1
             st.caption(
                 f"{actionable} giocatori selezionati per la risoluzione manuale."
             )
@@ -3397,11 +3589,28 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
                 # Rimuove dalla lista quelli gestiti con successo; al prossimo
                 # fetch la fonte verrà nuovamente confrontata col DB aggiornato.
                 if not resolution_errors:
+                    resolved_keys = {
+                        (
+                            normalize_string(str(unmatched[item_idx].get("name") or "")),
+                            str(unmatched[item_idx].get("team") or "").strip().upper(),
+                        )
+                        for item_idx, resolution in resolutions.items()
+                        if resolution.get("action") != "Ignora"
+                    }
+
+                    # Lo stesso calciatore può comparire più volte nella fonte
+                    # (XI, ballottaggi, rigoristi, piazzati). Una sola associazione
+                    # manuale risolve tutte le occorrenze di quel nome/squadra.
                     st.session_state["player_source_unmatched"] = [
-                        item
-                        for item_idx, item in enumerate(unmatched)
-                        if resolutions.get(item_idx, {}).get("action")
-                        == "Ignora"
+                        source_item
+                        for source_item in unmatched
+                        if (
+                            normalize_string(
+                                str(source_item.get("name") or "")
+                            ),
+                            str(source_item.get("team") or "").strip().upper(),
+                        )
+                        not in resolved_keys
                     ]
                     st.rerun()
 
