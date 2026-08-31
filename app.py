@@ -469,7 +469,12 @@ PLAYER_FIELDS = (
     "rigorista, affidabilita_fisica, propensione_cartellini, "
     "slot_fantacalcio, primo_anno_serie_a, "
     "ballottaggio_con, rigorista_ordine, piazzati, piazzati_ordine, "
-    "quotazione_fc, fvm_fc, data_source, source_updated_at, source_aliases"
+    "quotazione_fc, fvm_fc, data_source, source_updated_at, source_aliases, "
+    "titolarita_score, "
+    "current_minutes, current_matches, current_goals, current_assists, "
+    "current_avg_vote, current_fantamedia, "
+    "previous_minutes, previous_matches, previous_goals, previous_assists, "
+    "previous_avg_vote, previous_fantamedia, previous_league, league_coefficient"
 )
 
 FANTACALCIO_FORMATIONS_URL = (
@@ -546,6 +551,60 @@ STRATEGY_BUDGET_ALLOCATIONS = {
         "A": 245,
     },
 }
+
+
+# ============================================================
+# PLAYER RATING MODEL v2
+# ============================================================
+# Ogni componente è normalizzata 1–10. I pesi cambiano per ruolo.
+# Il rating tecnico misura il giocatore; il rating asta misura quanto
+# sia conveniente acquistarlo nel contesto corrente.
+ROLE_MODEL_WEIGHTS = {
+    "P": {
+        "performance": 0.28,
+        "titolarita": 0.25,
+        "bonus": 0.05,
+        "team": 0.20,
+        "reliability": 0.17,
+        "market": 0.05,
+    },
+    "D": {
+        "performance": 0.29,
+        "titolarita": 0.23,
+        "bonus": 0.12,
+        "team": 0.17,
+        "reliability": 0.14,
+        "market": 0.05,
+    },
+    "C": {
+        "performance": 0.31,
+        "titolarita": 0.20,
+        "bonus": 0.23,
+        "team": 0.10,
+        "reliability": 0.10,
+        "market": 0.06,
+    },
+    "A": {
+        "performance": 0.34,
+        "titolarita": 0.21,
+        "bonus": 0.25,
+        "team": 0.08,
+        "reliability": 0.06,
+        "market": 0.06,
+    },
+}
+
+DEFAULT_TITOLARITA_SCORES = {
+    "Titolare": 92.0,
+    "Ballottaggio": 55.0,
+    "Riserva": 20.0,
+}
+
+# Minuti necessari perché la stagione Serie A corrente prevalga
+# progressivamente sullo storico precedente.
+CURRENT_SEASON_BLEND_MINUTES = 1500.0
+FULL_CONFIDENCE_CURRENT_MINUTES = 1800.0
+FULL_CONFIDENCE_PREVIOUS_MINUTES = 2400.0
 
 
 CUSTOM_MODIFIERS = {
@@ -3212,6 +3271,361 @@ def _is_player_data_admin(user: dict[str, Any]) -> bool:
     return bool(email and email in allowed)
 
 
+def _guess_uploaded_column(
+    columns: list[str],
+    aliases: tuple[str, ...],
+) -> str | None:
+    normalized = {normalize_string(column): column for column in columns}
+    for alias in aliases:
+        alias_norm = normalize_string(alias)
+        if alias_norm in normalized:
+            return normalized[alias_norm]
+    for column in columns:
+        column_norm = normalize_string(column)
+        for alias in aliases:
+            alias_norm = normalize_string(alias)
+            if alias_norm and (alias_norm in column_norm or column_norm in alias_norm):
+                return column
+    return None
+
+
+def _read_uploaded_listone(uploaded_file: Any) -> pd.DataFrame:
+    filename = str(getattr(uploaded_file, "name", "") or "").lower()
+    if filename.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file)
+    if filename.endswith(".csv"):
+        from io import BytesIO
+        raw = uploaded_file.getvalue()
+        for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                return pd.read_csv(BytesIO(raw), encoding=encoding)
+            except Exception:
+                continue
+    raise ValueError("Formato non supportato. Usa CSV, XLSX o XLS.")
+
+
+def _uploaded_team_to_code(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper in set(TEAM_MAP.values()):
+        return upper
+    normalized = normalize_string(text)
+    for team_name, team_code in TEAM_MAP.items():
+        if normalize_string(team_name) == normalized:
+            return team_code
+    return upper[:3]
+
+
+def _uploaded_role_to_code(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if text in {"P", "D", "C", "A"}:
+        return text
+    mapping = {
+        "portiere": "P", "portieri": "P",
+        "difensore": "D", "difensori": "D",
+        "centrocampista": "C", "centrocampisti": "C",
+        "attaccante": "A", "attaccanti": "A",
+    }
+    return mapping.get(normalize_string(text), text[:1])
+
+
+def build_uploaded_listone_comparison(
+    uploaded_df: pd.DataFrame,
+    db_players: list[dict[str, Any]],
+    name_col: str,
+    team_col: str,
+    role_col: str,
+    quote_col: str | None = None,
+    fvm_col: str | None = None,
+) -> dict[str, Any]:
+    source_rows: list[dict[str, Any]] = []
+    for _, row in uploaded_df.iterrows():
+        name = _clean_source_player_name(row.get(name_col, ""))
+        if not name:
+            continue
+        team_code = _uploaded_team_to_code(row.get(team_col, ""))
+        role_code = _uploaded_role_to_code(row.get(role_col, ""))
+
+        quote_value = None
+        fvm_value = None
+        if quote_col:
+            try:
+                raw_quote = row.get(quote_col)
+                if pd.notna(raw_quote):
+                    quote_value = int(float(raw_quote))
+            except Exception:
+                pass
+        if fvm_col:
+            try:
+                raw_fvm = row.get(fvm_col)
+                if pd.notna(raw_fvm):
+                    fvm_value = int(float(raw_fvm))
+            except Exception:
+                pass
+
+        source_rows.append({
+            "name": name,
+            "team_nfl": team_code,
+            "role": role_code,
+            "quotazione_fc": quote_value,
+            "fvm_fc": fvm_value,
+        })
+
+    matched_ids: set[Any] = set()
+    matched: list[dict[str, Any]] = []
+    new_players: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    changed_players: list[dict[str, Any]] = []
+
+    for source in source_rows:
+        match, confidence = _best_player_match(
+            source["name"],
+            db_players,
+            source.get("team_nfl") or None,
+            min_score=0.86,
+        )
+
+        if match is None:
+            surname_matches = _existing_name_conflicts(source["name"], db_players)
+            if surname_matches:
+                ambiguous.append({
+                    **source,
+                    "possible_matches": " | ".join(
+                        f"{p.get('name')} ({p.get('team_nfl')}, {p.get('role')})"
+                        for p in surname_matches[:6]
+                    ),
+                    "confidence": round(confidence, 2),
+                })
+            else:
+                new_players.append({**source, "confidence": round(confidence, 2)})
+            continue
+
+        matched_ids.add(match.get("id"))
+        match_row = {
+            "player_id": match.get("id"),
+            "db_name": match.get("name"),
+            "file_name": source["name"],
+            "db_team": match.get("team_nfl"),
+            "file_team": source.get("team_nfl"),
+            "db_role": match.get("role"),
+            "file_role": source.get("role"),
+            "db_quote": match.get("quotazione_fc"),
+            "file_quote": source.get("quotazione_fc"),
+            "db_fvm": match.get("fvm_fc"),
+            "file_fvm": source.get("fvm_fc"),
+            "confidence": round(confidence, 2),
+        }
+        matched.append(match_row)
+
+        team_changed = bool(source.get("team_nfl")) and str(match.get("team_nfl") or "") != source["team_nfl"]
+        role_changed = bool(source.get("role")) and str(match.get("role") or "") != source["role"]
+        quote_changed = source.get("quotazione_fc") is not None and match.get("quotazione_fc") != source.get("quotazione_fc")
+        fvm_changed = source.get("fvm_fc") is not None and match.get("fvm_fc") != source.get("fvm_fc")
+
+        if team_changed or role_changed or quote_changed or fvm_changed:
+            changed_players.append({
+                **match_row,
+                "team_changed": team_changed,
+                "role_changed": role_changed,
+                "quote_changed": quote_changed,
+                "fvm_changed": fvm_changed,
+            })
+
+    missing_players = [{
+        "player_id": player.get("id"),
+        "name": player.get("name"),
+        "team_nfl": player.get("team_nfl"),
+        "role": player.get("role"),
+        "quotazione_fc": player.get("quotazione_fc"),
+        "status_titolarita": player.get("status_titolarita"),
+    } for player in db_players if player.get("id") not in matched_ids]
+
+    return {
+        "source_rows": source_rows,
+        "matched": matched,
+        "new_players": new_players,
+        "missing_players": missing_players,
+        "changed_players": changed_players,
+        "ambiguous": ambiguous,
+    }
+
+
+def build_listone_review_sql(comparison: dict[str, Any]) -> str:
+    def sql_text(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        return "'" + str(value).replace("'", "''") + "'"
+
+    lines = [
+        "-- fantahe1per - SQL generato dalla verifica Listone",
+        "-- Controllare SEMPRE il file prima di eseguirlo.",
+        "",
+        "begin;",
+        "",
+        "-- AGGIORNAMENTI GIOCATORI ESISTENTI",
+    ]
+
+    for row in comparison.get("changed_players", []):
+        assignments = []
+        if row.get("file_team"):
+            assignments.append(f"team_nfl = {sql_text(row['file_team'])}")
+        if row.get("file_role"):
+            assignments.append(f"role = {sql_text(row['file_role'])}")
+        if row.get("file_quote") is not None:
+            assignments.append(f"quotazione_fc = {int(row['file_quote'])}")
+        if row.get("file_fvm") is not None:
+            assignments.append(f"fvm_fc = {int(row['file_fvm'])}")
+        if assignments:
+            lines += [
+                f"-- {row.get('db_name')}",
+                "update public.players",
+                "set " + ", ".join(assignments),
+                f"where id = {sql_text(row.get('player_id'))};",
+                "",
+            ]
+
+    lines += ["-- NUOVI GIOCATORI"]
+    for row in comparison.get("new_players", []):
+        vals = [
+            sql_text(row.get("name")),
+            sql_text(row.get("team_nfl")),
+            sql_text(row.get("role")),
+            str(int(row["quotazione_fc"])) if row.get("quotazione_fc") is not None else "NULL",
+            str(int(row["fvm_fc"])) if row.get("fvm_fc") is not None else "NULL",
+            "1", "false", "false", "false",
+        ]
+        lines += [
+            f"-- Nuovo: {row.get('name')}",
+            "insert into public.players "
+            "(name, team_nfl, role, quotazione_fc, fvm_fc, list_price, rigorista, piazzati, primo_anno_serie_a)",
+            "values (" + ", ".join(vals) + ");",
+            "",
+        ]
+
+    lines += [
+        "-- POSSIBILI RIMOZIONI (COMMENTATE DI DEFAULT)",
+    ]
+    for row in comparison.get("missing_players", []):
+        lines.append(
+            "-- delete from public.players "
+            f"where id = {sql_text(row.get('player_id'))}; "
+            f"-- {row.get('name')} · {row.get('team_nfl')} · {row.get('role')}"
+        )
+
+    lines += ["", "commit;"]
+    return "\n".join(lines)
+
+
+def render_uploaded_listone_checker() -> None:
+    st.markdown("### 📤 Verifica Listone ufficiale")
+    st.caption(
+        "Carica CSV/XLSX. L'app confronta il file con Supabase e mostra "
+        "giocatori nuovi, mancanti e dati cambiati prima di qualsiasi modifica."
+    )
+
+    uploaded = st.file_uploader(
+        "Carica Listone",
+        type=["csv", "xlsx", "xls"],
+        key="official_listone_upload",
+    )
+    if uploaded is None:
+        return
+
+    try:
+        source_df = _read_uploaded_listone(uploaded)
+    except Exception as exc:
+        st.error(f"Non riesco a leggere il file: {exc}")
+        return
+
+    if source_df.empty:
+        st.warning("Il file non contiene righe.")
+        return
+
+    columns = [str(column) for column in source_df.columns]
+    guessed_name = _guess_uploaded_column(columns, ("Nome", "Giocatore", "Calciatore", "Nome calciatore"))
+    guessed_team = _guess_uploaded_column(columns, ("Squadra", "Club", "Team"))
+    guessed_role = _guess_uploaded_column(columns, ("Ruolo", "R"))
+    guessed_quote = _guess_uploaded_column(columns, ("Quotazione", "Qt.A", "QtA", "Quotazione attuale", "Qt"))
+    guessed_fvm = _guess_uploaded_column(columns, ("FVM", "FVM M", "FVM Mantra"))
+
+    st.markdown("#### Mappatura colonne")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        name_col = st.selectbox("Nome giocatore", columns, index=columns.index(guessed_name) if guessed_name in columns else 0, key="listone_map_name")
+    with c2:
+        team_col = st.selectbox("Squadra", columns, index=columns.index(guessed_team) if guessed_team in columns else 0, key="listone_map_team")
+    with c3:
+        role_col = st.selectbox("Ruolo", columns, index=columns.index(guessed_role) if guessed_role in columns else 0, key="listone_map_role")
+
+    optional_columns = ["— Non presente —"] + columns
+    c4, c5 = st.columns(2)
+    with c4:
+        quote_col = st.selectbox("Quotazione", optional_columns, index=optional_columns.index(guessed_quote) if guessed_quote in optional_columns else 0, key="listone_map_quote")
+    with c5:
+        fvm_col = st.selectbox("FVM", optional_columns, index=optional_columns.index(guessed_fvm) if guessed_fvm in optional_columns else 0, key="listone_map_fvm")
+
+    quote_col = None if quote_col == "— Non presente —" else quote_col
+    fvm_col = None if fvm_col == "— Non presente —" else fvm_col
+
+    if st.button("🔎 Confronta con Supabase", type="primary", use_container_width=True, key="compare_uploaded_listone"):
+        st.session_state["uploaded_listone_comparison"] = build_uploaded_listone_comparison(
+            source_df, load_players(), name_col, team_col, role_col, quote_col, fvm_col
+        )
+
+    comparison = st.session_state.get("uploaded_listone_comparison")
+    if not comparison:
+        st.dataframe(source_df.head(20), use_container_width=True, hide_index=True)
+        return
+
+    matched = comparison["matched"]
+    new_players = comparison["new_players"]
+    missing_players = comparison["missing_players"]
+    changed_players = comparison["changed_players"]
+    ambiguous = comparison["ambiguous"]
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Riconosciuti", len(matched))
+    m2.metric("Da aggiungere", len(new_players))
+    m3.metric("Da rimuovere?", len(missing_players))
+    m4.metric("Dati cambiati", len(changed_players))
+    m5.metric("Ambigui", len(ambiguous))
+
+    if changed_players:
+        with st.expander(f"🔄 Giocatori con dati cambiati ({len(changed_players)})", expanded=True):
+            st.dataframe(pd.DataFrame(changed_players), use_container_width=True, hide_index=True)
+
+    if new_players:
+        with st.expander(f"➕ Possibili nuovi giocatori ({len(new_players)})", expanded=True):
+            st.dataframe(pd.DataFrame(new_players), use_container_width=True, hide_index=True)
+
+    if missing_players:
+        with st.expander(f"➖ Presenti in Supabase ma assenti dal file ({len(missing_players)})", expanded=True):
+            st.warning("Assenza dal file non significa automaticamente che il giocatore vada eliminato.")
+            st.dataframe(pd.DataFrame(missing_players), use_container_width=True, hide_index=True)
+
+    if ambiguous:
+        with st.expander(f"❓ Abbinamenti ambigui ({len(ambiguous)})", expanded=True):
+            st.dataframe(pd.DataFrame(ambiguous), use_container_width=True, hide_index=True)
+
+    review_sql = build_listone_review_sql(comparison)
+    st.download_button(
+        "⬇️ Scarica SQL di riallineamento",
+        data=review_sql.encode("utf-8"),
+        file_name="fantahe1per_listone_alignment.sql",
+        mime="text/plain",
+        use_container_width=True,
+    )
+    st.caption(
+        "Lo SQL aggiorna i giocatori riconosciuti e inserisce quelli chiaramente nuovi. "
+        "Le DELETE sono commentate per sicurezza."
+    )
+
+
+
 def render_player_data_updater_page(user: dict[str, Any]) -> None:
     st.markdown(
         '<div class="rcd-section">🔄 Aggiornamento dati giocatori</div>',
@@ -3223,6 +3637,11 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         "Il sistema genera prima una preview: nessun dato viene scritto "
         "su Supabase finché non confermi esplicitamente."
     )
+
+    render_uploaded_listone_checker()
+
+    st.divider()
+    st.markdown("### 🌐 Controllo fonti online")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -4332,60 +4751,187 @@ def build_draft_strategy_text(
 # RATING
 # ============================================================
 
-def calculate_player_rating_detailed(
+def _rating_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _rating_clip(value: float, low: float = 1.0, high: float = 10.0) -> float:
+    return max(low, min(high, float(value)))
+
+
+def _fantamedia_to_score(fantamedia: float | None, avg_vote: float | None) -> float | None:
+    """
+    Traduce fantamedia/media voto in un punteggio 1–10.
+    La fantamedia è preferita perché incorpora direttamente bonus e malus.
+    """
+    if fantamedia is not None and fantamedia > 0:
+        return _rating_clip(2.0 + (fantamedia - 5.0) * 2.0)
+    if avg_vote is not None and avg_vote > 0:
+        return _rating_clip(2.5 + (avg_vote - 5.0) * 2.25)
+    return None
+
+
+def _rate_per90(value: float, minutes: float) -> float:
+    if minutes <= 0:
+        return 0.0
+    return value * 90.0 / minutes
+
+
+def _performance_score_from_sample(
+    role: str,
+    minutes: float,
+    goals: float,
+    assists: float,
+    avg_vote: float | None,
+    fantamedia: float | None,
+) -> float | None:
+    """
+    Performance storica/corrente normalizzata per ruolo.
+    Quando esiste la fantamedia la usa come base, poi aggiunge solo un
+    piccolo segnale per-90 per evitare doppio conteggio eccessivo.
+    """
+    if minutes <= 0 and not fantamedia and not avg_vote:
+        return None
+
+    base = _fantamedia_to_score(fantamedia, avg_vote)
+    if base is None:
+        base = 5.0
+
+    g90 = _rate_per90(goals, minutes)
+    a90 = _rate_per90(assists, minutes)
+
+    if role == "A":
+        per90 = g90 * 2.2 + a90 * 1.15
+    elif role == "C":
+        per90 = g90 * 1.8 + a90 * 1.35
+    elif role == "D":
+        per90 = g90 * 1.3 + a90 * 1.1
+    else:
+        per90 = 0.0
+
+    return _rating_clip(base + min(1.2, per90))
+
+
+def _market_score(player: dict[str, Any]) -> float:
+    """
+    Segnale esterno: FVM/quotazione/listino.
+    Non determina il rating, ma impedisce al modello di ignorare completamente
+    il consenso del mercato.
+    """
+    market_value = (
+        _rating_float(player.get("fvm_fc"))
+        or _rating_float(player.get("quotazione_fc"))
+        or _rating_float(player.get("list_price"), 1.0)
+    )
+    # Curva logaritmica: differenze enormi di prezzo non schiacciano il resto.
+    import math
+    return _rating_clip(2.0 + 8.0 * min(1.0, math.log1p(max(0.0, market_value)) / math.log(101.0)))
+
+
+def _titolarita_component(player: dict[str, Any]) -> tuple[float, float]:
+    probability = _rating_float(player.get("titolarita_score"), -1.0)
+    if probability < 0:
+        probability = DEFAULT_TITOLARITA_SCORES.get(
+            str(player.get("status_titolarita") or ""),
+            50.0,
+        )
+    probability = max(0.0, min(100.0, probability))
+    # 0% non deve diventare 0/10: manteniamo il range 1–10.
+    score = 1.0 + probability * 0.09
+    return _rating_clip(score), probability
+
+
+def _bonus_component(player: dict[str, Any], role: str, current_minutes: float, previous_minutes: float) -> float:
+    score = 4.5
+
+    rigorista_order = int(_rating_float(player.get("rigorista_ordine"), 0))
+    if rigorista_order == 1:
+        score += 3.0
+    elif rigorista_order == 2:
+        score += 1.8
+    elif rigorista_order == 3:
+        score += 0.9
+    elif player.get("rigorista"):
+        score += 1.3
+
+    set_piece_order = int(_rating_float(player.get("piazzati_ordine"), 0))
+    if set_piece_order == 1:
+        score += 1.2
+    elif set_piece_order == 2:
+        score += 0.7
+    elif set_piece_order == 3:
+        score += 0.35
+    elif player.get("piazzati"):
+        score += 0.45
+
+    # Produzione offensiva corrente/storica, solo come segnale secondario.
+    cm = max(0.0, current_minutes)
+    pm = max(0.0, previous_minutes)
+    cg = _rating_float(player.get("current_goals"))
+    ca = _rating_float(player.get("current_assists"))
+    pg = _rating_float(player.get("previous_goals"))
+    pa = _rating_float(player.get("previous_assists"))
+
+    if cm > 0:
+        g90, a90 = _rate_per90(cg, cm), _rate_per90(ca, cm)
+    elif pm > 0:
+        g90, a90 = _rate_per90(pg, pm), _rate_per90(pa, pm)
+    else:
+        g90 = a90 = 0.0
+
+    if role == "A":
+        score += min(2.2, g90 * 2.0 + a90 * 0.8)
+    elif role == "C":
+        score += min(2.0, g90 * 1.6 + a90 * 1.0)
+    elif role == "D":
+        score += min(1.2, g90 * 1.0 + a90 * 0.8)
+
+    return _rating_clip(score)
+
+
+def _reliability_component(
     player: dict[str, Any],
-    preferred_players: set[Any] | None = None,
-    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
-    goalkeeper_ranking: dict[str, int] | None = None,
-) -> dict[str, Any]:
-    preferred_players = preferred_players or set()
-    if custom_modifiers is None:
-        custom_modifiers = load_custom_modifiers()
-    role = player.get("role", "D")
-    player_name = normalize_string(player.get("name", ""))
+    current_minutes: float,
+    previous_minutes: float,
+) -> float:
+    # Minuti = evidenza di disponibilità e centralità.
+    minute_signal = min(
+        1.0,
+        (current_minutes + previous_minutes * 0.45) / 2400.0,
+    )
+    score = 4.5 + minute_signal * 4.0
 
-    base = 5.0
-    real_stats = False
-    goals = assists = matches = 0
+    physical = normalize_string(str(player.get("affidabilita_fisica") or ""))
+    if any(token in physical for token in ("alta", "ottima", "affidabile", "buona")):
+        score += 0.8
+    elif any(token in physical for token in ("bassa", "fragile", "infortuni", "rischio")):
+        score -= 1.2
 
-    if not STATS.empty and player_name and "clean_name" in STATS.columns:
-        exact = STATS[STATS["clean_name"] == player_name]
-        match = exact
-        if match.empty:
-            escaped = re.escape(player_name)
-            match = STATS[STATS["clean_name"].str.contains(escaped, na=False, regex=True)]
-        if not match.empty:
-            row = match.iloc[0]
-            goals = int(row.get("goals", 0) or 0)
-            assists = int(row.get("assists", 0) or 0)
-            matches = int(row.get("matches", 0) or 0)
-            if matches > 3:
-                base = float(row.get("avg_vote", 6.0) or 6.0)
-                if role in {"A", "C"}:
-                    base += goals * 0.12 + assists * 0.08
-                else:
-                    base += goals * 0.15 + assists * 0.10
-                real_stats = True
+    cards = normalize_string(str(player.get("propensione_cartellini") or ""))
+    if any(token in cards for token in ("rischio", "alta", "malus")):
+        score -= 0.7
 
-    if not real_stats:
-        fallback = {"A": 5.0, "P": 5.0, "C": 4.8, "D": 4.5}.get(role, 4.5)
-        base = fallback + (float(player.get("list_price") or 1) * 0.04)
+    return _rating_clip(score)
 
-    titolarita_mod = {
-        "Titolare": 0.4,
-        "Ballottaggio": -0.3,
-        "Riserva": -1.5,
-    }.get(player.get("status_titolarita"), 0.0)
 
+def _team_context_component(
+    player: dict[str, Any],
+    goalkeeper_ranking: dict[str, int] | None,
+) -> tuple[float, float, int | None]:
+    role = str(player.get("role") or "D")
     team_mods = MODS.get(player.get("team_nfl"), {"att": 0.0, "def": 0.0})
 
-    # Portieri: il modificatore difensivo standard viene sostituito
-    # dal criterio richiesto basato sui gol subiti delle tre squadre.
     goalkeeper_mod, goalkeeper_rank = get_goalkeeper_modifier(
         player,
         goalkeeper_ranking,
     )
-    team_mod = (
+
+    raw_mod = (
         goalkeeper_mod
         if role == "P"
         else team_mods["att"]
@@ -4393,17 +4939,216 @@ def calculate_player_rating_detailed(
         else team_mods["def"]
     )
 
-    rigorista_mod = 0.8 if player.get("rigorista") else 0.0
-    cartellini_mod = -0.3 if player.get("propensione_cartellini") == "A rischio malus" else 0.0
-    rookie_mod = -0.3 if player.get("primo_anno_serie_a") else 0.0
-    # Il preferito proveniente dalla sessione resta compatibile.
-    # Se il preferito è salvato nella nuova tabella, viene letto da lì.
-    db_modifier = custom_modifiers.get(player.get("id"), {})
-    custom_mod = float(db_modifier.get("modifier_value") or 0.0)
-    db_modifier_key = db_modifier.get("modifier_key")
+    # I vecchi MODS restano utili, ma diventano un componente 1–10.
+    score = _rating_clip(5.5 + raw_mod * 2.0)
+    return score, raw_mod, goalkeeper_rank
 
+
+def _rating_confidence(
+    player: dict[str, Any],
+    current_minutes: float,
+    previous_minutes: float,
+    current_perf: float | None,
+    previous_perf: float | None,
+) -> tuple[float, str]:
+    current_evidence = min(1.0, current_minutes / FULL_CONFIDENCE_CURRENT_MINUTES)
+    previous_evidence = min(1.0, previous_minutes / FULL_CONFIDENCE_PREVIOUS_MINUTES)
+
+    completeness = 0.0
+    completeness += 0.25 if current_perf is not None else 0.0
+    completeness += 0.20 if previous_perf is not None else 0.0
+    completeness += 0.20 if player.get("titolarita_score") is not None else 0.0
+    completeness += 0.15 if player.get("rigorista_ordine") is not None else 0.0
+    completeness += 0.10 if player.get("fvm_fc") is not None else 0.0
+    completeness += 0.10 if player.get("affidabilita_fisica") else 0.0
+
+    confidence = (
+        18.0
+        + current_evidence * 45.0
+        + previous_evidence * 25.0
+        + completeness * 12.0
+    )
+
+    # I rookie partono con più incertezza finché non accumulano minuti in A.
+    if player.get("primo_anno_serie_a") and current_minutes < 900:
+        confidence -= 8.0
+
+    confidence = max(15.0, min(100.0, confidence))
+
+    if confidence >= 78:
+        label = "Alta"
+    elif confidence >= 55:
+        label = "Media"
+    else:
+        label = "Bassa"
+
+    return round(confidence, 0), label
+
+
+def calculate_player_rating_detailed(
+    player: dict[str, Any],
+    preferred_players: set[Any] | None = None,
+    custom_modifiers: dict[Any, dict[str, Any]] | None = None,
+    goalkeeper_ranking: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """
+    Rating tecnico v2.
+
+    Principi:
+    - rating 1–10 confrontabile all'interno del ruolo;
+    - nessuna penalizzazione automatica per essere nuovo in Serie A;
+    - storico estero/B pesato dal league_coefficient;
+    - più minuti Serie A vengono accumulati, meno pesa lo storico;
+    - confidence separata dal valore tecnico;
+    - potential rating per i profili ancora molto incerti.
+    """
+    preferred_players = preferred_players or set()
+    if custom_modifiers is None:
+        custom_modifiers = load_custom_modifiers()
+
+    role = str(player.get("role") or "D")
+    weights = ROLE_MODEL_WEIGHTS.get(role, ROLE_MODEL_WEIGHTS["D"])
+
+    current_minutes = _rating_float(player.get("current_minutes"))
+    current_goals = _rating_float(player.get("current_goals"))
+    current_assists = _rating_float(player.get("current_assists"))
+    current_avg = (
+        _rating_float(player.get("current_avg_vote"))
+        if player.get("current_avg_vote") is not None
+        else None
+    )
+    current_fm = (
+        _rating_float(player.get("current_fantamedia"))
+        if player.get("current_fantamedia") is not None
+        else None
+    )
+
+    previous_minutes = _rating_float(player.get("previous_minutes"))
+    previous_goals = _rating_float(player.get("previous_goals"))
+    previous_assists = _rating_float(player.get("previous_assists"))
+    previous_avg = (
+        _rating_float(player.get("previous_avg_vote"))
+        if player.get("previous_avg_vote") is not None
+        else None
+    )
+    previous_fm = (
+        _rating_float(player.get("previous_fantamedia"))
+        if player.get("previous_fantamedia") is not None
+        else None
+    )
+
+    # Compatibilità con il vecchio CSV locale finché non popoleremo Supabase.
+    if current_minutes <= 0 and previous_minutes <= 0:
+        player_name = normalize_string(player.get("name", ""))
+        if not STATS.empty and player_name and "clean_name" in STATS.columns:
+            exact = STATS[STATS["clean_name"] == player_name]
+            match = exact
+            if match.empty:
+                escaped = re.escape(player_name)
+                match = STATS[
+                    STATS["clean_name"].str.contains(
+                        escaped,
+                        na=False,
+                        regex=True,
+                    )
+                ]
+            if not match.empty:
+                row = match.iloc[0]
+                legacy_matches = _rating_float(row.get("matches"))
+                previous_minutes = legacy_matches * 75.0
+                previous_goals = _rating_float(row.get("goals"))
+                previous_assists = _rating_float(row.get("assists"))
+                previous_avg = _rating_float(row.get("avg_vote"), 0.0) or None
+
+    current_perf = _performance_score_from_sample(
+        role,
+        current_minutes,
+        current_goals,
+        current_assists,
+        current_avg,
+        current_fm,
+    )
+    previous_perf = _performance_score_from_sample(
+        role,
+        previous_minutes,
+        previous_goals,
+        previous_assists,
+        previous_avg,
+        previous_fm,
+    )
+
+    # Coefficiente campionato precedente:
+    # 1.00 = valore pienamente trasferibile; valori inferiori riducono il
+    # contributo dello storico senza "punire" il giocatore in sé.
+    league_coefficient = _rating_float(player.get("league_coefficient"), 0.0)
+    if league_coefficient <= 0:
+        league_coefficient = 0.90 if player.get("primo_anno_serie_a") else 1.00
+    league_coefficient = max(0.65, min(1.05, league_coefficient))
+
+    if previous_perf is not None:
+        adjusted_previous_perf = _rating_clip(
+            5.0 + (previous_perf - 5.0) * league_coefficient
+        )
+    else:
+        adjusted_previous_perf = None
+
+    if current_perf is not None and adjusted_previous_perf is not None:
+        current_weight = min(
+            0.90,
+            current_minutes / (current_minutes + CURRENT_SEASON_BLEND_MINUTES),
+        )
+        performance_score = (
+            current_perf * current_weight
+            + adjusted_previous_perf * (1.0 - current_weight)
+        )
+    elif current_perf is not None:
+        performance_score = current_perf
+    elif adjusted_previous_perf is not None:
+        performance_score = adjusted_previous_perf
+    else:
+        # In assenza di statistiche usiamo mercato + ruolo, ma con confidence bassa.
+        performance_score = 4.5 + _market_score(player) * 0.25
+
+    performance_score = _rating_clip(performance_score)
+
+    titolarita_score, titolarita_probability = _titolarita_component(player)
+    bonus_score = _bonus_component(
+        player,
+        role,
+        current_minutes,
+        previous_minutes,
+    )
+    team_score, team_mod, goalkeeper_rank = _team_context_component(
+        player,
+        goalkeeper_ranking,
+    )
+    reliability_score = _reliability_component(
+        player,
+        current_minutes,
+        previous_minutes,
+    )
+    market_score = _market_score(player)
+
+    components = {
+        "performance": performance_score,
+        "titolarita": titolarita_score,
+        "bonus": bonus_score,
+        "team": team_score,
+        "reliability": reliability_score,
+        "market": market_score,
+    }
+
+    weighted = sum(
+        components[key] * weights[key]
+        for key in weights
+    )
+
+    # Correzioni manuali restano piccole e trasparenti.
+    db_modifier = custom_modifiers.get(player.get("id"), {})
+    custom_mod = _rating_float(db_modifier.get("modifier_value"))
+    db_modifier_key = db_modifier.get("modifier_key")
     preferred_mod = (
-        0.5
+        0.35
         if (
             player.get("id") in preferred_players
             and db_modifier_key != "preferito"
@@ -4411,54 +5156,120 @@ def calculate_player_rating_detailed(
         else 0.0
     )
 
-    # Rating grezzo prima della calibrazione per ruolo.
-    raw_rating = (
-        base
-        + titolarita_mod
-        + team_mod
-        + rigorista_mod
-        + cartellini_mod
-        + rookie_mod
-        + preferred_mod
-        + custom_mod
+    technical_rating = _rating_clip(
+        weighted + custom_mod + preferred_mod
     )
 
-    # Calibrazione richiesta per rendere confrontabili i ruoli senza
-    # penalizzare portieri, difensori e centrocampisti rispetto agli attaccanti.
-    role_multiplier = ROLE_RATING_MULTIPLIERS.get(role, 1.0)
-    calibrated_rating = raw_rating * role_multiplier
-
-    final = round(
-        max(1.0, min(10.0, calibrated_rating)),
-        1,
+    confidence, confidence_label = _rating_confidence(
+        player,
+        current_minutes,
+        previous_minutes,
+        current_perf,
+        previous_perf,
     )
 
-    if (
-        (cartellini_mod < 0 or rookie_mod < 0 or player.get("status_titolarita") in {"Ballottaggio", "Riserva"})
-        and final >= 10.0
-    ):
-        final = 9.0
+    # Potenziale: non sostituisce il rating tecnico. Serve a rappresentare
+    # il possibile upside dei profili con evidenza ancora ridotta.
+    uncertainty = 1.0 - confidence / 100.0
+    potential_rating = technical_rating
+    if player.get("primo_anno_serie_a") or confidence < 55:
+        upside_anchor = max(
+            technical_rating,
+            market_score,
+            titolarita_score,
+        )
+        potential_rating = _rating_clip(
+            technical_rating
+            + max(0.0, upside_anchor - technical_rating) * 0.45
+            + uncertainty * 0.35
+        )
 
     return {
-        "final_rating": final,
-        "raw_rating": round(raw_rating, 2),
-        "role_multiplier": round(role_multiplier, 3),
-        "calibrated_rating": round(calibrated_rating, 2),
-        "base": round(base, 2),
-        "team_mod": team_mod,
-        "goalkeeper_mod": goalkeeper_mod,
+        # Compatibilità: final_rating continua a essere il numero usato
+        # dal resto dell'app, ma ora equivale al rating tecnico.
+        "final_rating": round(technical_rating, 1),
+        "technical_rating": round(technical_rating, 1),
+        "potential_rating": round(potential_rating, 1),
+        "confidence": int(confidence),
+        "confidence_label": confidence_label,
+        "titolarita_probability": round(titolarita_probability, 0),
+        "performance_score": round(performance_score, 2),
+        "bonus_score": round(bonus_score, 2),
+        "team_score": round(team_score, 2),
+        "reliability_score": round(reliability_score, 2),
+        "market_score": round(market_score, 2),
+        "current_performance": round(current_perf, 2) if current_perf is not None else None,
+        "previous_performance": round(adjusted_previous_perf, 2) if adjusted_previous_perf is not None else None,
+        "league_coefficient": round(league_coefficient, 2),
+        "current_minutes": int(current_minutes),
+        "previous_minutes": int(previous_minutes),
+
+        # Chiavi legacy mantenute per non rompere le viste già esistenti.
+        "raw_rating": round(weighted, 2),
+        "role_multiplier": 1.0,
+        "calibrated_rating": round(technical_rating, 2),
+        "base": round(performance_score, 2),
+        "team_mod": round(team_mod, 2),
+        "goalkeeper_mod": round(team_mod, 2) if role == "P" else 0.0,
         "goalkeeper_rank": goalkeeper_rank,
-        "tit": titolarita_mod,
-        "rig": rigorista_mod,
-        "cart": cartellini_mod,
-        "rook": rookie_mod,
+        "tit": round(titolarita_score, 2),
+        "rig": round(bonus_score, 2),
+        "cart": 0.0 if player.get("propensione_cartellini") != "A rischio malus" else -0.3,
+        "rook": 0.0,  # rookie non è più un malus automatico
         "pref": preferred_mod,
         "custom_mod": custom_mod,
         "custom_label": db_modifier.get("modifier_label", "Nessuna modifica"),
-        "g": goals,
-        "a": assists,
-        "m": matches,
+        "g": int(current_goals if current_minutes > 0 else previous_goals),
+        "a": int(current_assists if current_minutes > 0 else previous_assists),
+        "m": int(_rating_float(player.get("current_matches")) or _rating_float(player.get("previous_matches"))),
     }
+
+
+def calculate_auction_rating(
+    technical_rating: float,
+    estimated_price: int,
+    list_price: int,
+    budget: int | None,
+    slots_left_after_purchase: int,
+    role_need: float = 1.0,
+) -> float:
+    """
+    Rating asta 1–10: qualità tecnica + value + sostenibilità di budget + bisogno.
+    Non sostituisce mai il rating tecnico.
+    """
+    technical = _rating_clip(technical_rating)
+    price = max(1, int(estimated_price or 1))
+    budget_value = max(0, int(budget or 0))
+
+    # Value normalizzato: quanto rating ottengo per il costo stimato.
+    value_raw = get_price_value_score(
+        technical,
+        price,
+        max(1, int(list_price or 1)),
+    )
+    value_score = _rating_clip(3.5 + min(6.5, value_raw / 6.0))
+
+    if budget_value <= 0:
+        budget_fit = 5.0
+    else:
+        money_after = budget_value - price
+        minimum_reserve = max(0, slots_left_after_purchase)
+        if money_after < minimum_reserve:
+            budget_fit = 1.0
+        else:
+            spend_share = price / max(1.0, budget_value)
+            budget_fit = _rating_clip(9.5 - spend_share * 8.0)
+
+    need_score = _rating_clip(5.0 + (role_need - 1.0) * 3.0)
+
+    auction = (
+        technical * 0.68
+        + value_score * 0.17
+        + budget_fit * 0.10
+        + need_score * 0.05
+    )
+    return round(_rating_clip(auction), 1)
+
 
 
 def calculate_player_rating(
@@ -5095,14 +5906,30 @@ def build_smart_next_purchase_recommendation(
             budget=budget,
             slots_left_after_purchase=slots_after,
         )
+        role_limit = max(1, ROLE_LIMITS.get(role, 1))
+        role_count = len(owned_role)
+        role_need = max(
+            0.75,
+            min(1.35, 1.25 - (role_count / role_limit) * 0.5),
+        )
+        auction_rating = calculate_auction_rating(
+            float(details["technical_rating"]),
+            int(estimate["estimated_price"]),
+            int(player.get("list_price") or 1),
+            budget,
+            slots_after,
+            role_need,
+        )
+
         return {
             "player": player,
             "details": details,
             "estimate": estimate,
             "reason": reason,
             "priority": priority,
+            "auction_rating": auction_rating,
             "value": get_price_value_score(
-                float(details["final_rating"]),
+                float(details["technical_rating"]),
                 int(estimate["estimated_price"]),
                 int(player.get("list_price") or 1),
             ),
@@ -5540,7 +6367,9 @@ def render_smart_next_purchase_card(
         "<div class=\"next-buy-kicker\">🎯 PROSSIMO ACQUISTO CONSIGLIATO</div>"
         f"<div class=\"next-buy-name\">{name} · ⭐ {rating:.1f}</div>"
         f"<div class=\"next-buy-meta\">{club} · {status} · "
-        f"Listino {int(player.get('list_price') or 0)} cr · "
+        f"Tecnico {float(details.get('technical_rating', rating)):.1f} · "
+        f"Asta {float(recommendation.get('auction_rating', rating)):.1f} · "
+        f"Conf. {escape(str(details.get('confidence_label', '—')))} · "
         f"Stima {int(estimate['estimated_price'])} cr</div>"
         f"<div class=\"next-buy-reason\">{reason}</div>"
         "</div>"
@@ -6807,12 +7636,11 @@ def render_rosters_tab(
 # ============================================================
 
 def render_all_players_tab() -> None:
-    st.subheader("⭐️ Tutti i Giocatori — Rating Dettagliato")
+    st.subheader("⭐️ Tutti i Giocatori — Rating v2")
     st.caption(
-        "Il rating combina statistiche stagionali, listino, titolarità, "
-        "modificatore squadra, rigoristi, rischio cartellini, rookie e preferiti. "
-        "Per i portieri, il modificatore difensivo è sostituito dal criterio "
-        "gol subiti: 1ª squadra +1.0, 2ª 0.0, 3ª -1.0."
+        "Il Rating Tecnico misura il valore del giocatore; Potenziale rappresenta "
+        "l'upside dei profili ancora incerti. La Confidenza indica quanto il rating "
+        "è supportato da minuti e dati reali. Essere rookie non comporta più un malus automatico."
     )
 
     all_players = load_players()
@@ -6821,13 +7649,13 @@ def render_all_players_tab() -> None:
         st.info("Nessun giocatore trovato nel database.")
         return
 
-    rows = []
-    bought_ids = set()
-    for roster in load_rosters():
-        player = roster.get("players")
-        if player and player.get("id") is not None:
-            bought_ids.add(player["id"])
+    bought_ids = {
+        roster.get("player_id")
+        for roster in load_rosters()
+        if roster.get("player_id") is not None
+    }
 
+    rows = []
     for player in all_players:
         details = calculate_player_rating_detailed(
             player,
@@ -6837,26 +7665,34 @@ def render_all_players_tab() -> None:
         )
         rows.append(
             {
-                "⭐ Preferito": player["id"] in st.session_state.preferred_players,
+                "⭐": player["id"] in st.session_state.preferred_players,
                 "Giocatore": player.get("name", ""),
                 "Ruolo": player.get("role", ""),
-                "Rating ⭐️": details["final_rating"],
-                "Moltiplicatore ruolo": details.get("role_multiplier", 1.0),
-                "Rating pre-calibrazione": details.get("raw_rating", details["final_rating"]),
-                "Base/Fantamedia": details["base"],
-                "Mod Squadra": details["team_mod"],
-                "Mod. Portiere": details.get("goalkeeper_mod", 0.0),
-                "Pos. Difesa": details.get("goalkeeper_rank"),
-                "Titolarità": details["tit"],
-                "Rigorista": details["rig"],
-                "Cartellini": details["cart"],
-                "Rookie": details["rook"],
-                "Bonus/Malus manuale": details["custom_label"],
-                "Mod. manuale": details["custom_mod"],
-                "Gol": details["g"],
-                "Ass": details["a"],
-                "Presenze": details["m"],
                 "Club": player.get("team_nfl", ""),
+                "Rating tecnico": details["technical_rating"],
+                "Potenziale": details["potential_rating"],
+                "Confidenza": details["confidence_label"],
+                "Conf. %": details["confidence"],
+                "Titolarità %": details["titolarita_probability"],
+                "Performance": details["performance_score"],
+                "Bonus": details["bonus_score"],
+                "Contesto": details["team_score"],
+                "Affidabilità": details["reliability_score"],
+                "Mercato": details["market_score"],
+                "Coeff. lega prec.": details["league_coefficient"],
+                "Minuti A": details["current_minutes"],
+                "Minuti prec.": details["previous_minutes"],
+                "Rookie": "🌱" if player.get("primo_anno_serie_a") else "",
+                "Rigorista": (
+                    f"{int(player.get('rigorista_ordine'))}°"
+                    if player.get("rigorista_ordine")
+                    else "Sì" if player.get("rigorista") else "—"
+                ),
+                "Piazzati": (
+                    f"{int(player.get('piazzati_ordine'))}°"
+                    if player.get("piazzati_ordine")
+                    else "Sì" if player.get("piazzati") else "—"
+                ),
                 "Listino": player.get("list_price", 0),
                 "Stato": "Acquistato" if player["id"] in bought_ids else "Libero",
                 "_player_id": player["id"],
@@ -6901,8 +7737,8 @@ def render_all_players_tab() -> None:
         ]
 
     filtered = filtered.sort_values(
-        ["Rating ⭐️", "Giocatore"],
-        ascending=[False, True],
+        ["Rating tecnico", "Potenziale", "Giocatore"],
+        ascending=[False, False, True],
     )
 
     st.dataframe(
@@ -6910,28 +7746,31 @@ def render_all_players_tab() -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "⭐ Preferito": st.column_config.CheckboxColumn(
-                "⭐ Preferito",
-                help="Aggiunge +0.5 al rating del giocatore.",
+            "⭐": st.column_config.CheckboxColumn("⭐"),
+            "Rating tecnico": st.column_config.NumberColumn(format="%.1f"),
+            "Potenziale": st.column_config.NumberColumn(format="%.1f"),
+            "Conf. %": st.column_config.ProgressColumn(
+                "Conf. %",
+                min_value=0,
+                max_value=100,
+                format="%d%%",
             ),
-            "Rating ⭐️": st.column_config.NumberColumn(
-                "Rating ⭐️",
-                format="%.1f",
+            "Titolarità %": st.column_config.ProgressColumn(
+                "Titolarità %",
+                min_value=0,
+                max_value=100,
+                format="%d%%",
             ),
-            "Moltiplicatore ruolo": st.column_config.NumberColumn(
-                "Moltiplicatore ruolo",
-                format="x%.3f",
-            ),
-            "Rating pre-calibrazione": st.column_config.NumberColumn(
-                "Rating pre-calibrazione",
-                format="%.1f",
-            ),
-            "Mod. manuale": st.column_config.NumberColumn(
-                "Mod. manuale",
-                format="%+.1f",
-            ),
+            "Performance": st.column_config.NumberColumn(format="%.1f"),
+            "Bonus": st.column_config.NumberColumn(format="%.1f"),
+            "Contesto": st.column_config.NumberColumn(format="%.1f"),
+            "Affidabilità": st.column_config.NumberColumn(format="%.1f"),
+            "Mercato": st.column_config.NumberColumn(format="%.1f"),
+            "Coeff. lega prec.": st.column_config.NumberColumn(format="%.2f"),
         },
     )
+
+
 
 
 # ============================================================
