@@ -3212,6 +3212,740 @@ def _is_player_data_admin(user: dict[str, Any]) -> bool:
     return bool(email and email in allowed)
 
 
+def _guess_uploaded_column(
+    columns: list[str],
+    aliases: tuple[str, ...],
+) -> str | None:
+    normalized = {normalize_string(column): column for column in columns}
+    for alias in aliases:
+        alias_norm = normalize_string(alias)
+        if alias_norm in normalized:
+            return normalized[alias_norm]
+    for column in columns:
+        column_norm = normalize_string(column)
+        for alias in aliases:
+            alias_norm = normalize_string(alias)
+            if alias_norm and (alias_norm in column_norm or column_norm in alias_norm):
+                return column
+    return None
+
+
+def _read_uploaded_listone(uploaded_file: Any) -> pd.DataFrame:
+    filename = str(getattr(uploaded_file, "name", "") or "").lower()
+    if filename.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file)
+    if filename.endswith(".csv"):
+        from io import BytesIO
+        raw = uploaded_file.getvalue()
+        for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                return pd.read_csv(BytesIO(raw), encoding=encoding)
+            except Exception:
+                continue
+    raise ValueError("Formato non supportato. Usa CSV, XLSX o XLS.")
+
+
+def _uploaded_team_to_code(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper in set(TEAM_MAP.values()):
+        return upper
+    normalized = normalize_string(text)
+    for team_name, team_code in TEAM_MAP.items():
+        if normalize_string(team_name) == normalized:
+            return team_code
+    return upper[:3]
+
+
+def _uploaded_role_to_code(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if text in {"P", "D", "C", "A"}:
+        return text
+    mapping = {
+        "portiere": "P", "portieri": "P",
+        "difensore": "D", "difensori": "D",
+        "centrocampista": "C", "centrocampisti": "C",
+        "attaccante": "A", "attaccanti": "A",
+    }
+    return mapping.get(normalize_string(text), text[:1])
+
+
+def build_uploaded_listone_comparison(
+    uploaded_df: pd.DataFrame,
+    db_players: list[dict[str, Any]],
+    name_col: str,
+    team_col: str,
+    role_col: str,
+    quote_col: str | None = None,
+    fvm_col: str | None = None,
+) -> dict[str, Any]:
+    source_rows: list[dict[str, Any]] = []
+    for _, row in uploaded_df.iterrows():
+        name = _clean_source_player_name(row.get(name_col, ""))
+        if not name:
+            continue
+        team_code = _uploaded_team_to_code(row.get(team_col, ""))
+        role_code = _uploaded_role_to_code(row.get(role_col, ""))
+
+        quote_value = None
+        fvm_value = None
+        if quote_col:
+            try:
+                raw_quote = row.get(quote_col)
+                if pd.notna(raw_quote):
+                    quote_value = int(float(raw_quote))
+            except Exception:
+                pass
+        if fvm_col:
+            try:
+                raw_fvm = row.get(fvm_col)
+                if pd.notna(raw_fvm):
+                    fvm_value = int(float(raw_fvm))
+            except Exception:
+                pass
+
+        source_rows.append({
+            "name": name,
+            "team_nfl": team_code,
+            "role": role_code,
+            "quotazione_fc": quote_value,
+            "fvm_fc": fvm_value,
+        })
+
+    matched_ids: set[Any] = set()
+    matched: list[dict[str, Any]] = []
+    new_players: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    changed_players: list[dict[str, Any]] = []
+
+    for source in source_rows:
+        match, confidence = _best_player_match(
+            source["name"],
+            db_players,
+            source.get("team_nfl") or None,
+            min_score=0.86,
+        )
+
+        if match is None:
+            surname_matches = _existing_name_conflicts(source["name"], db_players)
+            if surname_matches:
+                ambiguous.append({
+                    **source,
+                    "possible_matches": " | ".join(
+                        f"{p.get('name')} ({p.get('team_nfl')}, {p.get('role')})"
+                        for p in surname_matches[:6]
+                    ),
+                    "confidence": round(confidence, 2),
+                })
+            else:
+                new_players.append({**source, "confidence": round(confidence, 2)})
+            continue
+
+        matched_ids.add(match.get("id"))
+        match_row = {
+            "player_id": match.get("id"),
+            "db_name": match.get("name"),
+            "file_name": source["name"],
+            "db_team": match.get("team_nfl"),
+            "file_team": source.get("team_nfl"),
+            "db_role": match.get("role"),
+            "file_role": source.get("role"),
+            "db_quote": match.get("quotazione_fc"),
+            "file_quote": source.get("quotazione_fc"),
+            "db_fvm": match.get("fvm_fc"),
+            "file_fvm": source.get("fvm_fc"),
+            "confidence": round(confidence, 2),
+        }
+        matched.append(match_row)
+
+        team_changed = bool(source.get("team_nfl")) and str(match.get("team_nfl") or "") != source["team_nfl"]
+        role_changed = bool(source.get("role")) and str(match.get("role") or "") != source["role"]
+        quote_changed = source.get("quotazione_fc") is not None and match.get("quotazione_fc") != source.get("quotazione_fc")
+        fvm_changed = source.get("fvm_fc") is not None and match.get("fvm_fc") != source.get("fvm_fc")
+
+        if team_changed or role_changed or quote_changed or fvm_changed:
+            changed_players.append({
+                **match_row,
+                "team_changed": team_changed,
+                "role_changed": role_changed,
+                "quote_changed": quote_changed,
+                "fvm_changed": fvm_changed,
+            })
+
+    missing_players = [{
+        "player_id": player.get("id"),
+        "name": player.get("name"),
+        "team_nfl": player.get("team_nfl"),
+        "role": player.get("role"),
+        "quotazione_fc": player.get("quotazione_fc"),
+        "status_titolarita": player.get("status_titolarita"),
+    } for player in db_players if player.get("id") not in matched_ids]
+
+    return {
+        "source_rows": source_rows,
+        "matched": matched,
+        "new_players": new_players,
+        "missing_players": missing_players,
+        "changed_players": changed_players,
+        "ambiguous": ambiguous,
+    }
+
+
+def build_listone_review_sql(comparison: dict[str, Any]) -> str:
+    def sql_text(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        return "'" + str(value).replace("'", "''") + "'"
+
+    lines = [
+        "-- fantahe1per - SQL generato dalla verifica Listone",
+        "-- Controllare SEMPRE il file prima di eseguirlo.",
+        "",
+        "begin;",
+        "",
+        "-- AGGIORNAMENTI GIOCATORI ESISTENTI",
+    ]
+
+    for row in comparison.get("changed_players", []):
+        assignments = []
+        if row.get("file_team"):
+            assignments.append(f"team_nfl = {sql_text(row['file_team'])}")
+        if row.get("file_role"):
+            assignments.append(f"role = {sql_text(row['file_role'])}")
+        if row.get("file_quote") is not None:
+            assignments.append(f"quotazione_fc = {int(row['file_quote'])}")
+        if row.get("file_fvm") is not None:
+            assignments.append(f"fvm_fc = {int(row['file_fvm'])}")
+        if assignments:
+            lines += [
+                f"-- {row.get('db_name')}",
+                "update public.players",
+                "set " + ", ".join(assignments),
+                f"where id = {sql_text(row.get('player_id'))};",
+                "",
+            ]
+
+    lines += ["-- NUOVI GIOCATORI"]
+    for row in comparison.get("new_players", []):
+        vals = [
+            sql_text(row.get("name")),
+            sql_text(row.get("team_nfl")),
+            sql_text(row.get("role")),
+            str(int(row["quotazione_fc"])) if row.get("quotazione_fc") is not None else "NULL",
+            str(int(row["fvm_fc"])) if row.get("fvm_fc") is not None else "NULL",
+            "1", "false", "false", "false",
+        ]
+        lines += [
+            f"-- Nuovo: {row.get('name')}",
+            "insert into public.players "
+            "(name, team_nfl, role, quotazione_fc, fvm_fc, list_price, rigorista, piazzati, primo_anno_serie_a)",
+            "values (" + ", ".join(vals) + ");",
+            "",
+        ]
+
+    lines += [
+        "-- POSSIBILI RIMOZIONI (COMMENTATE DI DEFAULT)",
+    ]
+    for row in comparison.get("missing_players", []):
+        lines.append(
+            "-- delete from public.players "
+            f"where id = {sql_text(row.get('player_id'))}; "
+            f"-- {row.get('name')} · {row.get('team_nfl')} · {row.get('role')}"
+        )
+
+    lines += ["", "commit;"]
+    return "\n".join(lines)
+
+
+def render_uploaded_listone_checker() -> None:
+    st.markdown("### 📤 Verifica Listone ufficiale")
+    st.caption(
+        "Carica CSV/XLSX. L'app confronta il file con Supabase e mostra "
+        "giocatori nuovi, mancanti e dati cambiati prima di qualsiasi modifica."
+    )
+
+    uploaded = st.file_uploader(
+        "Carica Listone",
+        type=["csv", "xlsx", "xls"],
+        key="official_listone_upload",
+    )
+    if uploaded is None:
+        return
+
+    try:
+        source_df = _read_uploaded_listone(uploaded)
+    except Exception as exc:
+        st.error(f"Non riesco a leggere il file: {exc}")
+        return
+
+    if source_df.empty:
+        st.warning("Il file non contiene righe.")
+        return
+
+    columns = [str(column) for column in source_df.columns]
+    guessed_name = _guess_uploaded_column(columns, ("Nome", "Giocatore", "Calciatore", "Nome calciatore"))
+    guessed_team = _guess_uploaded_column(columns, ("Squadra", "Club", "Team"))
+    guessed_role = _guess_uploaded_column(columns, ("Ruolo", "R"))
+    guessed_quote = _guess_uploaded_column(columns, ("Quotazione", "Qt.A", "QtA", "Quotazione attuale", "Qt"))
+    guessed_fvm = _guess_uploaded_column(columns, ("FVM", "FVM M", "FVM Mantra"))
+
+    st.markdown("#### Mappatura colonne")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        name_col = st.selectbox("Nome giocatore", columns, index=columns.index(guessed_name) if guessed_name in columns else 0, key="listone_map_name")
+    with c2:
+        team_col = st.selectbox("Squadra", columns, index=columns.index(guessed_team) if guessed_team in columns else 0, key="listone_map_team")
+    with c3:
+        role_col = st.selectbox("Ruolo", columns, index=columns.index(guessed_role) if guessed_role in columns else 0, key="listone_map_role")
+
+    optional_columns = ["— Non presente —"] + columns
+    c4, c5 = st.columns(2)
+    with c4:
+        quote_col = st.selectbox("Quotazione", optional_columns, index=optional_columns.index(guessed_quote) if guessed_quote in optional_columns else 0, key="listone_map_quote")
+    with c5:
+        fvm_col = st.selectbox("FVM", optional_columns, index=optional_columns.index(guessed_fvm) if guessed_fvm in optional_columns else 0, key="listone_map_fvm")
+
+    quote_col = None if quote_col == "— Non presente —" else quote_col
+    fvm_col = None if fvm_col == "— Non presente —" else fvm_col
+
+    if st.button("🔎 Confronta con Supabase", type="primary", use_container_width=True, key="compare_uploaded_listone"):
+        st.session_state["uploaded_listone_comparison"] = build_uploaded_listone_comparison(
+            source_df, load_players(), name_col, team_col, role_col, quote_col, fvm_col
+        )
+
+    comparison = st.session_state.get("uploaded_listone_comparison")
+    if not comparison:
+        st.dataframe(source_df.head(20), use_container_width=True, hide_index=True)
+        return
+
+    matched = comparison["matched"]
+    new_players = comparison["new_players"]
+    missing_players = comparison["missing_players"]
+    changed_players = comparison["changed_players"]
+    ambiguous = comparison["ambiguous"]
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Riconosciuti", len(matched))
+    m2.metric("Da aggiungere", len(new_players))
+    m3.metric("Da rimuovere?", len(missing_players))
+    m4.metric("Dati cambiati", len(changed_players))
+    m5.metric("Ambigui", len(ambiguous))
+
+    if changed_players:
+        with st.expander(f"🔄 Giocatori con dati cambiati ({len(changed_players)})", expanded=True):
+            st.dataframe(pd.DataFrame(changed_players), use_container_width=True, hide_index=True)
+
+    if new_players:
+        with st.expander(f"➕ Possibili nuovi giocatori ({len(new_players)})", expanded=True):
+            st.dataframe(pd.DataFrame(new_players), use_container_width=True, hide_index=True)
+
+    if missing_players:
+        with st.expander(f"➖ Presenti in Supabase ma assenti dal file ({len(missing_players)})", expanded=True):
+            st.warning("Assenza dal file non significa automaticamente che il giocatore vada eliminato.")
+            st.dataframe(pd.DataFrame(missing_players), use_container_width=True, hide_index=True)
+
+    if ambiguous:
+        with st.expander(f"❓ Abbinamenti ambigui ({len(ambiguous)})", expanded=True):
+            st.dataframe(pd.DataFrame(ambiguous), use_container_width=True, hide_index=True)
+
+    review_sql = build_listone_review_sql(comparison)
+    st.download_button(
+        "⬇️ Scarica SQL di riallineamento",
+        data=review_sql.encode("utf-8"),
+        file_name="fantahe1per_listone_alignment.sql",
+        mime="text/plain",
+        use_container_width=True,
+    )
+    st.caption(
+        "Lo SQL aggiorna i giocatori riconosciuti e inserisce quelli chiaramente nuovi. "
+        "Le DELETE sono commentate per sicurezza."
+    )
+
+
+
+
+@st.cache_data(ttl=120)
+def load_player_strategy_notes() -> list[dict[str, Any]]:
+    """Carica le note strategiche personali da Supabase."""
+    try:
+        response = (
+            supabase.table("player_strategy_notes")
+            .select("*")
+            .order("team_nfl")
+            .order("player_name")
+            .execute()
+        )
+        return response.data or []
+    except Exception:
+        return []
+
+
+def _strategy_note_match(
+    note: dict[str, Any],
+    db_players: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, float, str]:
+    """
+    Matching volutamente conservativo:
+    1. player_id già validato -> persisted;
+    2. nome normalizzato + squadra esatti -> exact;
+    3. altrimenti restituisce solo il miglior suggerimento, NON lo valida.
+    """
+    persisted_id = str(note.get("player_id") or "").strip()
+    if persisted_id:
+        for player in db_players:
+            if str(player.get("id")) == persisted_id:
+                return player, 1.0, "validated"
+
+    source_name = str(note.get("player_name") or "")
+    team_code = str(note.get("team_nfl") or "").strip().upper()
+    source_norm = normalize_string(source_name)
+
+    same_team = [
+        player
+        for player in db_players
+        if str(player.get("team_nfl") or "").strip().upper() == team_code
+    ]
+
+    exact = [
+        player
+        for player in same_team
+        if normalize_string(str(player.get("name") or "")) == source_norm
+    ]
+    if len(exact) == 1:
+        return exact[0], 1.0, "exact"
+
+    # Solo suggerimento fuzzy: mai scritto automaticamente.
+    candidates = same_team or db_players
+    best = None
+    best_score = 0.0
+    for player in candidates:
+        score = _name_similarity(source_name, str(player.get("name") or ""))
+        if score > best_score:
+            best = player
+            best_score = score
+
+    return best, best_score, "suggested" if best is not None else "unmatched"
+
+
+def build_strategy_notes_mapping_preview(
+    notes: list[dict[str, Any]],
+    db_players: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    preview: list[dict[str, Any]] = []
+    for note in notes:
+        match, confidence, method = _strategy_note_match(note, db_players)
+
+        needs_validation = method not in {"validated", "exact"}
+        preview.append(
+            {
+                "note_id": note.get("id"),
+                "team_nfl": note.get("team_nfl"),
+                "player_name": note.get("player_name"),
+                "category": note.get("category"),
+                "max_price": note.get("max_price"),
+                "player_note": note.get("player_note"),
+                "matched_player_id": match.get("id") if match else None,
+                "matched_name": match.get("name") if match else None,
+                "matched_team": match.get("team_nfl") if match else None,
+                "matched_role": match.get("role") if match else None,
+                "confidence": round(float(confidence), 3),
+                "method": method,
+                "needs_validation": needs_validation,
+            }
+        )
+    return preview
+
+
+def persist_exact_strategy_note_mappings(
+    preview: list[dict[str, Any]],
+) -> tuple[int, list[str]]:
+    """
+    Salva automaticamente SOLO i match nome+squadra esatti.
+    I fuzzy devono essere confermati manualmente.
+    """
+    updated = 0
+    errors: list[str] = []
+    for row in preview:
+        if row.get("method") != "exact" or row.get("matched_player_id") is None:
+            continue
+        try:
+            (
+                supabase.table("player_strategy_notes")
+                .update(
+                    {
+                        "player_id": str(row["matched_player_id"]),
+                        "canonical_player_name": row.get("matched_name"),
+                        "mapping_status": "validated",
+                        "mapping_confidence": 1.0,
+                        "updated_at": datetime.now(
+                            ZoneInfo("Europe/Rome")
+                        ).isoformat(),
+                    }
+                )
+                .eq("id", row["note_id"])
+                .execute()
+            )
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{row.get('player_name')}: {exc}")
+
+    if updated:
+        load_player_strategy_notes.clear()
+    return updated, errors
+
+
+def persist_manual_strategy_note_mapping(
+    note_id: Any,
+    player: dict[str, Any],
+    confidence: float,
+) -> None:
+    """Salva una associazione confermata dall'admin."""
+    (
+        supabase.table("player_strategy_notes")
+        .update(
+            {
+                "player_id": str(player.get("id")),
+                "canonical_player_name": player.get("name"),
+                "mapping_status": "validated",
+                "mapping_confidence": float(confidence),
+                "updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+            }
+        )
+        .eq("id", note_id)
+        .execute()
+    )
+    load_player_strategy_notes.clear()
+
+
+def reset_strategy_note_mapping(note_id: Any) -> None:
+    (
+        supabase.table("player_strategy_notes")
+        .update(
+            {
+                "player_id": None,
+                "canonical_player_name": None,
+                "mapping_status": "pending",
+                "mapping_confidence": None,
+                "updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+            }
+        )
+        .eq("id", note_id)
+        .execute()
+    )
+    load_player_strategy_notes.clear()
+
+
+def render_strategy_notes_mapping_validator() -> None:
+    st.markdown("### 🧭 Mappatura note strategiche")
+    st.caption(
+        "Associa le note che hai scritto ai record reali della tabella players. "
+        "I match esatti nome+squadra vengono riconosciuti automaticamente; "
+        "i match fuzzy restano sempre da confermare manualmente."
+    )
+
+    notes = load_player_strategy_notes()
+    if not notes:
+        st.info(
+            "La tabella `player_strategy_notes` non contiene ancora note. "
+            "Esegui prima il file SQL di importazione delle note."
+        )
+        return
+
+    db_players = load_players()
+    preview = build_strategy_notes_mapping_preview(notes, db_players)
+
+    exact_pending = [
+        row for row in preview
+        if row.get("method") == "exact"
+    ]
+    unresolved = [
+        row for row in preview
+        if row.get("needs_validation")
+    ]
+    validated = [
+        row for row in preview
+        if row.get("method") == "validated"
+    ]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Note totali", len(preview))
+    c2.metric("Già validate", len(validated))
+    c3.metric("Match esatti", len(exact_pending))
+    c4.metric("Da validare", len(unresolved))
+
+    if exact_pending:
+        st.success(
+            f"{len(exact_pending)} note hanno un match esatto per nome e squadra."
+        )
+        if st.button(
+            "✅ Salva automaticamente i match esatti",
+            use_container_width=True,
+            key="strategy_save_exact_mappings",
+        ):
+            updated, errors = persist_exact_strategy_note_mappings(preview)
+            if errors:
+                st.error(
+                    f"Salvati {updated} match esatti con {len(errors)} errori."
+                )
+                st.write(errors)
+            else:
+                st.success(f"Salvati {updated} match esatti.")
+                st.rerun()
+
+    if unresolved:
+        st.warning(
+            f"Restano {len(unresolved)} note da controllare manualmente."
+        )
+
+        # Opzioni leggibili, ma ID salvato separatamente.
+        player_by_label: dict[str, dict[str, Any]] = {}
+        for player in db_players:
+            label = (
+                f"{player.get('name')} · {player.get('team_nfl')} · "
+                f"{player.get('role')}"
+            )
+            # ID nel label in caso di omonimi perfetti.
+            if label in player_by_label:
+                label += f" · ID {player.get('id')}"
+            player_by_label[label] = player
+        labels = list(player_by_label.keys())
+
+        with st.expander(
+            f"⚠️ Associazioni da validare ({len(unresolved)})",
+            expanded=True,
+        ):
+            for pos, row in enumerate(unresolved):
+                source_name = str(row.get("player_name") or "")
+                source_team = str(row.get("team_nfl") or "")
+                suggested_name = str(row.get("matched_name") or "—")
+                suggested_team = str(row.get("matched_team") or "—")
+
+                st.markdown(
+                    f"**{escape(source_name)}** · {escape(source_team)} "
+                    f"· {escape(str(row.get('category') or '—'))}"
+                )
+                if row.get("max_price") is not None:
+                    st.caption(
+                        f"Prezzo massimo nota: {int(row['max_price'])} crediti"
+                    )
+                if row.get("player_note"):
+                    st.caption(str(row.get("player_note")))
+
+                st.caption(
+                    f"Suggerimento automatico: **{escape(suggested_name)}** "
+                    f"· {escape(suggested_team)} · "
+                    f"somiglianza {float(row.get('confidence') or 0):.2f}"
+                )
+
+                # Ordina le opzioni con: suggerito, stessa squadra, resto.
+                suggested_id = row.get("matched_player_id")
+                ranked_labels = sorted(
+                    labels,
+                    key=lambda label: (
+                        1 if player_by_label[label].get("id") == suggested_id else 0,
+                        1 if str(player_by_label[label].get("team_nfl") or "") == source_team else 0,
+                        _name_similarity(
+                            source_name,
+                            str(player_by_label[label].get("name") or ""),
+                        ),
+                    ),
+                    reverse=True,
+                )
+
+                selected_label = st.selectbox(
+                    "Associa a",
+                    ranked_labels,
+                    index=0,
+                    key=f"strategy_note_mapping_{row['note_id']}_{pos}",
+                )
+                selected_player = player_by_label[selected_label]
+
+                same_team_warning = (
+                    str(selected_player.get("team_nfl") or "") != source_team
+                )
+                if same_team_warning:
+                    st.warning(
+                        "La squadra della nota e quella del giocatore selezionato "
+                        "sono diverse. Conferma solo se è intenzionale."
+                    )
+
+                if st.button(
+                    "Conferma associazione",
+                    key=f"strategy_note_confirm_{row['note_id']}_{pos}",
+                    use_container_width=True,
+                ):
+                    confidence = _name_similarity(
+                        source_name,
+                        str(selected_player.get("name") or ""),
+                    )
+                    persist_manual_strategy_note_mapping(
+                        row["note_id"],
+                        selected_player,
+                        confidence,
+                    )
+                    st.success(
+                        f"{source_name} → {selected_player.get('name')} salvato."
+                    )
+                    st.rerun()
+
+                st.divider()
+    else:
+        st.success("Tutte le note strategiche risultano mappate.")
+
+    if validated:
+        with st.expander(
+            f"✅ Mapping già validati ({len(validated)})",
+            expanded=False,
+        ):
+            validated_df = pd.DataFrame(
+                [
+                    {
+                        "Nota": row.get("player_name"),
+                        "Squadra nota": row.get("team_nfl"),
+                        "Giocatore DB": row.get("matched_name"),
+                        "Squadra DB": row.get("matched_team"),
+                        "Ruolo": row.get("matched_role"),
+                    }
+                    for row in validated
+                ]
+            )
+            st.dataframe(
+                validated_df,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            reset_options = {
+                (
+                    f"{row.get('player_name')} · {row.get('team_nfl')} → "
+                    f"{row.get('matched_name')}"
+                ): row.get("note_id")
+                for row in validated
+            }
+            reset_label = st.selectbox(
+                "Correggi un mapping già validato",
+                ["—"] + list(reset_options.keys()),
+                key="strategy_mapping_reset_select",
+            )
+            if (
+                reset_label != "—"
+                and st.button(
+                    "↩️ Rimetti da validare",
+                    key="strategy_mapping_reset_button",
+                )
+            ):
+                reset_strategy_note_mapping(reset_options[reset_label])
+                st.rerun()
+
+
 def render_player_data_updater_page(user: dict[str, Any]) -> None:
     st.markdown(
         '<div class="rcd-section">🔄 Aggiornamento dati giocatori</div>',
@@ -3223,6 +3957,14 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         "Il sistema genera prima una preview: nessun dato viene scritto "
         "su Supabase finché non confermi esplicitamente."
     )
+
+    render_uploaded_listone_checker()
+
+    st.divider()
+    render_strategy_notes_mapping_validator()
+
+    st.divider()
+    st.markdown("### 🌐 Controllo fonti online")
 
     c1, c2 = st.columns(2)
     with c1:
