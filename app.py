@@ -3702,16 +3702,46 @@ def persist_manual_strategy_note_mapping(
     note_id: Any,
     player: dict[str, Any],
     confidence: float,
+    target_team: str | None = None,
 ) -> None:
-    """Salva una associazione confermata dall'admin."""
+    """
+    Salva una associazione confermata dall'admin.
+
+    Se target_team è valorizzato e diverso dal club attuale, aggiorna anche
+    players.team_nfl. Questo consente di decidere esplicitamente se sia corretta
+    la squadra della nota oppure quella già presente nel database.
+    """
+    player_id = player.get("id")
+    if player_id is None:
+        raise ValueError("ID giocatore mancante.")
+
+    current_team = str(player.get("team_nfl") or "").strip().upper()
+    final_team = str(target_team or current_team).strip().upper()
+
+    if final_team and final_team != current_team:
+        (
+            supabase.table("players")
+            .update(
+                {
+                    "team_nfl": final_team,
+                    "source_updated_at": datetime.now(
+                        ZoneInfo("Europe/Rome")
+                    ).isoformat(),
+                }
+            )
+            .eq("id", player_id)
+            .execute()
+        )
+
     (
         supabase.table("player_strategy_notes")
         .update(
             {
-                "player_id": str(player.get("id")),
+                "player_id": str(player_id),
                 "canonical_player_name": player.get("name"),
                 "mapping_status": "validated",
                 "mapping_confidence": float(confidence),
+                "team_nfl": final_team or current_team,
                 "updated_at": datetime.now(
                     ZoneInfo("Europe/Rome")
                 ).isoformat(),
@@ -3720,7 +3750,112 @@ def persist_manual_strategy_note_mapping(
         .eq("id", note_id)
         .execute()
     )
+
     load_player_strategy_notes.clear()
+    load_players.clear()
+
+
+def create_player_from_strategy_note(
+    note_id: Any,
+    source_name: str,
+    team_nfl: str,
+    role: str,
+    list_price: int = 1,
+    rookie: bool = True,
+    canonical_name: str | None = None,
+) -> dict[str, Any]:
+    """
+    Crea un nuovo record in players partendo da una nota strategica e
+    collega immediatamente la nota al nuovo giocatore.
+    """
+    final_name = str(canonical_name or source_name or "").strip()
+    final_team = str(team_nfl or "").strip().upper()
+    final_role = str(role or "").strip().upper()
+
+    if not final_name:
+        raise ValueError("Nome giocatore obbligatorio.")
+    if not final_team:
+        raise ValueError("Squadra obbligatoria.")
+    if final_role not in {"P", "D", "C", "A"}:
+        raise ValueError("Ruolo non valido: usa P, D, C o A.")
+
+    payload = {
+        "name": final_name,
+        "team_nfl": final_team,
+        "role": final_role,
+        "list_price": max(1, int(list_price or 1)),
+        "status_titolarita": "Riserva",
+        "rigorista": False,
+        "piazzati": False,
+        "primo_anno_serie_a": bool(rookie),
+        "data_source": "Note strategiche manuali",
+        "source_updated_at": datetime.now(
+            ZoneInfo("Europe/Rome")
+        ).isoformat(),
+        "source_aliases": [
+            _source_alias_token(source_name, final_team)
+        ],
+    }
+
+    try:
+        response = (
+            supabase.table("players")
+            .insert(payload)
+            .execute()
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "duplicate" in message.lower() or "unique" in message.lower():
+            raise ValueError(
+                "Esiste già un giocatore con questa combinazione di nome, "
+                "squadra e ruolo. Usa 'Associa a esistente' invece di crearne uno nuovo."
+            ) from exc
+        raise
+
+    created_rows = response.data or []
+    if not created_rows:
+        # Recupero difensivo se il client non restituisce la riga inserita.
+        created_rows = (
+            supabase.table("players")
+            .select("*")
+            .eq("name", final_name)
+            .eq("team_nfl", final_team)
+            .eq("role", final_role)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+    if not created_rows:
+        raise RuntimeError(
+            "Il giocatore sembra essere stato inserito, ma non riesco a recuperare il nuovo record."
+        )
+
+    new_player = created_rows[0]
+
+    (
+        supabase.table("player_strategy_notes")
+        .update(
+            {
+                "player_id": str(new_player.get("id")),
+                "canonical_player_name": final_name,
+                "mapping_status": "validated",
+                "mapping_confidence": 1.0,
+                "team_nfl": final_team,
+                "updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+            }
+        )
+        .eq("id", note_id)
+        .execute()
+    )
+
+    load_player_strategy_notes.clear()
+    load_players.clear()
+    return new_player
+
 
 
 def reset_strategy_note_mapping(note_id: Any) -> None:
@@ -3804,6 +3939,18 @@ def render_strategy_notes_mapping_validator() -> None:
         st.warning(
             f"Restano {len(unresolved)} note da controllare manualmente."
         )
+        st.caption(
+            "Per ogni caso puoi: associare a un giocatore già esistente, "
+            "creare un nuovo acquisto oppure ignorarlo per ora. "
+            "Quando associ un esistente puoi anche scegliere quale squadra "
+            "deve diventare quella definitiva."
+        )
+
+        team_codes = [
+            "ATA", "BOL", "CAG", "COM", "FIO", "FRO", "GEN", "INT", "JUV",
+            "LAZ", "LEC", "MIL", "MON", "NAP", "PAR", "ROM", "SAS", "TOR",
+            "UDI", "VEN",
+        ]
 
         # Opzioni leggibili, ma ID salvato separatamente.
         player_by_label: dict[str, dict[str, Any]] = {}
@@ -3812,7 +3959,6 @@ def render_strategy_notes_mapping_validator() -> None:
                 f"{player.get('name')} · {player.get('team_nfl')} · "
                 f"{player.get('role')}"
             )
-            # ID nel label in caso di omonimi perfetti.
             if label in player_by_label:
                 label += f" · ID {player.get('id')}"
             player_by_label[label] = player
@@ -3824,7 +3970,7 @@ def render_strategy_notes_mapping_validator() -> None:
         ):
             for pos, row in enumerate(unresolved):
                 source_name = str(row.get("player_name") or "")
-                source_team = str(row.get("team_nfl") or "")
+                source_team = str(row.get("team_nfl") or "").strip().upper()
                 suggested_name = str(row.get("matched_name") or "—")
                 suggested_team = str(row.get("matched_team") or "—")
 
@@ -3845,56 +3991,191 @@ def render_strategy_notes_mapping_validator() -> None:
                     f"somiglianza {float(row.get('confidence') or 0):.2f}"
                 )
 
-                # Ordina le opzioni con: suggerito, stessa squadra, resto.
-                suggested_id = row.get("matched_player_id")
-                ranked_labels = sorted(
-                    labels,
-                    key=lambda label: (
-                        1 if player_by_label[label].get("id") == suggested_id else 0,
-                        1 if str(player_by_label[label].get("team_nfl") or "") == source_team else 0,
-                        _name_similarity(
-                            source_name,
-                            str(player_by_label[label].get("name") or ""),
+                action = st.radio(
+                    "Cosa vuoi fare?",
+                    [
+                        "Associa a giocatore esistente",
+                        "Nuovo giocatore",
+                        "Ignora per ora",
+                    ],
+                    horizontal=True,
+                    key=f"strategy_note_action_{row['note_id']}_{pos}",
+                )
+
+                if action == "Associa a giocatore esistente":
+                    suggested_id = row.get("matched_player_id")
+                    ranked_labels = sorted(
+                        labels,
+                        key=lambda label: (
+                            1 if player_by_label[label].get("id") == suggested_id else 0,
+                            1 if str(player_by_label[label].get("team_nfl") or "") == source_team else 0,
+                            _name_similarity(
+                                source_name,
+                                str(player_by_label[label].get("name") or ""),
+                            ),
                         ),
-                    ),
-                    reverse=True,
-                )
-
-                selected_label = st.selectbox(
-                    "Associa a",
-                    ranked_labels,
-                    index=0,
-                    key=f"strategy_note_mapping_{row['note_id']}_{pos}",
-                )
-                selected_player = player_by_label[selected_label]
-
-                same_team_warning = (
-                    str(selected_player.get("team_nfl") or "") != source_team
-                )
-                if same_team_warning:
-                    st.warning(
-                        "La squadra della nota e quella del giocatore selezionato "
-                        "sono diverse. Conferma solo se è intenzionale."
+                        reverse=True,
                     )
 
-                if st.button(
-                    "Conferma associazione",
-                    key=f"strategy_note_confirm_{row['note_id']}_{pos}",
-                    use_container_width=True,
-                ):
-                    confidence = _name_similarity(
-                        source_name,
-                        str(selected_player.get("name") or ""),
+                    selected_label = st.selectbox(
+                        "Giocatore esistente",
+                        ranked_labels,
+                        index=0,
+                        key=f"strategy_note_mapping_{row['note_id']}_{pos}",
                     )
-                    persist_manual_strategy_note_mapping(
-                        row["note_id"],
-                        selected_player,
-                        confidence,
+                    selected_player = player_by_label[selected_label]
+                    db_team = str(
+                        selected_player.get("team_nfl") or ""
+                    ).strip().upper()
+
+                    if db_team != source_team:
+                        st.warning(
+                            f"⚠️ Squadra diversa: nella nota hai **{source_team}**, "
+                            f"nel database il giocatore è **{db_team}**."
+                        )
+
+                        team_choice = st.radio(
+                            "Quale squadra è quella corretta?",
+                            [
+                                f"Usa squadra della nota ({source_team})",
+                                f"Mantieni squadra del database ({db_team})",
+                                "Scegli un'altra squadra",
+                            ],
+                            key=f"strategy_team_choice_{row['note_id']}_{pos}",
+                        )
+
+                        if team_choice.startswith("Usa squadra"):
+                            final_team = source_team
+                        elif team_choice.startswith("Mantieni"):
+                            final_team = db_team
+                        else:
+                            default_idx = (
+                                team_codes.index(source_team)
+                                if source_team in team_codes
+                                else 0
+                            )
+                            final_team = st.selectbox(
+                                "Squadra definitiva",
+                                team_codes,
+                                index=default_idx,
+                                key=f"strategy_manual_team_{row['note_id']}_{pos}",
+                            )
+                    else:
+                        final_team = db_team
+                        st.success(
+                            f"Squadra coerente: {db_team}"
+                        )
+
+                    if st.button(
+                        "✅ Conferma associazione",
+                        key=f"strategy_note_confirm_{row['note_id']}_{pos}",
+                        use_container_width=True,
+                    ):
+                        confidence = _name_similarity(
+                            source_name,
+                            str(selected_player.get("name") or ""),
+                        )
+                        try:
+                            persist_manual_strategy_note_mapping(
+                                row["note_id"],
+                                selected_player,
+                                confidence,
+                                target_team=final_team,
+                            )
+                            st.success(
+                                f"{source_name} → {selected_player.get('name')} "
+                                f"· squadra definitiva {final_team}."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                f"Impossibile salvare l'associazione: {exc}"
+                            )
+
+                elif action == "Nuovo giocatore":
+                    st.info(
+                        "Usa questa opzione quando il giocatore è un nuovo "
+                        "acquisto e non esiste ancora nella tabella players."
                     )
-                    st.success(
-                        f"{source_name} → {selected_player.get('name')} salvato."
+
+                    new_name = st.text_input(
+                        "Nome da salvare",
+                        value=source_name,
+                        key=f"strategy_new_name_{row['note_id']}_{pos}",
                     )
-                    st.rerun()
+
+                    default_team_idx = (
+                        team_codes.index(source_team)
+                        if source_team in team_codes
+                        else 0
+                    )
+                    new_team = st.selectbox(
+                        "Squadra",
+                        team_codes,
+                        index=default_team_idx,
+                        key=f"strategy_new_team_{row['note_id']}_{pos}",
+                    )
+
+                    c_role, c_price = st.columns(2)
+                    with c_role:
+                        new_role = st.selectbox(
+                            "Ruolo",
+                            ["P", "D", "C", "A"],
+                            key=f"strategy_new_role_{row['note_id']}_{pos}",
+                        )
+                    with c_price:
+                        default_price = int(row.get("max_price") or 1)
+                        new_list_price = st.number_input(
+                            "Quotazione/Listino iniziale",
+                            min_value=1,
+                            max_value=500,
+                            value=max(1, default_price),
+                            step=1,
+                            key=f"strategy_new_price_{row['note_id']}_{pos}",
+                        )
+
+                    new_rookie = st.checkbox(
+                        "Primo anno in Serie A / rookie",
+                        value=True,
+                        key=f"strategy_new_rookie_{row['note_id']}_{pos}",
+                    )
+
+                    st.caption(
+                        "Il prezzo massimo della tua nota resta separato nella "
+                        "tabella strategica; questo campo serve solo come listino "
+                        "iniziale del nuovo record players."
+                    )
+
+                    if st.button(
+                        "➕ Crea giocatore e valida",
+                        key=f"strategy_note_create_{row['note_id']}_{pos}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            created = create_player_from_strategy_note(
+                                note_id=row["note_id"],
+                                source_name=source_name,
+                                canonical_name=new_name,
+                                team_nfl=new_team,
+                                role=new_role,
+                                list_price=int(new_list_price),
+                                rookie=bool(new_rookie),
+                            )
+                            st.success(
+                                f"Creato {created.get('name')} · "
+                                f"{created.get('team_nfl')} · {created.get('role')}."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                f"Impossibile creare il giocatore: {exc}"
+                            )
+
+                else:
+                    st.caption(
+                        "Nessuna modifica: il caso resterà tra quelli da validare."
+                    )
 
                 st.divider()
     else:
