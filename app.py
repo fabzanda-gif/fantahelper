@@ -3584,6 +3584,19 @@ def load_player_strategy_notes() -> list[dict[str, Any]]:
         return []
 
 
+def _strategy_note_source_team(note: dict[str, Any]) -> str:
+    """
+    Squadra indicata originariamente nella nota.
+    NON è la fonte canonica della squadra corrente del giocatore:
+    quella è sempre players.team_nfl.
+    """
+    return str(
+        note.get("source_team_nfl")
+        or note.get("team_nfl")
+        or ""
+    ).strip().upper()
+
+
 def _strategy_note_match(
     note: dict[str, Any],
     db_players: list[dict[str, Any]],
@@ -3601,7 +3614,7 @@ def _strategy_note_match(
                 return player, 1.0, "validated"
 
     source_name = str(note.get("player_name") or "")
-    team_code = str(note.get("team_nfl") or "").strip().upper()
+    team_code = _strategy_note_source_team(note)
     source_norm = normalize_string(source_name)
 
     same_team = [
@@ -3643,7 +3656,8 @@ def build_strategy_notes_mapping_preview(
         preview.append(
             {
                 "note_id": note.get("id"),
-                "team_nfl": note.get("team_nfl"),
+                "team_nfl": _strategy_note_source_team(note),
+                "source_team_nfl": _strategy_note_source_team(note),
                 "player_name": note.get("player_name"),
                 "category": note.get("category"),
                 "max_price": note.get("max_price"),
@@ -3695,6 +3709,7 @@ def persist_exact_strategy_note_mappings(
 
     if updated:
         load_player_strategy_notes.clear()
+        load_players.clear()
     return updated, errors
 
 
@@ -3741,7 +3756,6 @@ def persist_manual_strategy_note_mapping(
                 "canonical_player_name": player.get("name"),
                 "mapping_status": "validated",
                 "mapping_confidence": float(confidence),
-                "team_nfl": final_team or current_team,
                 "updated_at": datetime.now(
                     ZoneInfo("Europe/Rome")
                 ).isoformat(),
@@ -3842,7 +3856,6 @@ def create_player_from_strategy_note(
                 "canonical_player_name": final_name,
                 "mapping_status": "validated",
                 "mapping_confidence": 1.0,
-                "team_nfl": final_team,
                 "updated_at": datetime.now(
                     ZoneInfo("Europe/Rome")
                 ).isoformat(),
@@ -3855,6 +3868,54 @@ def create_player_from_strategy_note(
     load_player_strategy_notes.clear()
     load_players.clear()
     return new_player
+
+
+
+def apply_strategy_note_team_to_player(
+    note_id: Any,
+    player_id: Any,
+    source_team: str,
+) -> None:
+    """
+    Corregge la squadra CANONICA del giocatore.
+    Dopo questa scrittura Asta, Giocatori, Rose e Mapping leggono tutti
+    players.team_nfl e vedono lo stesso valore.
+    """
+    final_team = str(source_team or "").strip().upper()
+    if not final_team:
+        raise ValueError("Squadra della nota mancante.")
+
+    (
+        supabase.table("players")
+        .update(
+            {
+                "team_nfl": final_team,
+                "source_updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+            }
+        )
+        .eq("id", player_id)
+        .execute()
+    )
+
+    (
+        supabase.table("player_strategy_notes")
+        .update(
+            {
+                "mapping_status": "validated",
+                "updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+            }
+        )
+        .eq("id", note_id)
+        .execute()
+    )
+
+    # Fondamentale: l'Asta usa load_players(), quindi svuotiamo la stessa cache.
+    invalidate_data_cache()
+    load_player_strategy_notes.clear()
 
 
 
@@ -4186,14 +4247,40 @@ def render_strategy_notes_mapping_validator() -> None:
             f"✅ Mapping già validati ({len(validated)})",
             expanded=False,
         ):
+            st.caption(
+                "Fonte unica per nome, squadra e ruolo: **public.players**. "
+                "La squadra della nota viene conservata solo come riferimento "
+                "originale; Asta, Giocatori e Mapping usano la squadra del record players."
+            )
+
+            mismatches = [
+                row
+                for row in validated
+                if str(row.get("source_team_nfl") or row.get("team_nfl") or "").strip().upper()
+                != str(row.get("matched_team") or "").strip().upper()
+            ]
+
             validated_df = pd.DataFrame(
                 [
                     {
                         "Nota": row.get("player_name"),
-                        "Squadra nota": row.get("team_nfl"),
-                        "Giocatore DB": row.get("matched_name"),
-                        "Squadra DB": row.get("matched_team"),
+                        "Squadra nota originale": (
+                            row.get("source_team_nfl")
+                            or row.get("team_nfl")
+                        ),
+                        "Giocatore canonico": row.get("matched_name"),
+                        "Squadra canonica (players)": row.get("matched_team"),
                         "Ruolo": row.get("matched_role"),
+                        "Coerente": (
+                            "✅"
+                            if str(
+                                row.get("source_team_nfl")
+                                or row.get("team_nfl")
+                                or ""
+                            ).strip().upper()
+                            == str(row.get("matched_team") or "").strip().upper()
+                            else "⚠️"
+                        ),
                     }
                     for row in validated
                 ]
@@ -4204,16 +4291,89 @@ def render_strategy_notes_mapping_validator() -> None:
                 use_container_width=True,
             )
 
-            reset_options = {
-                (
-                    f"{row.get('player_name')} · {row.get('team_nfl')} → "
-                    f"{row.get('matched_name')}"
-                ): row.get("note_id")
-                for row in validated
-            }
+            if mismatches:
+                st.warning(
+                    f"Ci sono {len(mismatches)} mapping validati in cui la squadra "
+                    "scritta nella nota è diversa dalla squadra canonica in players. "
+                    "Finché non correggi players, l'Asta continuerà a mostrare il valore DB."
+                )
+
+                mismatch_by_label: dict[str, dict[str, Any]] = {}
+                for row in mismatches:
+                    source_team = str(
+                        row.get("source_team_nfl")
+                        or row.get("team_nfl")
+                        or ""
+                    ).strip().upper()
+                    db_team = str(row.get("matched_team") or "").strip().upper()
+                    label = (
+                        f"{row.get('matched_name')} · "
+                        f"{db_team} → {source_team}"
+                    )
+                    mismatch_by_label[label] = row
+
+                mismatch_label = st.selectbox(
+                    "Correggi squadra canonica",
+                    ["—"] + list(mismatch_by_label.keys()),
+                    key="strategy_canonical_team_fix_select",
+                )
+
+                if mismatch_label != "—":
+                    fix_row = mismatch_by_label[mismatch_label]
+                    source_team = str(
+                        fix_row.get("source_team_nfl")
+                        or fix_row.get("team_nfl")
+                        or ""
+                    ).strip().upper()
+                    db_team = str(
+                        fix_row.get("matched_team") or ""
+                    ).strip().upper()
+
+                    st.info(
+                        f"Confermando, **public.players.team_nfl** verrà aggiornato "
+                        f"da **{db_team}** a **{source_team}**. "
+                        "Il nuovo valore sarà quindi lo stesso anche nell'Asta."
+                    )
+
+                    if st.button(
+                        "✅ Usa la squadra della nota come squadra canonica",
+                        key=f"strategy_apply_source_team_{fix_row['note_id']}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            apply_strategy_note_team_to_player(
+                                fix_row["note_id"],
+                                fix_row["matched_player_id"],
+                                source_team,
+                            )
+                            st.success(
+                                f"{fix_row.get('matched_name')}: squadra canonica "
+                                f"aggiornata a {source_team}."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                f"Impossibile aggiornare la squadra canonica: {exc}"
+                            )
+            else:
+                st.success(
+                    "Tutti i mapping validati coincidono con la squadra canonica "
+                    "della tabella players."
+                )
+
+            st.divider()
+            validated_by_label: dict[str, dict[str, Any]] = {}
+            for row in validated:
+                label = (
+                    f"{row.get('player_name')} → "
+                    f"{row.get('matched_name')} · {row.get('matched_team')}"
+                )
+                validated_by_label[label] = row
+
             reset_label = st.selectbox(
-                "Correggi un mapping già validato",
-                ["—"] + list(reset_options.keys()),
+                "Riapri un mapping se il giocatore associato è sbagliato",
+                ["—"] + list(validated_by_label.keys()),
                 key="strategy_mapping_reset_select",
             )
             if (
@@ -4221,9 +4381,12 @@ def render_strategy_notes_mapping_validator() -> None:
                 and st.button(
                     "↩️ Rimetti da validare",
                     key="strategy_mapping_reset_button",
+                    use_container_width=True,
                 )
             ):
-                reset_strategy_note_mapping(reset_options[reset_label])
+                reset_strategy_note_mapping(
+                    validated_by_label[reset_label]["note_id"]
+                )
                 st.rerun()
 
 
@@ -7087,6 +7250,8 @@ def render_manual_purchase(
     if is_auction_finished(state):
         return current_role
 
+    # Fonte unica dell'Asta: public.players.
+    # Le note strategiche non possono sovrascrivere nome/squadra/ruolo qui.
     players_for_filter = load_players()
 
     available_nfl_teams = sorted(
