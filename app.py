@@ -3449,24 +3449,19 @@ def build_listone_review_sql(comparison: dict[str, Any]) -> str:
         ]
 
     lines += [
-        "-- POSSIBILI RIMOZIONI (COMMENTATE DI DEFAULT)",
+        "-- Le rimozioni sono escluse intenzionalmente da questo file.",
+        "-- Un'assenza dal Listone richiede sempre una verifica manuale separata.",
+        "",
+        "commit;",
     ]
-    for row in comparison.get("missing_players", []):
-        lines.append(
-            "-- delete from public.players "
-            f"where id = {sql_text(row.get('player_id'))}; "
-            f"-- {row.get('name')} · {row.get('team_nfl')} · {row.get('role')}"
-        )
-
-    lines += ["", "commit;"]
     return "\n".join(lines)
 
 
 def render_uploaded_listone_checker() -> None:
     st.markdown("### 📤 Verifica Listone ufficiale")
     st.caption(
-        "Carica CSV/XLSX. L'app confronta il file con Supabase e mostra "
-        "giocatori nuovi, mancanti e dati cambiati prima di qualsiasi modifica."
+        "Carica esclusivamente un Listone anagrafico completo. I file di strategia "
+        "pre-asta (Fascia, Prezzo, PMA) vanno caricati nella sezione dedicata più sotto."
     )
 
     uploaded = st.file_uploader(
@@ -3476,6 +3471,14 @@ def render_uploaded_listone_checker() -> None:
     )
     if uploaded is None:
         return
+
+    upload_signature = (
+        str(getattr(uploaded, "name", "") or ""),
+        int(getattr(uploaded, "size", 0) or 0),
+    )
+    if st.session_state.get("official_listone_upload_signature") != upload_signature:
+        st.session_state["official_listone_upload_signature"] = upload_signature
+        st.session_state.pop("uploaded_listone_comparison", None)
 
     try:
         source_df = _read_uploaded_listone(uploaded)
@@ -3488,6 +3491,21 @@ def render_uploaded_listone_checker() -> None:
         return
 
     columns = [str(column) for column in source_df.columns]
+    normalized_columns = {normalize_string(column) for column in columns}
+    strategy_markers = {
+        normalize_string("Fascia"),
+        normalize_string("Prezzo"),
+        normalize_string("PMA"),
+    }
+    if strategy_markers.issubset(normalized_columns):
+        st.session_state.pop("uploaded_listone_comparison", None)
+        st.error(
+            "Questo sembra un file di strategia pre-asta, non un Listone anagrafico "
+            "completo. Non verrà confrontato con public.players: caricalo nella sezione "
+            "‘Import strategia pre-asta XLSX’."
+        )
+        return
+
     guessed_name = _guess_uploaded_column(columns, ("Nome", "Giocatore", "Calciatore", "Nome calciatore"))
     guessed_team = _guess_uploaded_column(columns, ("Squadra", "Club", "Team"))
     guessed_role = _guess_uploaded_column(columns, ("Ruolo", "R"))
@@ -3513,7 +3531,17 @@ def render_uploaded_listone_checker() -> None:
     quote_col = None if quote_col == "— Non presente —" else quote_col
     fvm_col = None if fvm_col == "— Non presente —" else fvm_col
 
-    if st.button("🔎 Confronta con Supabase", type="primary", use_container_width=True, key="compare_uploaded_listone"):
+    confirmed_complete = st.checkbox(
+        "Confermo che il file è un Listone anagrafico completo, non una selezione o un file strategico",
+        key="confirm_complete_official_listone",
+    )
+    if st.button(
+        "🔎 Confronta con Supabase",
+        type="primary",
+        use_container_width=True,
+        key="compare_uploaded_listone",
+        disabled=not confirmed_complete,
+    ):
         st.session_state["uploaded_listone_comparison"] = build_uploaded_listone_comparison(
             source_df, load_players(), name_col, team_col, role_col, quote_col, fvm_col
         )
@@ -3532,7 +3560,7 @@ def render_uploaded_listone_checker() -> None:
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Riconosciuti", len(matched))
     m2.metric("Da aggiungere", len(new_players))
-    m3.metric("Da rimuovere?", len(missing_players))
+    m3.metric("Assenti dal file (controllo)", len(missing_players))
     m4.metric("Dati cambiati", len(changed_players))
     m5.metric("Ambigui", len(ambiguous))
 
@@ -3545,8 +3573,11 @@ def render_uploaded_listone_checker() -> None:
             st.dataframe(pd.DataFrame(new_players), use_container_width=True, hide_index=True)
 
     if missing_players:
-        with st.expander(f"➖ Presenti in Supabase ma assenti dal file ({len(missing_players)})", expanded=True):
-            st.warning("Assenza dal file non significa automaticamente che il giocatore vada eliminato.")
+        with st.expander(f"ℹ️ Presenti in Supabase ma assenti dal file ({len(missing_players)})", expanded=False):
+            st.info(
+                "Queste righe sono solo informative: non vengono incluse nello SQL e "
+                "non comportano alcuna cancellazione."
+            )
             st.dataframe(pd.DataFrame(missing_players), use_container_width=True, hide_index=True)
 
     if ambiguous:
@@ -3563,7 +3594,7 @@ def render_uploaded_listone_checker() -> None:
     )
     st.caption(
         "Lo SQL aggiorna i giocatori riconosciuti e inserisce quelli chiaramente nuovi. "
-        "Le DELETE sono commentate per sicurezza."
+        "Le rimozioni sono escluse intenzionalmente: il file non contiene istruzioni DELETE."
     )
 
 
