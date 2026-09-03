@@ -498,6 +498,7 @@ SEASON_FILE = DATA_DIR / "season-2526.csv"
 CUSTOM_MODIFIER_TABLE = "player_custom_modifiers"
 USER_TEAM_TABLE = "user_team_assignments"
 USER_STRATEGY_TABLE = "user_strategy_settings"
+PLAYER_STRATEGY_NOTES_TABLE = "player_strategy_notes"
 
 GOALKEEPER_STRATEGY_OPTIONS = (
     "Tre titolari",
@@ -3573,7 +3574,7 @@ def load_player_strategy_notes() -> list[dict[str, Any]]:
     """Carica le note strategiche personali da Supabase."""
     try:
         response = (
-            supabase.table("player_strategy_notes")
+            supabase.table(PLAYER_STRATEGY_NOTES_TABLE)
             .select("*")
             .order("team_nfl")
             .order("player_name")
@@ -3582,6 +3583,21 @@ def load_player_strategy_notes() -> list[dict[str, Any]]:
         return response.data or []
     except Exception:
         return []
+
+
+def get_validated_player_strategy(player_id: Any) -> dict[str, Any] | None:
+    """Restituisce solo valutazioni collegate esplicitamente al player canonico."""
+    player_id_text = str(player_id or "").strip()
+    if not player_id_text:
+        return None
+    candidates = [
+        note for note in load_player_strategy_notes()
+        if str(note.get("player_id") or "").strip() == player_id_text
+        and str(note.get("mapping_status") or "").lower() == "validated"
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda note: str(note.get("updated_at") or ""))
 
 
 def _strategy_note_source_team(note: dict[str, Any]) -> str:
@@ -3615,12 +3631,17 @@ def _strategy_note_match(
 
     source_name = str(note.get("player_name") or "")
     team_code = _strategy_note_source_team(note)
+    source_role = str(note.get("source_role") or "").strip().upper()
     source_norm = normalize_string(source_name)
 
     same_team = [
         player
         for player in db_players
         if str(player.get("team_nfl") or "").strip().upper() == team_code
+        and (
+            not source_role
+            or str(player.get("role") or "").strip().upper() == source_role
+        )
     ]
 
     exact = [
@@ -3632,7 +3653,12 @@ def _strategy_note_match(
         return exact[0], 1.0, "exact"
 
     # Solo suggerimento fuzzy: mai scritto automaticamente.
-    candidates = same_team or db_players
+    same_role = [
+        player for player in db_players
+        if not source_role
+        or str(player.get("role") or "").strip().upper() == source_role
+    ]
+    candidates = same_team or same_role
     best = None
     best_score = 0.0
     for player in candidates:
@@ -3659,8 +3685,11 @@ def build_strategy_notes_mapping_preview(
                 "team_nfl": _strategy_note_source_team(note),
                 "source_team_nfl": _strategy_note_source_team(note),
                 "player_name": note.get("player_name"),
+                "source_role": note.get("source_role"),
                 "category": note.get("category"),
                 "max_price": note.get("max_price"),
+                "suggested_price": note.get("suggested_price"),
+                "average_auction_percent": note.get("average_auction_percent"),
                 "player_note": note.get("player_note"),
                 "matched_player_id": match.get("id") if match else None,
                 "matched_name": match.get("name") if match else None,
@@ -3939,6 +3968,229 @@ def reset_strategy_note_mapping(note_id: Any) -> None:
     load_player_strategy_notes.clear()
 
 
+def _parse_percent_value(value: Any) -> float | None:
+    """Converte valori come 11%, 11.5 o 0.115 nella percentuale 11.5."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip().replace(",", ".")
+    if not text:
+        return None
+    has_percent_sign = "%" in text
+    try:
+        number = float(text.replace("%", "").strip())
+    except ValueError:
+        return None
+    if not has_percent_sign and 0 < number <= 1:
+        number *= 100
+    return round(max(0.0, number), 3)
+
+
+def read_preauction_strategy_workbook(uploaded_file: Any) -> list[dict[str, Any]]:
+    """Legge i fogli P/D/C/A senza considerarli fonte anagrafica canonica."""
+    from io import BytesIO
+
+    sheets = pd.read_excel(BytesIO(uploaded_file.getvalue()), sheet_name=None)
+    rows: list[dict[str, Any]] = []
+    required = {"Fascia", "Ruolo", "Team", "Nome", "Prezzo", "PMA"}
+    for sheet_name in ("P", "D", "C", "A"):
+        frame = sheets.get(sheet_name)
+        if frame is None:
+            continue
+        frame.columns = [str(column).strip() for column in frame.columns]
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(
+                f"Foglio {sheet_name}: colonne mancanti: {', '.join(sorted(missing))}."
+            )
+        for _, source in frame.iterrows():
+            name = _clean_source_player_name(source.get("Nome"))
+            if not name:
+                continue
+            role = _uploaded_role_to_code(source.get("Ruolo"))
+            team = _uploaded_team_to_code(source.get("Team"))
+            if role not in {"P", "D", "C", "A"} or not team:
+                continue
+            price = pd.to_numeric(source.get("Prezzo"), errors="coerce")
+            quote = pd.to_numeric(source.get("Quo"), errors="coerce")
+            rows.append(
+                {
+                    "player_name": name,
+                    "source_team_nfl": team,
+                    "source_role": role,
+                    "category": str(source.get("Fascia") or "Non Impostata").strip(),
+                    "suggested_price": max(0, int(price)) if pd.notna(price) else 0,
+                    "average_auction_percent": _parse_percent_value(source.get("PMA")),
+                    "source_quote": max(0, int(quote)) if pd.notna(quote) else None,
+                }
+            )
+    if not rows:
+        raise ValueError("Il file non contiene righe valide nei fogli P/D/C/A.")
+    return rows
+
+
+def build_preauction_workbook_preview(
+    source_rows: list[dict[str, Any]],
+    db_players: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    preview: list[dict[str, Any]] = []
+    for source in source_rows:
+        name_norm = normalize_string(source["player_name"])
+        same_name_role = [
+            player for player in db_players
+            if normalize_string(str(player.get("name") or "")) == name_norm
+            and str(player.get("role") or "").upper() == source["source_role"]
+        ]
+        same_team = [
+            player for player in same_name_role
+            if str(player.get("team_nfl") or "").upper() == source["source_team_nfl"]
+        ]
+        if len(same_team) == 1:
+            match, status = same_team[0], "exact"
+        elif len(same_name_role) == 1:
+            match, status = same_name_role[0], "team_conflict"
+        else:
+            candidates = [
+                player for player in db_players
+                if str(player.get("role") or "").upper() == source["source_role"]
+            ]
+            match = max(
+                candidates,
+                key=lambda player: _name_similarity(
+                    source["player_name"], str(player.get("name") or "")
+                ),
+                default=None,
+            )
+            status = "needs_validation" if match else "unmatched"
+        preview.append(
+            {
+                **source,
+                "matched_player_id": match.get("id") if match else None,
+                "matched_name": match.get("name") if match else None,
+                "db_team": match.get("team_nfl") if match else None,
+                "status": status,
+            }
+        )
+    return preview
+
+
+def persist_preauction_workbook_preview(
+    preview: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Salva la strategia; solo i match esatti diventano subito validati."""
+    existing = load_player_strategy_notes()
+    exact_count = 0
+    pending_count = 0
+    errors: list[str] = []
+    for row in preview:
+        payload = {
+            "player_name": row["player_name"],
+            "team_nfl": row["source_team_nfl"],
+            "source_team_nfl": row["source_team_nfl"],
+            "source_role": row["source_role"],
+            "category": row["category"],
+            "max_price": row["suggested_price"] or None,
+            "suggested_price": row["suggested_price"],
+            "average_auction_percent": row["average_auction_percent"],
+            "source_quote": row["source_quote"],
+            "mapping_status": "validated" if row["status"] == "exact" else "pending",
+            "mapping_confidence": 1.0 if row["status"] == "exact" else None,
+            "player_id": str(row["matched_player_id"]) if row["status"] == "exact" else None,
+            "canonical_player_name": row["matched_name"] if row["status"] == "exact" else None,
+            "updated_at": datetime.now(ZoneInfo("Europe/Rome")).isoformat(),
+        }
+        old = next(
+            (
+                note for note in existing
+                if normalize_string(str(note.get("player_name") or ""))
+                == normalize_string(row["player_name"])
+                and _strategy_note_source_team(note) == row["source_team_nfl"]
+                and str(note.get("source_role") or row["source_role"]).upper()
+                == row["source_role"]
+            ),
+            None,
+        )
+        try:
+            query = supabase.table(PLAYER_STRATEGY_NOTES_TABLE)
+            if old and old.get("id") is not None:
+                query.update(payload).eq("id", old["id"]).execute()
+            else:
+                query.insert(payload).execute()
+            if row["status"] == "exact":
+                exact_count += 1
+            else:
+                pending_count += 1
+        except Exception as exc:
+            errors.append(f"{row['player_name']}: {exc}")
+    load_player_strategy_notes.clear()
+    return exact_count, pending_count, errors
+
+
+def render_preauction_workbook_importer() -> None:
+    st.markdown("### 📋 Import strategia pre-asta XLSX")
+    st.caption(
+        "L'XLSX propone squadra, fascia e prezzi. Nome, ruolo e squadra diventano "
+        "canonici solo tramite il mapping verso public.players."
+    )
+    uploaded = st.file_uploader(
+        "Carica il file strategico XLSX",
+        type=["xlsx"],
+        key="preauction_strategy_workbook",
+    )
+    if uploaded is None:
+        return
+    try:
+        source_rows = read_preauction_strategy_workbook(uploaded)
+        preview = build_preauction_workbook_preview(source_rows, load_players())
+    except Exception as exc:
+        st.error(f"Impossibile leggere il file strategico: {exc}")
+        return
+
+    counts = pd.Series([row["status"] for row in preview]).value_counts()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Match certi", int(counts.get("exact", 0)))
+    c2.metric("Squadra da confermare", int(counts.get("team_conflict", 0)))
+    c3.metric(
+        "Altri da validare",
+        int(counts.get("needs_validation", 0) + counts.get("unmatched", 0)),
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Nome XLSX": row["player_name"],
+                    "Ruolo": row["source_role"],
+                    "Squadra XLSX": row["source_team_nfl"],
+                    "Giocatore proposto": row["matched_name"],
+                    "Squadra DB": row["db_team"],
+                    "Fascia": row["category"],
+                    "Spesa suggerita": row["suggested_price"],
+                    "PMA %": row["average_auction_percent"],
+                    "Esito": row["status"],
+                }
+                for row in preview
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+    confirmed = st.checkbox(
+        "Ho controllato la preview: importa i match certi e manda gli altri alla validazione manuale.",
+        key="confirm_preauction_strategy_import",
+    )
+    if st.button(
+        "Importa strategia pre-asta",
+        type="primary",
+        disabled=not confirmed,
+        key="apply_preauction_strategy_import",
+    ):
+        exact, pending, errors = persist_preauction_workbook_preview(preview)
+        if errors:
+            st.error(f"Import parziale: {len(errors)} errori. " + " | ".join(errors[:5]))
+        else:
+            st.success(f"Importati {exact} match certi; {pending} casi attendono validazione.")
+        st.rerun()
+
+
 def render_strategy_notes_mapping_validator() -> None:
     st.markdown("### 🧭 Mappatura note strategiche")
     st.caption(
@@ -4032,6 +4284,7 @@ def render_strategy_notes_mapping_validator() -> None:
             for pos, row in enumerate(unresolved):
                 source_name = str(row.get("player_name") or "")
                 source_team = str(row.get("team_nfl") or "").strip().upper()
+                source_role = str(row.get("source_role") or "").strip().upper()
                 suggested_name = str(row.get("matched_name") or "—")
                 suggested_team = str(row.get("matched_team") or "—")
 
@@ -4042,6 +4295,11 @@ def render_strategy_notes_mapping_validator() -> None:
                 if row.get("max_price") is not None:
                     st.caption(
                         f"Prezzo massimo nota: {int(row['max_price'])} crediti"
+                    )
+                if row.get("average_auction_percent") is not None:
+                    st.caption(
+                        "Prezzo medio d'asta: "
+                        f"{float(row['average_auction_percent']):g}% del budget iniziale"
                     )
                 if row.get("player_note"):
                     st.caption(str(row.get("player_note")))
@@ -4065,8 +4323,14 @@ def render_strategy_notes_mapping_validator() -> None:
 
                 if action == "Associa a giocatore esistente":
                     suggested_id = row.get("matched_player_id")
+                    role_labels = [
+                        label for label in labels
+                        if not source_role
+                        or str(player_by_label[label].get("role") or "").upper()
+                        == source_role
+                    ]
                     ranked_labels = sorted(
-                        labels,
+                        role_labels or labels,
                         key=lambda label: (
                             1 if player_by_label[label].get("id") == suggested_id else 0,
                             1 if str(player_by_label[label].get("team_nfl") or "") == source_team else 0,
@@ -4403,6 +4667,9 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
     )
 
     render_uploaded_listone_checker()
+
+    st.divider()
+    render_preauction_workbook_importer()
 
     st.divider()
     render_strategy_notes_mapping_validator()
@@ -7359,6 +7626,50 @@ def render_manual_purchase(
             team_names,
             index=default_team_index(team_names, get_current_user_team_name()),
             key="manual_target_team",
+        )
+
+    # Valori pre-asta importati e validati. Il denominatore è sempre il budget
+    # iniziale della squadra acquirente, non il residuo corrente.
+    preauction = get_validated_player_strategy(selected_player.get("id"))
+    if preauction:
+        team_rows = teams_df[teams_df["name"] == target_team]
+        initial_budget = (
+            int(team_rows.iloc[0].get("initial_budget") or 0)
+            if not team_rows.empty
+            else 0
+        )
+        suggested_price = int(
+            preauction.get("suggested_price")
+            or preauction.get("max_price")
+            or 0
+        )
+        average_percent = _parse_percent_value(
+            preauction.get("average_auction_percent")
+        )
+        suggested_percent = (
+            suggested_price * 100 / initial_budget
+            if initial_budget > 0
+            else None
+        )
+        average_credits = (
+            int(round(initial_budget * average_percent / 100))
+            if initial_budget > 0 and average_percent is not None
+            else None
+        )
+        suggested_text = (
+            f"**{suggested_price} cr ({suggested_percent:.1f}%)**"
+            if suggested_percent is not None
+            else f"**{suggested_price} cr**"
+        )
+        average_text = (
+            f"**{average_credits} cr ({average_percent:g}%)**"
+            if average_credits is not None and average_percent is not None
+            else "non disponibile"
+        )
+        st.info(
+            f"🎯 **Strategia pre-asta** · Spesa suggerita: {suggested_text} · "
+            f"Prezzo medio d'asta: {average_text} · "
+            f"Fascia: **{preauction.get('category') or 'Non impostata'}**"
         )
 
     # Valutazione immediata del giocatore selezionato.
