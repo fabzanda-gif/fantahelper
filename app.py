@@ -7352,6 +7352,129 @@ def execute_purchase(
     return True, ""
 
 
+
+
+def get_goalkeeper_purchase_alerts(
+    selected_player: dict[str, Any],
+    target_team: str,
+    state: AuctionState,
+) -> list[dict[str, str]]:
+    """
+    Alert strategici per i portieri.
+
+    Regole:
+    - Se il portiere selezionato è il secondo per listino nella sua squadra e
+      il fantasy team non possiede il primo, segnala rischio panchina.
+    - Se i primi due portieri della stessa squadra hanno entrambi listino > 10,
+      trattiamo il caso come possibile ballottaggio e consigliamo di averli insieme.
+    - Se la coppia è già completa, mostriamo conferma positiva.
+    """
+    if str(selected_player.get("role") or "").upper() != "P":
+        return []
+
+    club = str(selected_player.get("team_nfl") or "").strip().upper()
+    if not club:
+        return []
+
+    club_goalkeepers = [
+        p for p in load_players(role="P", team_nfl=club)
+        if str(p.get("team_nfl") or "").strip().upper() == club
+    ]
+    club_goalkeepers.sort(
+        key=lambda p: (
+            int(p.get("list_price") or 0),
+            float(calculate_player_rating_detailed(
+                p,
+                st.session_state.preferred_players,
+                load_custom_modifiers(),
+                build_current_goalkeeper_ranking(state),
+            )["final_rating"]),
+        ),
+        reverse=True,
+    )
+
+    if not club_goalkeepers:
+        return []
+
+    owned_ids = {
+        str((purchase.get("players") or {}).get("id"))
+        for purchase in state.team_purchases_map.get(target_team, [])
+        if (purchase.get("players") or {}).get("role") == "P"
+    }
+
+    selected_id = str(selected_player.get("id"))
+    top = club_goalkeepers[0]
+    second = club_goalkeepers[1] if len(club_goalkeepers) > 1 else None
+    top_id = str(top.get("id"))
+    second_id = str(second.get("id")) if second else None
+    top_price = int(top.get("list_price") or 0)
+    second_price = int(second.get("list_price") or 0) if second else 0
+
+    alerts: list[dict[str, str]] = []
+
+    # Caso classico: stai prendendo il secondo portiere senza il primo.
+    if second and selected_id == second_id and top_id not in owned_ids:
+        alerts.append({
+            "level": "error",
+            "title": "🚨 Secondo portiere senza il primo",
+            "message": (
+                f"{selected_player.get('name')} risulta il secondo portiere di {club} "
+                f"per valore di listino ({second_price} cr contro {top_price} cr di "
+                f"{top.get('name')}). Non comprarlo da solo se non hai già "
+                f"{top.get('name')}: rischi di occupare uno slot con un panchinaro."
+            ),
+        })
+
+    # Due portieri costosi della stessa squadra = possibile ballottaggio.
+    if second and top_price > 10 and second_price > 10:
+        pair_names = f"{top.get('name')} + {second.get('name')}"
+        owns_top = top_id in owned_ids or selected_id == top_id
+        owns_second = second_id in owned_ids or selected_id == second_id
+
+        # Se selezionandolo completeresti la coppia, messaggio positivo.
+        if owns_top and owns_second:
+            alerts.append({
+                "level": "success",
+                "title": "✅ Coppia portieri completa",
+                "message": (
+                    f"{pair_names}: entrambi hanno listino superiore a 10 cr. "
+                    "È un profilo da possibile ballottaggio, ma con entrambi in rosa "
+                    "copri il rischio titolarità."
+                ),
+            })
+        else:
+            missing = second if owns_top else top
+            alerts.append({
+                "level": "warning",
+                "title": "⚠️ Possibile ballottaggio in porta",
+                "message": (
+                    f"{pair_names} costano rispettivamente {top_price} e {second_price} cr: "
+                    "quando due portieri della stessa squadra superano entrambi 10 cr, "
+                    "li tratto come possibile ballottaggio. Se scegli questo portiere, "
+                    f"pianifica di prendere anche {missing.get('name')}."
+                ),
+            })
+
+    return alerts
+
+
+def render_goalkeeper_purchase_alerts(
+    selected_player: dict[str, Any],
+    target_team: str,
+    state: AuctionState,
+) -> None:
+    for alert in get_goalkeeper_purchase_alerts(selected_player, target_team, state):
+        content = f"**{alert['title']}**  \n{alert['message']}"
+        if alert["level"] == "error":
+            st.error(content)
+        elif alert["level"] == "warning":
+            st.warning(content)
+        elif alert["level"] == "success":
+            st.success(content)
+        else:
+            st.info(content)
+
+
 def render_manual_purchase(
     teams_df: pd.DataFrame,
     state: AuctionState,
@@ -7493,6 +7616,9 @@ def render_manual_purchase(
             - 1,
         ),
     )
+
+    # Alert immediati sui portieri, riferiti alla squadra acquirente selezionata.
+    render_goalkeeper_purchase_alerts(selected_player, target_team, state)
 
     spend_focus = get_player_budget_spend_focus(selected_player, estimate)
     render_player_spend_focus_card(spend_focus)
