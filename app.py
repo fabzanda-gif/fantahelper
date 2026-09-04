@@ -11507,16 +11507,35 @@ def main() -> None:
 
     sidebar_role = get_my_team_draft_role(state)
 
-    # La Top 5 segue il ruolo che l'utente sta guardando nell'Asta.
-    # Lo smart next purchase continua invece a seguire il prossimo ruolo
-    # necessario alla costruzione della rosa.
+    # La Top 5 segue il ruolo selezionato nell'Asta SOLO se quel ruolo
+    # ha ancora slot disponibili. Se il ruolo è stato completato, passa
+    # automaticamente al prossimo ruolo di draft (es. D 8/8 -> C).
     selected_sidebar_role = sidebar_role
     if active_page == "Asta":
         selected_role_label = st.session_state.get("main_role_select")
         selected_role = ROLE_LABELS.get(selected_role_label)
-        if selected_role in {"P", "D", "C", "A"}:
-            selected_sidebar_role = selected_role
 
+        if selected_role in {"P", "D", "C", "A"}:
+            selected_count = int(
+                state.team_role_totals
+                .get(my_team_name or "", {})
+                .get(selected_role, 0)
+            )
+            selected_limit = int(ROLE_LIMITS.get(selected_role, 0))
+
+            if selected_count < selected_limit:
+                selected_sidebar_role = selected_role
+            else:
+                # Il ruolo selezionato è completo: riallinea subito anche
+                # il selectbox dell'Asta al prossimo ruolo necessario.
+                selected_sidebar_role = sidebar_role
+                if sidebar_role in {"P", "D", "C", "A"}:
+                    st.session_state["main_role_select"] = role_label(
+                        sidebar_role
+                    )
+
+    # Il prossimo acquisto consigliato segue sempre il prossimo ruolo
+    # ancora incompleto della rosa.
     if not auction_finished and sidebar_role:
         render_smart_next_purchase_card(
             state,
