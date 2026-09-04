@@ -5721,6 +5721,141 @@ def apply_uppercase_cleanup_safe() -> tuple[int, int, list[str]]:
     return updated, skipped, errors
 
 
+
+def apply_fantacalcio_new_players(
+    rows: list[dict[str, Any]],
+    resolutions: dict[int, dict[str, Any]],
+) -> tuple[int, list[str]]:
+    created = 0
+    errors: list[str] = []
+
+    for idx, row in enumerate(rows):
+        resolution = resolutions.get(idx) or {}
+        if resolution.get("action") != "Nuovo giocatore":
+            continue
+
+        role = str(resolution.get("role") or "").strip().upper()
+        if role not in {"P", "D", "C", "A"}:
+            errors.append(f"{row.get('name')}: ruolo mancante/non valido")
+            continue
+
+        try:
+            payload = {
+                "name": str(row.get("name") or "").upper(),
+                "team_nfl": str(row.get("team_nfl") or "").upper(),
+                "role": role,
+                "list_price": int(row.get("qa_fc") or row.get("quotazione_fc") or 1),
+                "quotazione_fc": int(row.get("qa_fc") or row.get("quotazione_fc") or 1),
+                "fvm_fc": int(row.get("fvm_fc") or 0),
+                "status_titolarita": "Riserva",
+                "rigorista": False,
+                "piazzati": False,
+                "primo_anno_serie_a": bool(resolution.get("rookie", True)),
+                "data_source": "Fantacalcio Quotazioni 2026/27",
+                "source_updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+                "source_aliases": [
+                    _source_alias_token(
+                        str(row.get("name") or ""),
+                        str(row.get("team_nfl") or ""),
+                    )
+                ],
+            }
+            supabase.table("players").insert(payload).execute()
+            created += 1
+        except Exception as exc:
+            errors.append(f"{row.get('name')}: {exc}")
+
+    if created:
+        invalidate_data_cache()
+    return created, errors
+
+
+def apply_fantacalcio_alias_matches(
+    ambiguous_rows: list[dict[str, Any]],
+    selected_rows: list[dict[str, Any]],
+) -> tuple[int, list[str]]:
+    updated = 0
+    errors: list[str] = []
+
+    selected_keys = {
+        (str(row.get("source_name")), str(row.get("candidate_ids")))
+        for row in selected_rows
+    }
+
+    for row in ambiguous_rows:
+        key = (str(row.get("source_name")), str(row.get("candidate_ids")))
+        if key not in selected_keys:
+            continue
+
+        player_id = row.get("candidate_ids")
+        source_name = str(row.get("source_name") or "")
+        source_team = str(row.get("source_team") or "").upper()
+
+        try:
+            current = (
+                supabase.table("players")
+                .select("id, source_aliases")
+                .eq("id", player_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if not current:
+                errors.append(f"{source_name}: candidato non trovato")
+                continue
+
+            aliases = current[0].get("source_aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+
+            alias_token = _source_alias_token(source_name, source_team)
+            aliases = list(dict.fromkeys([*aliases, alias_token]))
+
+            supabase.table("players").update({
+                "source_aliases": aliases,
+            }).eq("id", player_id).execute()
+
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{source_name}: {exc}")
+
+    if updated:
+        invalidate_data_cache()
+    return updated, errors
+
+
+def apply_fantacalcio_db_extra_actions(
+    db_extras: list[dict[str, Any]],
+    delete_ids: set[str],
+) -> tuple[int, list[str]]:
+    deleted = 0
+    errors: list[str] = []
+
+    for row in db_extras:
+        player_id = str(row.get("player_id") or "")
+        if player_id not in delete_ids:
+            continue
+
+        if row.get("in_roster"):
+            errors.append(
+                f"{row.get('name')}: presente in una rosa, cancellazione bloccata"
+            )
+            continue
+
+        try:
+            supabase.table("players").delete().eq("id", player_id).execute()
+            deleted += 1
+        except Exception as exc:
+            errors.append(f"{row.get('name')}: {exc}")
+
+    if deleted:
+        invalidate_data_cache()
+    return deleted, errors
+
+
 def render_fantacalcio_master_validation() -> None:
     st.markdown("### 🧾 Fantacalcio Quotazioni — Master List")
     st.caption(
@@ -5941,27 +6076,140 @@ def render_fantacalcio_master_validation() -> None:
             f"➕ Presenti su Fantacalcio ma mancanti nel DB ({len(new_players)})",
             expanded=True,
         ):
-            st.dataframe(
-                pd.DataFrame(new_players),
-                hide_index=True,
-                use_container_width=True,
-            )
             st.caption(
-                "Il ruolo non viene inventato: i nuovi giocatori vanno "
-                "inseriti tramite la validazione manuale della sezione "
-                "'Controllo fonti online', scegliendo P/D/C/A."
+                "Per ogni giocatore puoi scegliere se crearlo nel DB. "
+                "Il ruolo va confermato manualmente."
             )
+
+            resolutions: dict[int, dict[str, Any]] = {}
+            for idx, row in enumerate(new_players):
+                key = f"fc_new_{idx}_{normalize_string(str(row.get('name') or ''))}_{row.get('team_nfl')}"
+                st.markdown(
+                    f"**{escape(str(row.get('name') or '—'))}** · "
+                    f"{escape(str(row.get('team_nfl') or '—'))} · "
+                    f"QA {int(row.get('qa_fc') or 0)} · FVM {int(row.get('fvm_fc') or 0)}"
+                )
+                action = st.radio(
+                    "Azione",
+                    ["Ignora", "Nuovo giocatore"],
+                    horizontal=True,
+                    key=f"{key}_action",
+                )
+                if action == "Nuovo giocatore":
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        role = st.selectbox(
+                            "Ruolo",
+                            ["P", "D", "C", "A"],
+                            key=f"{key}_role",
+                        )
+                    with c2:
+                        rookie = st.checkbox(
+                            "Rookie / primo anno A",
+                            value=True,
+                            key=f"{key}_rookie",
+                        )
+                    resolutions[idx] = {
+                        "action": "Nuovo giocatore",
+                        "role": role,
+                        "rookie": rookie,
+                    }
+                else:
+                    resolutions[idx] = {"action": "Ignora"}
+                st.divider()
+
+            if any(r.get("action") == "Nuovo giocatore" for r in resolutions.values()):
+                if st.button(
+                    "✅ Crea i nuovi giocatori selezionati",
+                    type="primary",
+                    use_container_width=True,
+                    key="fc_master_create_new_players",
+                ):
+                    created, errors = apply_fantacalcio_new_players(
+                        new_players,
+                        resolutions,
+                    )
+                    if errors:
+                        st.error(
+                            f"Creati {created} giocatori · Errori {len(errors)}"
+                        )
+                        st.write(errors)
+                    else:
+                        st.success(f"Creati {created} nuovi giocatori.")
+                        st.session_state.pop("fc_master_validation", None)
+                        st.rerun()
 
     if ambiguous:
         with st.expander(
             f"❓ Match ambigui / alias ({len(ambiguous)})",
             expanded=True,
         ):
-            st.dataframe(
-                pd.DataFrame(ambiguous),
+            st.caption(
+                "Spunta solo i match che vuoi confermare come alias dello stesso giocatore."
+            )
+            amb_df = pd.DataFrame(
+                [
+                    {
+                        "Conferma": False,
+                        "Fonte": row.get("source_name"),
+                        "Squadra": row.get("source_team"),
+                        "Candidato DB": row.get("candidate_name"),
+                        "Motivo": row.get("reason"),
+                        "_candidate_id": row.get("candidate_ids"),
+                    }
+                    for row in ambiguous
+                ]
+            )
+            edited_amb = st.data_editor(
+                amb_df,
                 hide_index=True,
                 use_container_width=True,
+                disabled=[
+                    "Fonte",
+                    "Squadra",
+                    "Candidato DB",
+                    "Motivo",
+                    "_candidate_id",
+                ],
+                column_config={
+                    "Conferma": st.column_config.CheckboxColumn(
+                        "Conferma",
+                        default=False,
+                    ),
+                    "_candidate_id": None,
+                },
+                key="fc_master_alias_editor",
             )
+
+            selected_aliases = [
+                {
+                    "source_name": row["Fonte"],
+                    "candidate_ids": row["_candidate_id"],
+                }
+                for _, row in edited_amb.iterrows()
+                if bool(row.get("Conferma"))
+            ]
+
+            if selected_aliases:
+                if st.button(
+                    f"✅ Conferma {len(selected_aliases)} alias selezionati",
+                    type="primary",
+                    use_container_width=True,
+                    key="fc_master_apply_aliases",
+                ):
+                    updated, errors = apply_fantacalcio_alias_matches(
+                        ambiguous,
+                        selected_aliases,
+                    )
+                    if errors:
+                        st.error(
+                            f"Alias aggiornati {updated} · Errori {len(errors)}"
+                        )
+                        st.write(errors)
+                    else:
+                        st.success(f"Alias confermati: {updated}.")
+                        st.session_state.pop("fc_master_validation", None)
+                        st.rerun()
 
     if db_extras:
         with st.expander(
@@ -5969,14 +6217,89 @@ def render_fantacalcio_master_validation() -> None:
             expanded=False,
         ):
             st.caption(
-                "Non vengono cancellati automaticamente. I record presenti "
-                "in una rosa sono sempre protetti."
+                "Puoi marcare i record da eliminare. Quelli presenti in una rosa "
+                "sono protetti e non verranno cancellati."
             )
-            st.dataframe(
-                pd.DataFrame(db_extras),
+
+            extras_df = pd.DataFrame(
+                [
+                    {
+                        "Elimina": False,
+                        "Giocatore": row.get("name"),
+                        "Squadra": row.get("team_nfl"),
+                        "Ruolo": row.get("role"),
+                        "In rosa": bool(row.get("in_roster")),
+                        "_player_id": row.get("player_id"),
+                    }
+                    for row in db_extras
+                ]
+            )
+
+            edited_extras = st.data_editor(
+                extras_df,
                 hide_index=True,
                 use_container_width=True,
+                disabled=[
+                    "Giocatore",
+                    "Squadra",
+                    "Ruolo",
+                    "In rosa",
+                    "_player_id",
+                ],
+                column_config={
+                    "Elimina": st.column_config.CheckboxColumn(
+                        "Elimina",
+                        default=False,
+                    ),
+                    "_player_id": None,
+                },
+                key="fc_master_extras_editor",
             )
+
+            delete_ids = {
+                str(row["_player_id"])
+                for _, row in edited_extras.iterrows()
+                if bool(row.get("Elimina"))
+            }
+
+            protected_selected = [
+                row
+                for row in db_extras
+                if str(row.get("player_id")) in delete_ids
+                and row.get("in_roster")
+            ]
+            if protected_selected:
+                st.warning(
+                    f"{len(protected_selected)} record selezionati sono presenti in una rosa "
+                    "e verranno comunque protetti."
+                )
+
+            if delete_ids:
+                confirm_delete = st.checkbox(
+                    "Confermo di voler eliminare i record selezionati non presenti in rosa",
+                    value=False,
+                    key="fc_master_confirm_extra_delete",
+                )
+                if st.button(
+                    f"🗑️ Elimina {len(delete_ids)} record selezionati",
+                    type="secondary",
+                    use_container_width=True,
+                    disabled=not confirm_delete,
+                    key="fc_master_delete_extras",
+                ):
+                    deleted, errors = apply_fantacalcio_db_extra_actions(
+                        db_extras,
+                        delete_ids,
+                    )
+                    if errors:
+                        st.error(
+                            f"Eliminati {deleted} record · Errori/protezioni {len(errors)}"
+                        )
+                        st.write(errors)
+                    else:
+                        st.success(f"Eliminati {deleted} record.")
+                        st.session_state.pop("fc_master_validation", None)
+                        st.rerun()
 
     c1, c2 = st.columns(2)
 
