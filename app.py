@@ -4397,48 +4397,6 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
                 unmatched
             )
 
-        # Controllo esplicito utile per debug di coppie.
-        como_preview = [
-            row
-            for row in preview
-            if str(row.get("new_team") or "") == "COM"
-            and normalize_string(str(row.get("name") or ""))
-            in {"kean", "douvikas"}
-        ]
-        # Mostra anche cosa ha letto il parser dalla sezione COMO.
-        if "COM" in formations:
-            como_source = formations["COM"]
-            st.markdown("##### 📥 Dati letti dalla fonte — COMO")
-            st.json(
-                {
-                    "starters": como_source.get("starters", []),
-                    "ballot_groups": como_source.get("ballot_groups", []),
-                    "penalties": como_source.get("penalties", []),
-                    "set_pieces": como_source.get("set_pieces", []),
-                }
-            )
-
-        if como_preview:
-            st.markdown("##### 🔎 Check Kean / Douvikas")
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "Giocatore": row.get("name"),
-                            "Status nuovo": row.get("new_status"),
-                            "Ballottaggio con": row.get("new_ballottaggio_con"),
-                            "Ord. rigori": row.get("rigorista_ordine"),
-                            "Confidence": round(
-                                float(row.get("confidence") or 0), 2
-                            ),
-                        }
-                        for row in como_preview
-                    ]
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
-
         suspicious_unmatched_for_sync = [
             row
             for row in unmatched
