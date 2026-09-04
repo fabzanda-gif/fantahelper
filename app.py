@@ -6144,7 +6144,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
 # MODELLO ECONOMICO v89 — % BUDGET
 # ============================================================
 
-PLAYER_BUDGET_MODEL_VERSION = "v89_pct_1"
+PLAYER_BUDGET_MODEL_VERSION = "v90_pct_gk_block_1"
 
 # Curva economica di riferimento per ruolo.
 # Ogni coppia è (rating, % budget). Il valore viene interpolato.
@@ -6356,10 +6356,54 @@ def _goalkeeper_block_prediction(
     total_budget: int,
 ) -> tuple[float, int, str]:
     """
-    Per i portieri il budget è quello dell'intero reparto.
-    Il primo portiere assorbe il residuo dopo aver riservato almeno 1 credito
-    per gli altri portieri del blocco.
+    Modello portieri v90.
+
+    Regole:
+    1. Il portiere principale può assorbire quasi tutto il budget reparto.
+    2. Il normale secondo/terzo portiere della STESSA squadra vale massimo 1 cr.
+    3. Eccezione: se i primi due portieri della squadra hanno entrambi listino > 10,
+       li trattiamo come possibile ballottaggio e non come semplice titolare+riserve.
+    4. Il budget di reparto resta il riferimento complessivo.
     """
+    team_code = str(player.get("team_nfl") or "").strip().upper()
+    selected_id = str(player.get("id") or "")
+
+    team_goalkeepers = [
+        p
+        for p in load_players(role="P")
+        if str(p.get("team_nfl") or "").strip().upper() == team_code
+    ]
+    team_goalkeepers.sort(
+        key=lambda p: (
+            float(p.get("list_price") or 0),
+            float(
+                calculate_player_rating_detailed(
+                    p,
+                    st.session_state.preferred_players,
+                    load_custom_modifiers(),
+                    build_current_goalkeeper_ranking(state),
+                )["final_rating"]
+            ),
+        ),
+        reverse=True,
+    )
+
+    selected_index = next(
+        (
+            idx
+            for idx, keeper in enumerate(team_goalkeepers)
+            if str(keeper.get("id")) == selected_id
+        ),
+        None,
+    )
+
+    top_two = team_goalkeepers[:2]
+    possible_ballot_pair = (
+        len(top_two) >= 2
+        and float(top_two[0].get("list_price") or 0) > 10
+        and float(top_two[1].get("list_price") or 0) > 10
+    )
+
     department_pct = _player_pre_adjustment_pct(player, rating)
     department_budget = max(
         3,
@@ -6371,16 +6415,76 @@ def _goalkeeper_block_prediction(
         p for p in owned
         if str(p.get("role") or "") == "P"
     ]
+
     spent_goalkeepers = 0
     for purchase in state.team_purchases_map.get(target_team, []):
         p = purchase.get("players") or {}
         if str(p.get("role") or "") == "P":
             spent_goalkeepers += int(purchase.get("purchase_price") or 0)
 
+    # ------------------------------------------------------------
+    # NORMALE RISERVA DELLO STESSO CLUB
+    # ------------------------------------------------------------
+    # Se non siamo davanti a un vero dualismo (>10 / >10), il secondo e
+    # il terzo portiere sono coperture: non vanno pagati oltre 1 credito.
+    if selected_index is not None and selected_index >= 1 and not possible_ballot_pair:
+        return (
+            0.2,
+            1,
+            "Riserva del blocco portieri: massimo 1 cr",
+        )
+
+    # ------------------------------------------------------------
+    # POSSIBILE BALLOTTAGGIO FRA I PRIMI DUE
+    # ------------------------------------------------------------
+    if (
+        possible_ballot_pair
+        and selected_index in {0, 1}
+    ):
+        counterpart = top_two[1 - selected_index]
+        owned_ids = {
+            str(p.get("id"))
+            for p in owned_goalkeepers
+            if p.get("id") is not None
+        }
+        counterpart_owned = str(counterpart.get("id")) in owned_ids
+
+        # Il budget reparto è condiviso dalla coppia.
+        remaining_department_budget = max(
+            1,
+            department_budget - spent_goalkeepers,
+        )
+
+        # Se non possiedi ancora il compagno, non lasciare che un solo portiere
+        # consumi tutto il budget del reparto: riserva almeno il 35% alla coppia.
+        if not counterpart_owned:
+            cap = max(
+                1,
+                int(round(remaining_department_budget * 0.65)),
+            )
+            pct = cap / max(1, total_budget) * 100.0
+            return (
+                pct,
+                cap,
+                "Possibile ballottaggio: budget da dividere con il compagno",
+            )
+
+        # Se il compagno è già in rosa, puoi usare il residuo del reparto.
+        cap = max(1, remaining_department_budget)
+        pct = cap / max(1, total_budget) * 100.0
+        return (
+            pct,
+            cap,
+            "Ballottaggio coperto: usa solo il residuo del budget portieri",
+        )
+
+    # ------------------------------------------------------------
+    # PORTIERE PRINCIPALE
+    # ------------------------------------------------------------
     keepers_after_purchase = len(owned_goalkeepers) + 1
     remaining_keeper_slots = max(0, 3 - keepers_after_purchase)
 
-    # Se questo è il primo portiere, riserviamo 1+1 ai due compagni.
+    # Riserviamo 1 credito per ciascuna copertura futura.
     max_for_this_keeper = max(
         1,
         department_budget
@@ -6388,8 +6492,9 @@ def _goalkeeper_block_prediction(
         - remaining_keeper_slots,
     )
 
+    pct = max_for_this_keeper / max(1, total_budget) * 100.0
     return (
-        department_pct,
+        pct,
         max_for_this_keeper,
         f"Budget reparto P: {department_budget} cr",
     )
@@ -8135,11 +8240,26 @@ def render_top5(
     preferred_players: set[Any],
     state: AuctionState | None = None,
 ) -> None:
-    """Top 5 liberi in formato card compatte e leggibili nella sidebar."""
+    """
+    Top 5 liberi dinamici:
+    - segue il ruolo selezionato nella sezione Asta;
+    - ordina per tetto di spesa consigliato / % budget;
+    - mostra solo le informazioni economiche davvero utili.
+    """
+    if role not in {"P", "D", "C", "A"}:
+        return
+
+    role_titles = {
+        "P": "Portieri",
+        "D": "Difensori",
+        "C": "Centrocampisti",
+        "A": "Attaccanti",
+    }
+
     st.sidebar.markdown(
-        """
+        f"""
         <style>
-        .top5-title {
+        .top5-title {{
             display:flex;
             align-items:center;
             gap:8px;
@@ -8147,34 +8267,34 @@ def render_top5(
             font-size:1.02rem;
             font-weight:900;
             color:#172033 !important;
-        }
-        .top5-stack {
+        }}
+        .top5-stack {{
             display:flex;
             flex-direction:column;
             gap:8px;
             margin-bottom:.65rem;
-        }
-        .top5-card {
+        }}
+        .top5-card {{
             display:grid;
-            grid-template-columns:38px minmax(0,1fr) auto;
+            grid-template-columns:36px minmax(0,1fr) auto;
             grid-template-areas:
-                "rank name rating"
-                "rank meta price";
-            gap:2px 9px;
+                "rank name spend"
+                "rank team pct";
+            gap:3px 9px;
             align-items:center;
             padding:10px 11px;
             border:1px solid #cfe0f8;
             border-radius:13px;
             background:linear-gradient(145deg,#ffffff 0%,#f1f6ff 100%);
             box-shadow:0 4px 12px rgba(30,64,175,.055);
-        }
-        .top5-card:first-child {
+        }}
+        .top5-card:first-child {{
             border-color:#93c5fd;
             background:
                 radial-gradient(circle at 92% 5%,rgba(59,130,246,.13),transparent 30%),
                 linear-gradient(145deg,#ffffff 0%,#edf5ff 100%);
-        }
-        .top5-rank {
+        }}
+        .top5-rank {{
             grid-area:rank;
             width:30px;
             height:30px;
@@ -8186,122 +8306,115 @@ def render_top5(
             color:#ffffff !important;
             font-weight:900;
             font-size:.82rem;
-        }
-        .top5-name {
+        }}
+        .top5-name {{
             grid-area:name;
             min-width:0;
             overflow:hidden;
             text-overflow:ellipsis;
             white-space:nowrap;
             font-weight:900;
-            font-size:.90rem;
+            font-size:.88rem;
             color:#172033 !important;
-        }
-        .top5-meta {
-            grid-area:meta;
-            display:flex;
-            align-items:center;
-            gap:5px;
-            min-width:0;
-            font-size:.72rem;
+        }}
+        .top5-team {{
+            grid-area:team;
+            font-size:.70rem;
             font-weight:750;
             color:#64748b !important;
-        }
-        .top5-role {
-            display:inline-flex;
-            align-items:center;
-            justify-content:center;
-            padding:1px 6px;
-            border-radius:6px;
-            background:#e8f0ff;
-            color:#315a9e !important;
-            font-weight:850;
-        }
-        .top5-tier {
-            overflow:hidden;
-            text-overflow:ellipsis;
+        }}
+        .top5-spend {{
+            grid-area:spend;
             white-space:nowrap;
-        }
-        .top5-rating {
-            grid-area:rating;
-            white-space:nowrap;
-            font-size:.92rem;
+            font-size:.90rem;
             font-weight:950;
-            color:#b45309 !important;
-        }
-        .top5-price {
-            grid-area:price;
-            white-space:nowrap;
-            font-size:.78rem;
-            font-weight:850;
             color:#1d4ed8 !important;
-        }
-        .top5-pref {
-            color:#f59e0b !important;
-        }
+            text-align:right;
+        }}
+        .top5-pct {{
+            grid-area:pct;
+            white-space:nowrap;
+            font-size:.73rem;
+            font-weight:850;
+            color:#334155 !important;
+            text-align:right;
+        }}
         </style>
-        <div class="top5-title">🔥 <span>Top 5 liberi</span></div>
+        <div class="top5-title">🔥 <span>Top 5 {role_titles[role]} liberi</span></div>
         """,
         unsafe_allow_html=True,
     )
 
     players = load_players(role=role)
     available = [
-        player for player in players
+        player
+        for player in players
         if player["id"] not in bought_player_ids
     ]
-
-    goalkeeper_ranking = (
-        build_current_goalkeeper_ranking(state)
-        if state
-        else ALL_GOALKEEPER_RANKING
-    )
-    custom_modifiers = load_custom_modifiers()
-
-    available.sort(
-        key=lambda player: calculate_player_rating(
-            player,
-            preferred_players,
-            custom_modifiers,
-            goalkeeper_ranking,
-        ),
-        reverse=True,
-    )
 
     if not available:
         st.sidebar.info("Nessun giocatore disponibile.")
         return
 
-    cards = ['<div class="top5-stack">']
+    if state is None:
+        return
 
-    for index, player in enumerate(available[:5], start=1):
-        rating = calculate_player_rating(
+    target_team = get_my_team_name_from_state(state)
+    if not target_team:
+        return
+
+    custom_modifiers = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+
+    rows: list[dict[str, Any]] = []
+    for player in available:
+        details = calculate_player_rating_detailed(
             player,
             preferred_players,
             custom_modifiers,
             goalkeeper_ranking,
         )
-        tier = get_roster_tier(rating)
-        preferred = player["id"] in preferred_players
+        spend = get_player_budget_spend_focus(
+            player,
+            details,
+            state,
+            target_team,
+            total_budget=500,
+        )
+        rows.append(
+            {
+                "player": player,
+                "spend": spend,
+            }
+        )
+
+    # Ordinamento economico: previsione di spesa prima, % budget come tie-break.
+    rows.sort(
+        key=lambda row: (
+            int(row["spend"].get("recommended_cap") or 0),
+            float(row["spend"].get("pct_total_budget") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    cards = ['<div class="top5-stack">']
+
+    for index, row in enumerate(rows[:5], start=1):
+        player = row["player"]
+        spend = row["spend"]
 
         player_name = escape(str(player.get("name") or "—"))
-        player_role = escape(str(player.get("role") or "—"))
         player_team = escape(str(player.get("team_nfl") or "—"))
-        list_price = int(player.get("list_price") or 0)
-        pref_html = '<span class="top5-pref">★</span>' if preferred else ""
+        recommended_cap = int(spend.get("recommended_cap") or 1)
+        pct = float(spend.get("pct_total_budget") or 0.0)
 
         card_html = (
             '<div class="top5-card">'
             f'<div class="top5-rank">{index}</div>'
-            f'<div class="top5-name">{player_name} {pref_html}</div>'
-            f'<div class="top5-rating">⭐ {rating:.1f}</div>'
-            '<div class="top5-meta">'
-            f'<span class="top5-role">{player_role}</span>'
-            f'<span>{player_team}</span>'
-            '<span>·</span>'
-            f'<span class="top5-tier">{escape(tier)}</span>'
-            '</div>'
-            f'<div class="top5-price">💎 {list_price} cr</div>'
+            f'<div class="top5-name">{player_name}</div>'
+            f'<div class="top5-team">{player_team}</div>'
+            f'<div class="top5-spend">{recommended_cap} cr</div>'
+            f'<div class="top5-pct">{pct:.1f}% budget</div>'
             '</div>'
         )
         cards.append(card_html)
@@ -11050,6 +11163,17 @@ def main() -> None:
     )
 
     sidebar_role = get_my_team_draft_role(state)
+
+    # La Top 5 segue il ruolo che l'utente sta guardando nell'Asta.
+    # Lo smart next purchase continua invece a seguire il prossimo ruolo
+    # necessario alla costruzione della rosa.
+    selected_sidebar_role = sidebar_role
+    if active_page == "Asta":
+        selected_role_label = st.session_state.get("main_role_select")
+        selected_role = ROLE_LABELS.get(selected_role_label)
+        if selected_role in {"P", "D", "C", "A"}:
+            selected_sidebar_role = selected_role
+
     if not auction_finished and sidebar_role:
         render_smart_next_purchase_card(
             state,
@@ -11057,8 +11181,10 @@ def main() -> None:
             preferred_players,
             sidebar_role,
         )
+
+    if not auction_finished and selected_sidebar_role:
         render_top5(
-            sidebar_role,
+            selected_sidebar_role,
             state.bought_player_ids,
             preferred_players,
             state,
