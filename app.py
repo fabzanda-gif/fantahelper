@@ -5691,7 +5691,23 @@ def calculate_player_rating_detailed(
         else team_mods["def"]
     )
 
-    rigorista_mod = 0.8 if player.get("rigorista") else 0.0
+    # Rigoristi: utilizziamo anche la gerarchia della fonte Fantacalcio.
+    # Il primo rigorista vale sensibilmente più di una seconda/terza scelta.
+    try:
+        rigorista_order = int(player.get("rigorista_ordine")) if player.get("rigorista_ordine") is not None else None
+    except (TypeError, ValueError):
+        rigorista_order = None
+
+    if rigorista_order == 1:
+        rigorista_mod = 0.8
+    elif rigorista_order == 2:
+        rigorista_mod = 0.45
+    elif rigorista_order == 3:
+        rigorista_mod = 0.20
+    elif player.get("rigorista"):
+        rigorista_mod = 0.30
+    else:
+        rigorista_mod = 0.0
     cartellini_mod = -0.3 if player.get("propensione_cartellini") == "A rischio malus" else 0.0
     rookie_mod = -0.3 if player.get("primo_anno_serie_a") else 0.0
     # Il preferito proveniente dalla sessione resta compatibile.
@@ -6770,7 +6786,12 @@ def build_smart_next_purchase_recommendation(
     if credit_strategy == "Bonus" and role in {"C", "A"}:
         rows.sort(
             key=lambda r: (
-                1 if r["player"].get("rigorista") else 0,
+                (
+                    4 - int(r["player"].get("rigorista_ordine"))
+                    if str(r["player"].get("rigorista_ordine") or "").isdigit()
+                    and int(r["player"].get("rigorista_ordine")) in {1, 2, 3}
+                    else 1 if r["player"].get("rigorista") else 0
+                ),
                 r["details"]["final_rating"],
                 r["value"],
                 -r["estimate"]["estimated_price"],
@@ -7475,6 +7496,196 @@ def render_goalkeeper_purchase_alerts(
             st.info(content)
 
 
+
+def _fantasy_team_owned_players(
+    target_team: str,
+    state: AuctionState,
+) -> list[dict[str, Any]]:
+    return [
+        purchase.get("players") or {}
+        for purchase in state.team_purchases_map.get(target_team, [])
+        if purchase.get("players")
+    ]
+
+
+def _find_ballot_partner_players(
+    player: dict[str, Any],
+    all_players: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Risoluzione conservativa dei nomi in ballottaggio_con nella stessa squadra."""
+    raw = str(player.get("ballottaggio_con") or "").strip()
+    if not raw:
+        return []
+
+    team = str(player.get("team_nfl") or "").strip().upper()
+    partner_tokens = [
+        token.strip()
+        for token in re.split(r"[,;/|]+", raw)
+        if token.strip()
+    ]
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for token in partner_tokens:
+        token_norm = normalize_string(token)
+        candidates = [
+            candidate
+            for candidate in all_players
+            if str(candidate.get("team_nfl") or "").strip().upper() == team
+            and str(candidate.get("id")) != str(player.get("id"))
+        ]
+
+        exact = [
+            candidate
+            for candidate in candidates
+            if normalize_string(str(candidate.get("name") or "")) == token_norm
+        ]
+        if exact:
+            match = exact[0]
+        else:
+            ranked = sorted(
+                candidates,
+                key=lambda candidate: _name_similarity(
+                    token,
+                    str(candidate.get("name") or ""),
+                ),
+                reverse=True,
+            )
+            match = ranked[0] if ranked and _name_similarity(
+                token,
+                str(ranked[0].get("name") or ""),
+            ) >= 0.78 else None
+
+        if match is not None:
+            key = str(match.get("id") or match.get("name"))
+            if key not in seen:
+                seen.add(key)
+                result.append(match)
+
+    return result
+
+
+def render_ballot_and_penalty_alerts(
+    selected_player: dict[str, Any],
+    target_team: str,
+    state: AuctionState,
+) -> None:
+    """
+    Alert immediati nell'Asta.
+    - Un giocatore in ballottaggio è sconsigliato da solo.
+    - Se possiedi già il compagno di ballottaggio, la coppia è coperta.
+    - Se il compagno è già stato preso da un'altra fantasquadra, alert critico.
+    - Mostra anche la gerarchia rigoristi aggiornata.
+    """
+    # ---------- RIGORISTI ----------
+    try:
+        rig_order = (
+            int(selected_player.get("rigorista_ordine"))
+            if selected_player.get("rigorista_ordine") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        rig_order = None
+
+    if rig_order == 1:
+        st.success(
+            "🎯 **Primo rigorista** — bonus importante: questa informazione "
+            "entra anche nel rating e nella priorità della strategia Bonus."
+        )
+    elif rig_order == 2:
+        st.info(
+            "🎯 **Secondo rigorista** — valore aggiunto, ma con meno certezza "
+            "rispetto alla prima scelta."
+        )
+    elif rig_order == 3:
+        st.info(
+            "🎯 **Terzo rigorista** — bonus potenziale marginale; non va valutato "
+            "come un rigorista principale."
+        )
+    elif selected_player.get("rigorista"):
+        st.info(
+            "🎯 **Rigorista segnalato**, ma senza ordine affidabile nella gerarchia."
+        )
+
+    # ---------- BALLOTTAGGI ----------
+    raw_ballot = str(selected_player.get("ballottaggio_con") or "").strip()
+    is_ballot = (
+        str(selected_player.get("status_titolarita") or "").strip() == "Ballottaggio"
+        or bool(raw_ballot)
+    )
+    if not is_ballot:
+        return
+
+    all_players = load_players()
+    partners = _find_ballot_partner_players(selected_player, all_players)
+    owned = _fantasy_team_owned_players(target_team, state)
+    owned_ids = {str(player.get("id")) for player in owned if player.get("id") is not None}
+
+    if partners:
+        partner_names = ", ".join(
+            str(partner.get("name") or "")
+            for partner in partners
+        )
+        owned_partners = [
+            partner for partner in partners
+            if str(partner.get("id")) in owned_ids
+        ]
+
+        if owned_partners:
+            covered_names = ", ".join(
+                str(partner.get("name") or "")
+                for partner in owned_partners
+            )
+            st.success(
+                f"✅ **Ballottaggio coperto** — {selected_player.get('name')} è in "
+                f"ballottaggio con **{partner_names}** e {target_team} possiede già "
+                f"**{covered_names}**. La coppia riduce il rischio di restare senza titolare."
+            )
+            return
+
+        # Capire se il/i compagno/i sono ancora liberi oppure già di un'altra fantasquadra.
+        roster_owner_by_id: dict[str, str] = {}
+        for fantasy_team, purchases in state.team_purchases_map.items():
+            for purchase in purchases:
+                p = purchase.get("players") or {}
+                if p.get("id") is not None:
+                    roster_owner_by_id[str(p.get("id"))] = fantasy_team
+
+        unavailable = [
+            partner
+            for partner in partners
+            if str(partner.get("id")) in roster_owner_by_id
+            and roster_owner_by_id[str(partner.get("id"))] != target_team
+        ]
+
+        if len(unavailable) == len(partners):
+            owners = ", ".join(
+                f"{partner.get('name')} → {roster_owner_by_id.get(str(partner.get('id')))}"
+                for partner in unavailable
+            )
+            st.error(
+                f"🚨 **Ballottaggio non copribile: sconsigliato.** "
+                f"{selected_player.get('name')} è in ballottaggio con **{partner_names}**, "
+                f"ma il/i compagno/i risultano già acquistati ({owners}). "
+                "Rischi di spendere uno slot per un possibile panchinaro senza poter completare la coppia."
+            )
+        else:
+            st.warning(
+                f"⚠️ **Ballottaggio: sconsigliato singolarmente.** "
+                f"{selected_player.get('name')} è in ballottaggio con **{partner_names}**. "
+                f"Compralo solo se {target_team} ha già il compagno oppure se prevedi "
+                "di acquistare anche l'altro giocatore della coppia."
+            )
+    else:
+        partner_text = f" con **{raw_ballot}**" if raw_ballot else ""
+        st.warning(
+            f"⚠️ **Giocatore in ballottaggio: sconsigliato singolarmente.** "
+            f"{selected_player.get('name')} risulta in ballottaggio{partner_text}. "
+            "Prima di acquistarlo assicurati di poter coprire lo stesso slot."
+        )
+
+
 def render_manual_purchase(
     teams_df: pd.DataFrame,
     state: AuctionState,
@@ -7619,6 +7830,10 @@ def render_manual_purchase(
 
     # Alert immediati sui portieri, riferiti alla squadra acquirente selezionata.
     render_goalkeeper_purchase_alerts(selected_player, target_team, state)
+
+    # Ballottaggi e rigoristi provengono dal dataset Fantacalcio aggiornato:
+    # sono alert visibili prima di confermare qualsiasi acquisto.
+    render_ballot_and_penalty_alerts(selected_player, target_team, state)
 
     spend_focus = get_player_budget_spend_focus(selected_player, estimate)
     render_player_spend_focus_card(spend_focus)
