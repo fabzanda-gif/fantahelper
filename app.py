@@ -6144,7 +6144,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
 # MODELLO ECONOMICO v89 — % BUDGET
 # ============================================================
 
-PLAYER_BUDGET_MODEL_VERSION = "v93_adaptive_auction_1"
+PLAYER_BUDGET_MODEL_VERSION = "v94_role_budget_phase_1"
 
 # Curva economica di riferimento per ruolo.
 # Ogni coppia è (rating, % budget). Il valore viene interpolato.
@@ -7719,11 +7719,18 @@ def get_adaptive_role_budget_context(
     role: str,
 ) -> dict[str, Any]:
     """
-    Capisce se nel ruolo possiamo ancora inseguire premium oppure dobbiamo
-    passare a una fase di recupero / low budget.
+    Contesto asta v94.
 
-    Il riferimento è il budget ruolo della strategia scelta, confrontato con
-    quanto è stato DAVVERO speso e con quanti slot restano.
+    Non giudica lo sforamento solo da "quanto ho già speso", perché un primo
+    slot TOP può assorbire volontariamente gran parte del budget ruolo.
+
+    La domanda principale è:
+        QUANTI CREDITI RESTANO PER OGNI SLOT DEL RUOLO?
+
+    Questo distingue tre fasi:
+    - In linea: posso ancora comprare giocatori coerenti col budget ruolo.
+    - Prudente: devo privilegiare value/titolari, ma non necessariamente da 1.
+    - Recupero forte: devo rientrare; qui compaiono anche target 1–3 cr.
     """
     strategy = current_credit_strategy()
     allocation = STRATEGY_BUDGET_ALLOCATIONS.get(
@@ -7750,76 +7757,78 @@ def get_adaptive_role_budget_context(
     slots_left_role = max(0, role_limit - role_count)
 
     role_remaining = max(0, role_budget - role_spent)
-    minimum_role_reserve = slots_left_role  # 1 credito per slot.
+
+    # 1 cr deve comunque restare disponibile per ogni slot futuro.
+    minimum_role_reserve = slots_left_role
     discretionary_role_budget = max(
         0,
         role_remaining - minimum_role_reserve,
     )
 
-    spent_share = (
-        role_spent / role_budget
-        if role_budget > 0
+    avg_remaining_per_slot = (
+        role_remaining / slots_left_role
+        if slots_left_role > 0
         else 0.0
     )
-    filled_share = (
-        role_count / role_limit
-        if role_limit > 0
-        else 1.0
-    )
 
-    # Recupero forte: abbiamo consumato molto budget ruolo ma coperto pochi slot.
+    # Fasce diverse per ruolo: in A/C è normale avere medie più alte.
+    prudent_threshold = {
+        "D": 4.0,
+        "C": 7.0,
+        "A": 9.0,
+    }.get(role, 4.0)
+
+    recovery_threshold = {
+        "D": 2.0,
+        "C": 3.0,
+        "A": 4.0,
+    }.get(role, 2.0)
+
     recovery_mode = (
         role in {"D", "C", "A"}
         and slots_left_role > 0
-        and (
-            (spent_share >= 0.65 and filled_share <= 0.50)
-            or (spent_share >= 0.80 and filled_share < 0.75)
-        )
+        and avg_remaining_per_slot <= recovery_threshold
     )
 
-    # Modalità prudente: non siamo ancora in emergenza, ma il ruolo è già caro.
     cautious_mode = (
         role in {"D", "C", "A"}
         and slots_left_role > 0
         and not recovery_mode
-        and spent_share >= 0.45
-        and filled_share <= 0.65
+        and avg_remaining_per_slot <= prudent_threshold
     )
 
     if recovery_mode:
-        phase = "Recupero budget"
-    elif cautious_mode:
-        phase = "Prudente"
-    else:
-        phase = "Normale"
-
-    # Quanto possiamo permetterci sul PROSSIMO slot senza compromettere il ruolo.
-    if slots_left_role > 0:
-        sustainable_avg = role_remaining / slots_left_role
-    else:
-        sustainable_avg = 0.0
-
-    if recovery_mode:
-        # Consenti un piccolo margine sopra la media sostenibile, ma evita nuovi TOP.
-        next_target_cap = max(
-            2,
-            min(
-                10,
-                int(round(max(1.0, sustainable_avg) * 2.0)),
-            ),
-        )
-    elif cautious_mode:
-        next_target_cap = max(
-            4,
-            min(
-                18,
-                int(round(max(1.0, sustainable_avg) * 2.4)),
-            ),
-        )
-    else:
+        phase = "Recupero forte"
+        # Non mostriamo SOLO giocatori da 1: il target arriva circa alla media
+        # residua + un piccolo margine, purché resti 1 cr per gli altri slot.
         next_target_cap = max(
             1,
-            int(round(max(1.0, sustainable_avg) * 3.0)),
+            min(
+                6 if role == "D" else 10,
+                int(round(avg_remaining_per_slot + 1.0)),
+                max(1, discretionary_role_budget + 1),
+            ),
+        )
+    elif cautious_mode:
+        phase = "Prudente"
+        next_target_cap = max(
+            3,
+            min(
+                12 if role == "D" else (20 if role == "C" else 28),
+                int(round(avg_remaining_per_slot * 1.6)),
+                max(1, discretionary_role_budget + 1),
+            ),
+        )
+    else:
+        phase = "In linea"
+        # Possiamo spendere più della media su un buon profilo, mantenendo però
+        # 1 credito per ciascun altro slot del ruolo.
+        next_target_cap = max(
+            1,
+            min(
+                max(1, role_remaining - max(0, slots_left_role - 1)),
+                int(round(max(1.0, avg_remaining_per_slot) * 2.4)),
+            ),
         )
 
     return {
@@ -7832,9 +7841,7 @@ def get_adaptive_role_budget_context(
         "slots_left_role": slots_left_role,
         "minimum_role_reserve": minimum_role_reserve,
         "discretionary_role_budget": discretionary_role_budget,
-        "spent_share": spent_share,
-        "filled_share": filled_share,
-        "sustainable_avg": sustainable_avg,
+        "avg_remaining_per_slot": avg_remaining_per_slot,
         "next_target_cap": next_target_cap,
         "phase": phase,
         "recovery_mode": recovery_mode,
@@ -7843,16 +7850,47 @@ def get_adaptive_role_budget_context(
     }
 
 
+def _player_is_currently_usable_starter(
+    player: dict[str, Any],
+) -> bool:
+    """
+    Filtro prudente per le proposte contestuali.
+
+    Per D/C/A proponiamo solo Titolari reali.
+    Escludiamo inoltre eventuali record con affidabilità fisica esplicitamente
+    negativa (se il DB contiene questo dato).
+
+    Nota: per intercettare infortuni non registrati nel DB serve una futura
+    sorgente disponibilità/infortuni; questa funzione non inventa il dato.
+    """
+    if str(player.get("status_titolarita") or "").strip() != "Titolare":
+        return False
+
+    physical = normalize_string(
+        str(player.get("affidabilita_fisica") or "")
+    )
+    bad_physical_tokens = {
+        "infortunato",
+        "indisponibile",
+        "lungodegente",
+        "out",
+    }
+    if any(token in physical for token in bad_physical_tokens):
+        return False
+
+    return True
+
+
 def _adaptive_low_budget_candidate(
     row: dict[str, Any],
     cap: int,
     recovery_mode: bool,
 ) -> bool:
     """
-    Profilo adatto a una fase low-budget:
-    - titolare;
-    - rating almeno decente;
+    Profilo adatto al budget attuale:
+    - SOLO titolare;
     - niente ballottaggio singolo;
+    - rendimento minimo decente;
     - prezzo entro il tetto dinamico.
     """
     player = row["player"]
@@ -7864,10 +7902,10 @@ def _adaptive_low_budget_candidate(
         or bool(str(player.get("ballottaggio_con") or "").strip())
     )
 
-    minimum_rating = 6.2 if recovery_mode else 6.5
+    minimum_rating = 6.0 if recovery_mode else 6.5
 
     return (
-        str(player.get("status_titolarita") or "") == "Titolare"
+        _player_is_currently_usable_starter(player)
         and not is_ballot
         and rating >= minimum_rating
         and price <= cap
@@ -8269,24 +8307,17 @@ def build_smart_next_purchase_recommendation(
             budget_context["recovery_mode"]
             or budget_context["cautious_mode"]
         ):
-            adaptive_rows = []
-            for p in available:
-                row = enrich(
+            adaptive_rows = [
+                enrich(
                     p,
-                    (
-                        "Hai già investito molto in questo ruolo rispetto agli slot "
-                        "coperti: ora cerco titolari affidabili a basso costo per "
-                        "proteggere il budget dei prossimi reparti."
-                        if budget_context["recovery_mode"]
-                        else
-                        "Il ruolo sta assorbendo una quota importante del budget: "
-                        "meglio privilegiare titolari solidi con costo contenuto."
-                    ),
-                    120 if budget_context["recovery_mode"] else 95,
+                    "Ricerca contestuale basata sul budget residuo del ruolo.",
+                    120,
                 )
-                adaptive_rows.append(row)
+                for p in available
+            ]
 
             target_cap = int(budget_context["next_target_cap"])
+
             suitable = [
                 row
                 for row in adaptive_rows
@@ -8297,12 +8328,15 @@ def build_smart_next_purchase_recommendation(
                 )
             ]
 
-            # Se il cap è troppo severo, allarghiamo gradualmente ma restiamo low budget.
-            if not suitable:
-                relaxed_cap = min(
-                    15 if budget_context["recovery_mode"] else 22,
-                    max(target_cap + 4, int(round(target_cap * 1.6))),
-                )
+            # Se nessuno rientra nel cap, allarghiamo gradualmente MA:
+            # - sempre solo titolari;
+            # - mai ballottaggi singoli;
+            # - niente ritorno ai TOP fuori budget.
+            relaxed_cap = target_cap
+            while not suitable and relaxed_cap < (
+                10 if budget_context["recovery_mode"] else 22
+            ):
+                relaxed_cap += 2
                 suitable = [
                     row
                     for row in adaptive_rows
@@ -8314,26 +8348,30 @@ def build_smart_next_purchase_recommendation(
                 ]
 
             if suitable:
-                # In recupero: prima efficienza e titolarità, poi rating.
+                # Non premiamo il più economico in assoluto.
+                # Vogliamo il MIGLIOR titolare che possiamo permetterci.
+                # A parità di qualità preferiamo chi si avvicina al target budget.
                 suitable.sort(
                     key=lambda row: (
-                        float(row["details"]["final_rating"])
-                        / max(1, int(row["estimate"]["estimated_price"])),
                         float(row["details"]["final_rating"]),
-                        -int(row["estimate"]["estimated_price"]),
+                        int(row["estimate"]["estimated_price"]),
                     ),
                     reverse=True,
                 )
                 best = suitable[0]
                 best["reason"] = (
-                    f"Modalità {budget_context['phase']}: hai speso "
-                    f"{budget_context['role_spent']}/{budget_context['role_budget']} cr "
-                    f"del budget {role} con {budget_context['role_count']}/"
-                    f"{budget_context['role_limit']} slot coperti. "
-                    f"Ora cerco titolari di rendimento decente intorno a "
-                    f"≤ {target_cap} cr."
+                    f"Modalità {budget_context['phase']}: nel ruolo {role} "
+                    f"restano {budget_context['role_remaining']} cr per "
+                    f"{budget_context['slots_left_role']} slot "
+                    f"(~{budget_context['avg_remaining_per_slot']:.1f} cr/slot). "
+                    f"Ti propongo quindi un titolare affidabile entro circa "
+                    f"{relaxed_cap} cr, non semplicemente il più economico."
                 )
                 return best
+
+            # Se non esistono titolari validi nel range, non suggeriamo un TOP
+            # fuori budget: meglio nessun consiglio che un consiglio incoerente.
+            return None
 
     # 4) Movement roles.
     starters_owned = sum(
@@ -8576,9 +8614,10 @@ def render_top5(
         st.sidebar.markdown(
             (
                 f'<div class="top5-context">'
-                f'{budget_context["phase"]}: {budget_context["role_spent"]}/'
-                f'{budget_context["role_budget"]} cr spesi · '
-                f'{budget_context["role_count"]}/{budget_context["role_limit"]} slot · '
+                f'{budget_context["phase"]}: '
+                f'{budget_context["role_remaining"]} cr rimasti per '
+                f'{budget_context["slots_left_role"]} slot · '
+                f'~{budget_context["avg_remaining_per_slot"]:.1f} cr/slot · '
                 f'target prossimo acquisto ≲ {budget_context["next_target_cap"]} cr'
                 f'</div>'
             ),
@@ -8665,17 +8704,32 @@ def render_top5(
 
         if filtered:
             rows = filtered
+        else:
+            # Nessun profilo valido nel cap: manteniamo comunque SOLO titolari
+            # non in ballottaggio, ordinati per costo crescente, invece di
+            # ripopolare la lista con riserve/infortunati.
+            rows = [
+                row
+                for row in rows
+                if _player_is_currently_usable_starter(row["player"])
+                and not bool(
+                    str(row["player"].get("ballottaggio_con") or "").strip()
+                )
+            ]
+            rows.sort(
+                key=lambda row: (
+                    int(row["spend"].get("recommended_cap") or 999),
+                    -float(row["details"]["final_rating"]),
+                )
+            )
+            rows = rows[:5]
 
-        # Low budget = miglior rendimento per credito, non prezzo più alto.
+        # In modalità adattiva mostriamo il MIGLIOR titolare acquistabile,
+        # non il giocatore da 1 con il rapporto rating/prezzo più alto.
         rows.sort(
             key=lambda row: (
-                float(row["details"]["final_rating"])
-                / max(
-                    1,
-                    int(row["spend"].get("recommended_cap") or 1),
-                ),
                 float(row["details"]["final_rating"]),
-                -int(row["spend"].get("recommended_cap") or 1),
+                int(row["spend"].get("recommended_cap") or 1),
             ),
             reverse=True,
         )
