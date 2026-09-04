@@ -5226,7 +5226,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
         return None
 
     player_id = str(player.get("id") or "").strip()
-    player_name = normalize_name(str(player.get("name") or ""))
+    player_name = normalize_string(str(player.get("name") or ""))
     player_team = str(player.get("team_nfl") or "").strip().upper()
     player_role = str(player.get("role") or "").strip().upper()
 
@@ -5237,7 +5237,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
     exact_matches: list[dict[str, Any]] = []
     loose_matches: list[dict[str, Any]] = []
     for note in notes:
-        note_name = normalize_name(str(note.get("player_name") or ""))
+        note_name = normalize_string(str(note.get("player_name") or ""))
         note_team = _strategy_note_source_team(note)
         note_role = str(note.get("role") or "").strip().upper()
         if note_name != player_name:
