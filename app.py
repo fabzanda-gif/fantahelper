@@ -6612,7 +6612,7 @@ def get_player_budget_spend_focus(
         pct += (
             BALLOT_COVERED_PCT_MALUS
             if covered
-            else BALLOT_SINGLE_PCT_MALUS
+            else BALLLOT_SINGLE_PCT_MALUS
         )
 
     pct = max(0.2, min(32.0, pct))
