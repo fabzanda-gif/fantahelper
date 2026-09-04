@@ -5806,6 +5806,8 @@ def render_fantacalcio_master_validation() -> None:
                 use_container_width=True,
             )
 
+    selected_transfers: list[dict[str, Any]] = []
+
     if transfers:
         with st.expander(
             f"🔄 Possibili trasferimenti ({len(transfers)})",
@@ -5813,13 +5815,100 @@ def render_fantacalcio_master_validation() -> None:
         ):
             st.caption(
                 "Stesso nome univoco nel DB ma squadra diversa. "
-                "Questi NON vengono applicati automaticamente."
+                "Spunta solo i trasferimenti che vuoi confermare."
             )
-            st.dataframe(
-                pd.DataFrame(transfers),
+
+            transfer_editor_df = pd.DataFrame(
+                [
+                    {
+                        "Applica": False,
+                        "Giocatore": row.get("new_name") or row.get("old_name"),
+                        "Da": row.get("old_team"),
+                        "A": row.get("new_team"),
+                        "Ruolo": row.get("role"),
+                        "QA": row.get("new_quotazione_fc"),
+                        "FVM": row.get("new_fvm_fc"),
+                        "_player_id": row.get("player_id"),
+                    }
+                    for row in transfers
+                ]
+            )
+
+            edited_transfers = st.data_editor(
+                transfer_editor_df,
                 hide_index=True,
                 use_container_width=True,
+                disabled=[
+                    "Giocatore",
+                    "Da",
+                    "A",
+                    "Ruolo",
+                    "QA",
+                    "FVM",
+                    "_player_id",
+                ],
+                column_config={
+                    "Applica": st.column_config.CheckboxColumn(
+                        "Applica",
+                        help="Conferma questo trasferimento",
+                        default=False,
+                    ),
+                    "_player_id": None,
+                },
+                key="fc_master_transfer_editor",
             )
+
+            selected_ids = {
+                str(row["_player_id"])
+                for _, row in edited_transfers.iterrows()
+                if bool(row.get("Applica"))
+            }
+
+            selected_transfers = [
+                row
+                for row in transfers
+                if str(row.get("player_id")) in selected_ids
+            ]
+
+            if selected_transfers:
+                st.success(
+                    f"Hai selezionato {len(selected_transfers)} trasferimenti."
+                )
+
+                if st.button(
+                    f"✅ Applica {len(selected_transfers)} trasferimenti selezionati",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not safe_source,
+                    key="fc_master_apply_selected_transfers",
+                ):
+                    transfer_validation = {
+                        "safe_updates": [],
+                        "transfers": selected_transfers,
+                    }
+                    updated, errors = apply_fantacalcio_master_safe_updates(
+                        transfer_validation,
+                        include_transfers=True,
+                    )
+                    if errors:
+                        st.error(
+                            f"Aggiornati {updated} trasferimenti · "
+                            f"Errori {len(errors)}"
+                        )
+                        st.write(errors)
+                    else:
+                        st.success(
+                            f"Trasferimenti applicati: {updated}. "
+                            "Squadra, nome, QA e FVM sono stati aggiornati "
+                            "direttamente in public.players."
+                        )
+                        st.session_state.pop("fc_master_validation", None)
+                        st.session_state.pop("fc_master_transfer_editor", None)
+                        st.rerun()
+            else:
+                st.info(
+                    "Spunta almeno un trasferimento per abilitarne l'applicazione."
+                )
 
     if duplicates:
         with st.expander(
@@ -5892,8 +5981,13 @@ def render_fantacalcio_master_validation() -> None:
     c1, c2 = st.columns(2)
 
     with c1:
+        safe_button_label = (
+            f"✅ Applica aggiornamenti sicuri ({len(safe_updates)})"
+            if safe_updates
+            else "✅ Nessun aggiornamento sicuro da applicare"
+        )
         if st.button(
-            "✅ Applica aggiornamenti sicuri",
+            safe_button_label,
             use_container_width=True,
             type="primary",
             disabled=not safe_source or not safe_updates,
