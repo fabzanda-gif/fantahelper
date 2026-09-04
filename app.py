@@ -2318,28 +2318,49 @@ def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
     Estrae dall'articolo Fantacalcio:
     XI probabile, ballottaggi, rigoristi e calci da fermo.
 
-    Il parser lavora sugli H2 delle squadre e sui blocchi testuali successivi,
-    quindi non dipende dalle classi CSS del sito.
+    Parser robusto:
+    - individua ogni heading di squadra;
+    - raccoglie TUTTO il testo fino al successivo h2/h3, anche se i paragrafi
+      sono annidati in wrapper/div differenti;
+    - non dipende dalle classi CSS del sito.
     """
     soup = BeautifulSoup(html, "html.parser")
     parsed: dict[str, dict[str, Any]] = {}
 
-    headings = soup.find_all(["h2", "h3"])
-    for heading in headings:
+    valid_codes = set(TEAM_MAP.values())
+
+    for heading in soup.find_all(["h2", "h3"]):
         team_heading = heading.get_text(" ", strip=True)
         team_code = _team_code_from_heading(team_heading)
-        if team_code not in set(TEAM_MAP.values()):
+        if team_code not in valid_codes:
             continue
 
         pieces: list[str] = []
-        node = heading.find_next_sibling()
-        while node is not None:
-            if getattr(node, "name", None) in {"h2", "h3"}:
+        for node in heading.next_elements:
+            if node is heading:
+                continue
+
+            node_name = getattr(node, "name", None)
+            if node_name in {"h2", "h3"}:
                 break
-            text = node.get_text(" ", strip=True) if hasattr(node, "get_text") else ""
-            if text:
+
+            # Prendiamo solo blocchi testuali significativi per evitare
+            # duplicazioni da ogni singolo nodo figlio.
+            if node_name not in {"p", "div", "li"}:
+                continue
+
+            text = node.get_text(" ", strip=True)
+            if not text:
+                continue
+
+            wanted = (
+                "Probabile formazione" in text
+                or "Ballottaggi:" in text
+                or "Rigoristi:" in text
+                or "Calci da fermo:" in text
+            )
+            if wanted and text not in pieces:
                 pieces.append(text)
-            node = node.find_next_sibling()
 
         block = "\n".join(pieces)
         if "Probabile formazione" not in block:
@@ -2367,7 +2388,6 @@ def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
         )
 
         formation_text = formation_match.group(1) if formation_match else ""
-        # XI: i ";" dividono i reparti, le virgole i giocatori.
         starters: list[str] = []
         for part in re.split(r"[;,]", formation_text):
             name = _clean_source_player_name(part)
@@ -2376,7 +2396,11 @@ def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
 
         ballot_groups: list[list[str]] = []
         ballot_text = ballot_match.group(1) if ballot_match else ""
+
+        # Le parentesi contengono spesso note tattiche, non nomi.
         ballot_text = re.sub(r"\([^)]*\)", "", ballot_text)
+
+        # Ogni coppia/gruppo è separato da ; oppure ,.
         for chunk in re.split(r"[;,]", ballot_text):
             names = [
                 _clean_source_player_name(name)
@@ -3568,6 +3592,349 @@ def render_uploaded_listone_checker() -> None:
 
 
 
+
+def build_fantacalcio_hierarchy_preview(
+    db_players: list[dict[str, Any]],
+    formations: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Preview dedicata SOLO a:
+    - titolarità;
+    - ballottaggi;
+    - rigoristi;
+    - calci da fermo.
+
+    Non modifica squadra, quotazione o FVM.
+    """
+    preview, unmatched = build_player_source_preview(
+        db_players,
+        formations,
+        [],
+    )
+
+    hierarchy_rows: list[dict[str, Any]] = []
+    for row in preview:
+        changed = any(
+            (
+                row.get("old_status") != row.get("new_status"),
+                bool(row.get("old_rigorista")) != bool(row.get("new_rigorista")),
+                (row.get("old_ballottaggio_con") or None)
+                != (row.get("new_ballottaggio_con") or None),
+                row.get("rigorista_ordine") is not None,
+                bool(row.get("piazzati")),
+                row.get("piazzati_ordine") is not None,
+            )
+        )
+        if changed:
+            hierarchy_rows.append(row)
+
+    hierarchy_unmatched = [
+        row
+        for row in unmatched
+        if row.get("source") in {
+            "Probabile XI",
+            "Ballottaggio",
+            "Rigoristi",
+            "Calci da fermo",
+        }
+    ]
+    return hierarchy_rows, hierarchy_unmatched
+
+
+def apply_fantacalcio_hierarchy_preview(
+    preview: list[dict[str, Any]],
+) -> tuple[int, list[str]]:
+    """
+    Scrive in public.players SOLO le gerarchie Fantacalcio.
+    Non tocca team_nfl, quotazioni o FVM.
+    """
+    updated = 0
+    errors: list[str] = []
+
+    for row in preview:
+        payload = {
+            "status_titolarita": row.get("new_status"),
+            "rigorista": bool(row.get("new_rigorista")),
+            "rigorista_ordine": row.get("rigorista_ordine"),
+            "ballottaggio_con": row.get("new_ballottaggio_con"),
+            "piazzati": bool(row.get("piazzati")),
+            "piazzati_ordine": row.get("piazzati_ordine"),
+            "data_source": PLAYER_DATA_SOURCE_LABEL,
+            "source_updated_at": row.get("source_updated_at")
+            or datetime.now(ZoneInfo("Europe/Rome")).isoformat(),
+        }
+        try:
+            (
+                supabase.table("players")
+                .update(payload)
+                .eq("id", row["player_id"])
+                .execute()
+            )
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{row.get('name')}: {exc}")
+
+    if updated:
+        invalidate_data_cache()
+    return updated, errors
+
+
+def render_fantacalcio_hierarchy_diagnostic() -> None:
+    """
+    Pannello admin per verificare cosa c'è DAVVERO in Supabase
+    e sincronizzare ballottaggi/rigoristi dalla fonte Fantacalcio.
+    """
+    st.markdown("### 🧪 Diagnostica ballottaggi e rigoristi")
+    st.caption(
+        "Fonte operativa dell'Asta: `public.players`. "
+        "Qui puoi vedere i valori realmente salvati nel DB e confrontarli "
+        "con l'articolo Fantacalcio prima di scrivere qualsiasi modifica."
+    )
+
+    db_players = load_players()
+
+    diagnostic_rows = []
+    for player in db_players:
+        ballot = str(player.get("ballottaggio_con") or "").strip()
+        try:
+            rig_order = (
+                int(player.get("rigorista_ordine"))
+                if player.get("rigorista_ordine") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            rig_order = None
+
+        try:
+            set_order = (
+                int(player.get("piazzati_ordine"))
+                if player.get("piazzati_ordine") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            set_order = None
+
+        if (
+            str(player.get("status_titolarita") or "") == "Ballottaggio"
+            or ballot
+            or player.get("rigorista")
+            or rig_order is not None
+            or player.get("piazzati")
+            or set_order is not None
+        ):
+            diagnostic_rows.append(
+                {
+                    "Giocatore": player.get("name"),
+                    "Squadra": player.get("team_nfl"),
+                    "Ruolo": player.get("role"),
+                    "Titolarità": player.get("status_titolarita"),
+                    "Ballottaggio con": ballot or None,
+                    "Rigorista": bool(player.get("rigorista")),
+                    "Ord. rigori": rig_order,
+                    "Piazzati": bool(player.get("piazzati")),
+                    "Ord. piazzati": set_order,
+                }
+            )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "In ballottaggio nel DB",
+        sum(
+            1
+            for row in diagnostic_rows
+            if row.get("Titolarità") == "Ballottaggio"
+            or row.get("Ballottaggio con")
+        ),
+    )
+    c2.metric(
+        "Rigoristi nel DB",
+        sum(1 for row in diagnostic_rows if row.get("Rigorista")),
+    )
+    c3.metric(
+        "Piazzati nel DB",
+        sum(1 for row in diagnostic_rows if row.get("Piazzati")),
+    )
+
+    # Ricerca rapida per casi tipo Kean/Douvikas.
+    search_text = st.text_input(
+        "Cerca giocatore nel DB",
+        placeholder="Es. Kean, Douvikas, Scamacca…",
+        key="hierarchy_db_search",
+    ).strip()
+
+    visible_rows = diagnostic_rows
+    if search_text:
+        needle = normalize_string(search_text)
+        visible_rows = [
+            row
+            for row in diagnostic_rows
+            if needle in normalize_string(str(row.get("Giocatore") or ""))
+        ]
+
+    if visible_rows:
+        st.dataframe(
+            pd.DataFrame(visible_rows),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "Nessun record corrispondente trovato tra ballottaggi/rigoristi/piazzati."
+        )
+
+    st.markdown("#### 🌐 Confronta con Fantacalcio")
+
+    if st.button(
+        "Leggi Fantacalcio e prepara preview gerarchie",
+        type="primary",
+        use_container_width=True,
+        key="hierarchy_fetch_preview",
+    ):
+        with st.spinner("Leggo ballottaggi, rigoristi e calci da fermo..."):
+            try:
+                formation_html = _source_http_get(
+                    FANTACALCIO_FORMATIONS_URL
+                )
+                formations = parse_fantacalcio_formations(formation_html)
+
+                preview, unmatched = build_fantacalcio_hierarchy_preview(
+                    db_players,
+                    formations,
+                )
+
+                st.session_state["hierarchy_sync_preview"] = preview
+                st.session_state["hierarchy_sync_unmatched"] = unmatched
+                st.session_state["hierarchy_sync_teams"] = sorted(
+                    formations.keys()
+                )
+                st.session_state["hierarchy_sync_at"] = datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).strftime("%d/%m/%Y %H:%M")
+            except Exception as exc:
+                st.error(f"Errore lettura Fantacalcio: {exc}")
+
+    preview = st.session_state.get("hierarchy_sync_preview") or []
+    unmatched = st.session_state.get("hierarchy_sync_unmatched") or []
+    teams_found = st.session_state.get("hierarchy_sync_teams") or []
+
+    if teams_found:
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Squadre lette", len(teams_found))
+        p2.metric("Modifiche proposte", len(preview))
+        p3.metric("Nomi da verificare", len(unmatched))
+
+        expected_codes = {
+            "ATA", "BOL", "CAG", "COM", "FIO", "FRO", "GEN", "INT", "JUV",
+            "LAZ", "LEC", "MIL", "MON", "NAP", "PAR", "ROM", "SAS", "TOR",
+            "UDI", "VEN",
+        }
+        missing_codes = sorted(expected_codes - set(teams_found))
+        if missing_codes:
+            st.error(
+                "Sync BLOCCATO: non sono state lette tutte le squadre. "
+                "Mancano: " + ", ".join(missing_codes)
+            )
+        else:
+            st.success("Tutte le 20 squadre sono state lette dalla fonte.")
+
+        if preview:
+            preview_df = pd.DataFrame(
+                [
+                    {
+                        "Giocatore": row.get("name"),
+                        "Squadra": row.get("new_team"),
+                        "Prima": row.get("old_status"),
+                        "Dopo": row.get("new_status"),
+                        "Ballottaggio prima": row.get("old_ballottaggio_con"),
+                        "Ballottaggio dopo": row.get("new_ballottaggio_con"),
+                        "Rigorista": bool(row.get("new_rigorista")),
+                        "Ord. rigori": row.get("rigorista_ordine"),
+                        "Piazzati": bool(row.get("piazzati")),
+                        "Ord. piazzati": row.get("piazzati_ordine"),
+                        "Match": round(float(row.get("confidence") or 0), 2),
+                    }
+                    for row in preview
+                ]
+            )
+            st.dataframe(
+                preview_df,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        if unmatched:
+            with st.expander(
+                f"⚠️ Nomi non riconosciuti ({len(unmatched)})",
+                expanded=False,
+            ):
+                st.dataframe(
+                    pd.DataFrame(unmatched),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+        # Controllo esplicito utile per debug di coppie.
+        como_preview = [
+            row
+            for row in preview
+            if str(row.get("new_team") or "") == "COM"
+            and normalize_string(str(row.get("name") or ""))
+            in {"kean", "douvikas"}
+        ]
+        if como_preview:
+            st.markdown("##### 🔎 Check Kean / Douvikas")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Giocatore": row.get("name"),
+                            "Status nuovo": row.get("new_status"),
+                            "Ballottaggio con": row.get("new_ballottaggio_con"),
+                            "Ord. rigori": row.get("rigorista_ordine"),
+                            "Confidence": round(
+                                float(row.get("confidence") or 0), 2
+                            ),
+                        }
+                        for row in como_preview
+                    ]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        safe_to_apply = (
+            len(teams_found) == 20
+            and len(preview) > 0
+        )
+
+        if safe_to_apply:
+            if st.button(
+                "✅ Conferma e salva gerarchie in Supabase",
+                type="primary",
+                use_container_width=True,
+                key="hierarchy_apply_preview",
+            ):
+                updated, errors = apply_fantacalcio_hierarchy_preview(preview)
+                if errors:
+                    st.error(
+                        f"Aggiornati {updated} giocatori, con "
+                        f"{len(errors)} errori."
+                    )
+                    st.write(errors)
+                else:
+                    st.success(
+                        f"Aggiornati {updated} giocatori in public.players."
+                    )
+                    for key in (
+                        "hierarchy_sync_preview",
+                        "hierarchy_sync_unmatched",
+                        "hierarchy_sync_teams",
+                        "hierarchy_sync_at",
+                    ):
+                        st.session_state.pop(key, None)
+                    st.rerun()
+
+
 @st.cache_data(ttl=120)
 def load_player_strategy_notes() -> list[dict[str, Any]]:
     """Carica le note strategiche personali da Supabase."""
@@ -4406,6 +4773,9 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
 
     st.divider()
     render_strategy_notes_mapping_validator()
+
+    st.divider()
+    render_fantacalcio_hierarchy_diagnostic()
 
     st.divider()
     st.markdown("### 🌐 Controllo fonti online")
