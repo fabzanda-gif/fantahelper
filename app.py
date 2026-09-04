@@ -3726,6 +3726,456 @@ def apply_fantacalcio_hierarchy_preview(
     return updated, errors
 
 
+
+def _group_hierarchy_unmatched(
+    unmatched: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Raggruppa lo stesso nome+squadra anche se appare in più sezioni."""
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for item in unmatched:
+        name = str(item.get("name") or "").strip()
+        team = str(item.get("team") or "").strip().upper()
+        if not name or not team:
+            continue
+
+        key = (normalize_string(name), team)
+        row = grouped.setdefault(
+            key,
+            {
+                "name": name,
+                "team": team,
+                "sources": [],
+                "reasons": [],
+            },
+        )
+
+        source = str(item.get("source") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if source and source not in row["sources"]:
+            row["sources"].append(source)
+        if reason and reason not in row["reasons"]:
+            row["reasons"].append(reason)
+
+    return sorted(
+        grouped.values(),
+        key=lambda row: (row["team"], normalize_string(row["name"])),
+    )
+
+
+def _merged_hierarchy_unmatched_payload(
+    group: dict[str, Any],
+) -> dict[str, Any]:
+    """Fonde gli effetti delle fonti per un singolo nome+squadra."""
+    payload: dict[str, Any] = {
+        "team_nfl": group.get("team"),
+        "data_source": PLAYER_DATA_SOURCE_LABEL,
+        "source_updated_at": datetime.now(
+            ZoneInfo("Europe/Rome")
+        ).isoformat(),
+    }
+
+    sources = set(group.get("sources") or [])
+    if "Probabile XI" in sources:
+        payload["status_titolarita"] = "Titolare"
+    if "Ballottaggio" in sources:
+        payload["status_titolarita"] = "Ballottaggio"
+    if "Rigoristi" in sources:
+        payload["rigorista"] = True
+    if "Calci da fermo" in sources:
+        payload["piazzati"] = True
+
+    return payload
+
+
+def apply_hierarchy_unmatched_resolutions(
+    groups: list[dict[str, Any]],
+    resolutions: dict[int, dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """
+    Associa un nome fonte a un record esistente oppure crea un nuovo giocatore.
+    Lo stesso nome viene gestito una sola volta anche se compare in più fonti.
+    """
+    associated = 0
+    created = 0
+    errors: list[str] = []
+
+    for idx, group in enumerate(groups):
+        resolution = resolutions.get(idx) or {}
+        action = resolution.get("action", "Ignora")
+        if action == "Ignora":
+            continue
+
+        source_name = str(group.get("name") or "").strip()
+        source_team = str(group.get("team") or "").strip().upper()
+        payload = _merged_hierarchy_unmatched_payload(group)
+
+        try:
+            if action == "Associa a esistente":
+                player_id = resolution.get("player_id")
+                if player_id is None:
+                    errors.append(
+                        f"{source_name}: nessun giocatore selezionato."
+                    )
+                    continue
+
+                rows = (
+                    supabase.table("players")
+                    .select("id, name, team_nfl, source_aliases")
+                    .eq("id", player_id)
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+                if not rows:
+                    errors.append(
+                        f"{source_name}: record giocatore non trovato."
+                    )
+                    continue
+
+                existing = rows[0]
+                aliases = existing.get("source_aliases") or []
+                if isinstance(aliases, str):
+                    aliases = [aliases]
+
+                alias_token = _source_alias_token(
+                    source_name,
+                    source_team,
+                )
+                payload["source_aliases"] = list(
+                    dict.fromkeys(
+                        [str(alias) for alias in aliases] + [alias_token]
+                    )
+                )
+                payload["team_nfl"] = source_team
+
+                (
+                    supabase.table("players")
+                    .update(payload)
+                    .eq("id", player_id)
+                    .execute()
+                )
+                associated += 1
+
+            elif action == "Nuovo giocatore":
+                role = str(resolution.get("role") or "").strip().upper()
+                if role not in {"P", "D", "C", "A"}:
+                    errors.append(
+                        f"{source_name}: ruolo P/D/C/A obbligatorio."
+                    )
+                    continue
+
+                final_name = str(
+                    resolution.get("canonical_name") or source_name
+                ).strip()
+                if not final_name:
+                    errors.append(
+                        f"{source_name}: nome non valido."
+                    )
+                    continue
+
+                new_payload = {
+                    "name": final_name,
+                    "team_nfl": source_team,
+                    "role": role,
+                    "list_price": max(
+                        1,
+                        int(resolution.get("list_price") or 1),
+                    ),
+                    "status_titolarita": payload.get(
+                        "status_titolarita",
+                        "Riserva",
+                    ),
+                    "rigorista": bool(payload.get("rigorista", False)),
+                    "piazzati": bool(payload.get("piazzati", False)),
+                    "primo_anno_serie_a": bool(
+                        resolution.get("rookie", True)
+                    ),
+                    "data_source": PLAYER_DATA_SOURCE_LABEL,
+                    "source_updated_at": payload["source_updated_at"],
+                    "source_aliases": [
+                        _source_alias_token(
+                            source_name,
+                            source_team,
+                        )
+                    ],
+                }
+
+                try:
+                    (
+                        supabase.table("players")
+                        .insert(new_payload)
+                        .execute()
+                    )
+                    created += 1
+                except Exception as exc:
+                    message = str(exc).lower()
+                    if "duplicate" in message or "unique" in message:
+                        errors.append(
+                            f"{source_name}: esiste già un record compatibile. "
+                            "Usa 'Associa a esistente'."
+                        )
+                    else:
+                        raise
+
+        except Exception as exc:
+            errors.append(f"{source_name}: {exc}")
+
+    if associated or created:
+        invalidate_data_cache()
+
+    return associated, created, errors
+
+
+def render_hierarchy_unmatched_validator(
+    unmatched: list[dict[str, Any]],
+) -> bool:
+    """
+    UI di validazione per i nomi non riconosciuti.
+    Ritorna True se restano casi non ancora esplicitamente gestiti.
+    """
+    groups = _group_hierarchy_unmatched(unmatched)
+    if not groups:
+        return False
+
+    st.markdown("#### 🧩 Validazione nomi non riconosciuti")
+    st.caption(
+        "Lo stesso nome viene raggruppato una sola volta anche se compare, "
+        "per esempio, sia nei Ballottaggi sia nei Rigoristi."
+    )
+
+    db_players = load_players()
+
+    player_by_label: dict[str, dict[str, Any]] = {}
+    for player in db_players:
+        label = (
+            f"{player.get('name')} · {player.get('team_nfl')} · "
+            f"{player.get('role')}"
+        )
+        if label in player_by_label:
+            label += f" · ID {player.get('id')}"
+        player_by_label[label] = player
+    labels = list(player_by_label.keys())
+
+    accepted_ignored = st.session_state.setdefault(
+        "hierarchy_unmatched_accepted_ignore",
+        set(),
+    )
+
+    resolutions: dict[int, dict[str, Any]] = {}
+
+    with st.expander(
+        f"🧩 Gestisci {len(groups)} nomi unici",
+        expanded=True,
+    ):
+        for idx, group in enumerate(groups):
+            source_name = str(group.get("name") or "")
+            source_team = str(group.get("team") or "")
+            sources = ", ".join(group.get("sources") or [])
+            group_key = f"{normalize_string(source_name)}|{source_team}"
+
+            st.markdown(
+                f"**{escape(source_name)}** · **{escape(source_team)}**"
+            )
+            st.caption(f"Compare in: {sources or '—'}")
+
+            if group_key in accepted_ignored:
+                st.info("Ignorato consapevolmente per questa sessione.")
+                if st.button(
+                    "↩️ Riapri caso",
+                    key=f"hierarchy_unignore_{idx}_{group_key}",
+                ):
+                    accepted_ignored.discard(group_key)
+                    st.session_state[
+                        "hierarchy_unmatched_accepted_ignore"
+                    ] = accepted_ignored
+                    st.rerun()
+                st.divider()
+                resolutions[idx] = {"action": "Ignora"}
+                continue
+
+            ranked_labels = sorted(
+                labels,
+                key=lambda label: (
+                    1
+                    if str(
+                        player_by_label[label].get("team_nfl") or ""
+                    ).strip().upper() == source_team
+                    else 0,
+                    _name_similarity(
+                        source_name,
+                        str(player_by_label[label].get("name") or ""),
+                    ),
+                ),
+                reverse=True,
+            )
+
+            if ranked_labels:
+                best = player_by_label[ranked_labels[0]]
+                best_score = _name_similarity(
+                    source_name,
+                    str(best.get("name") or ""),
+                )
+                st.caption(
+                    f"Suggerimento: **{best.get('name')}** · "
+                    f"{best.get('team_nfl')} · {best.get('role')} "
+                    f"(somiglianza {best_score:.2f})"
+                )
+
+            action = st.radio(
+                "Azione",
+                [
+                    "Da decidere",
+                    "Associa a esistente",
+                    "Nuovo giocatore",
+                    "Ignora consapevolmente",
+                ],
+                horizontal=True,
+                key=f"hierarchy_unmatched_action_{idx}_{group_key}",
+            )
+
+            resolution: dict[str, Any] = {"action": "Ignora"}
+
+            if action == "Associa a esistente":
+                selected_label = st.selectbox(
+                    "Giocatore esistente",
+                    ranked_labels,
+                    index=0,
+                    key=f"hierarchy_existing_{idx}_{group_key}",
+                )
+                selected = player_by_label[selected_label]
+                resolution = {
+                    "action": "Associa a esistente",
+                    "player_id": selected.get("id"),
+                }
+
+                old_team = str(
+                    selected.get("team_nfl") or ""
+                ).strip().upper()
+                if old_team != source_team:
+                    st.warning(
+                        f"Confermando, la squadra canonica verrà aggiornata "
+                        f"da **{old_team}** a **{source_team}**."
+                    )
+
+            elif action == "Nuovo giocatore":
+                st.info(
+                    "Usa questa opzione se hai verificato che il giocatore "
+                    "non esiste già in public.players."
+                )
+
+                canonical_name = st.text_input(
+                    "Nome da salvare",
+                    value=source_name,
+                    key=f"hierarchy_new_name_{idx}_{group_key}",
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    role = st.selectbox(
+                        "Ruolo",
+                        ["P", "D", "C", "A"],
+                        key=f"hierarchy_new_role_{idx}_{group_key}",
+                    )
+                with c2:
+                    list_price = st.number_input(
+                        "Listino iniziale",
+                        min_value=1,
+                        max_value=500,
+                        value=1,
+                        step=1,
+                        key=f"hierarchy_new_price_{idx}_{group_key}",
+                    )
+
+                rookie = st.checkbox(
+                    "Primo anno in Serie A / rookie",
+                    value=True,
+                    key=f"hierarchy_new_rookie_{idx}_{group_key}",
+                )
+
+                resolution = {
+                    "action": "Nuovo giocatore",
+                    "canonical_name": canonical_name,
+                    "role": role,
+                    "list_price": int(list_price),
+                    "rookie": bool(rookie),
+                }
+
+            elif action == "Ignora consapevolmente":
+                if st.button(
+                    "Conferma: ignora questo nome",
+                    key=f"hierarchy_ignore_{idx}_{group_key}",
+                    use_container_width=True,
+                ):
+                    accepted_ignored.add(group_key)
+                    st.session_state[
+                        "hierarchy_unmatched_accepted_ignore"
+                    ] = accepted_ignored
+                    st.rerun()
+
+            resolutions[idx] = resolution
+            st.divider()
+
+        actionable = sum(
+            1
+            for resolution in resolutions.values()
+            if resolution.get("action")
+            in {"Associa a esistente", "Nuovo giocatore"}
+        )
+
+        if actionable:
+            if st.button(
+                "✅ Applica associazioni / crea nuovi giocatori",
+                type="primary",
+                use_container_width=True,
+                key="hierarchy_apply_unmatched_resolutions",
+            ):
+                associated, created, errors = (
+                    apply_hierarchy_unmatched_resolutions(
+                        groups,
+                        resolutions,
+                    )
+                )
+                if errors:
+                    st.error(
+                        f"Associati {associated} · Creati {created} · "
+                        f"Errori {len(errors)}"
+                    )
+                    st.write(errors)
+                else:
+                    st.success(
+                        f"Associati {associated} · Creati {created}. "
+                        "Rileggi ora Fantacalcio: il nuovo confronto completerà "
+                        "partner di ballottaggio e ordine rigoristi."
+                    )
+                    for key in (
+                        "hierarchy_sync_preview",
+                        "hierarchy_sync_unmatched",
+                        "hierarchy_sync_teams",
+                        "hierarchy_sync_at",
+                    ):
+                        st.session_state.pop(key, None)
+                    st.rerun()
+
+    still_open = 0
+    for group in groups:
+        group_key = (
+            f"{normalize_string(str(group.get('name') or ''))}|"
+            f"{str(group.get('team') or '').strip().upper()}"
+        )
+        if group_key not in accepted_ignored:
+            still_open += 1
+
+    if still_open:
+        st.warning(
+            f"Restano **{still_open}** nomi da validare. "
+            "Il salvataggio finale delle gerarchie resta bloccato."
+        )
+
+    return still_open > 0
+
+
 def render_fantacalcio_hierarchy_diagnostic() -> None:
     """
     Pannello admin per verificare cosa c'è DAVVERO in Supabase
@@ -3913,6 +4363,8 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
                 use_container_width=True,
             )
 
+        has_open_unmatched = False
+
         if unmatched:
             suspicious_unmatched = [
                 row
@@ -3940,6 +4392,10 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
                     hide_index=True,
                     use_container_width=True,
                 )
+
+            has_open_unmatched = render_hierarchy_unmatched_validator(
+                unmatched
+            )
 
         # Controllo esplicito utile per debug di coppie.
         como_preview = [
@@ -3999,7 +4455,15 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
             len(teams_found) == 20
             and len(preview) > 0
             and not suspicious_unmatched_for_sync
+            and not has_open_unmatched
         )
+
+        if has_open_unmatched:
+            st.info(
+                "🔒 Per sicurezza il sync finale è bloccato finché ogni nome "
+                "non riconosciuto non viene associato, creato oppure ignorato "
+                "esplicitamente."
+            )
 
         if safe_to_apply:
             if st.button(
