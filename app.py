@@ -6144,7 +6144,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
 # MODELLO ECONOMICO v89 — % BUDGET
 # ============================================================
 
-PLAYER_BUDGET_MODEL_VERSION = "v90_pct_gk_block_1"
+PLAYER_BUDGET_MODEL_VERSION = "v93_adaptive_auction_1"
 
 # Curva economica di riferimento per ruolo.
 # Ogni coppia è (rating, % budget). Il valore viene interpolato.
@@ -7708,6 +7708,172 @@ def render_team_analysis(
     st.sidebar.markdown(risk_html, unsafe_allow_html=True)
 
 
+
+# ============================================================
+# CONTESTO ASTA ADATTIVO v93
+# ============================================================
+
+def get_adaptive_role_budget_context(
+    state: AuctionState,
+    team_name: str,
+    role: str,
+) -> dict[str, Any]:
+    """
+    Capisce se nel ruolo possiamo ancora inseguire premium oppure dobbiamo
+    passare a una fase di recupero / low budget.
+
+    Il riferimento è il budget ruolo della strategia scelta, confrontato con
+    quanto è stato DAVVERO speso e con quanti slot restano.
+    """
+    strategy = current_credit_strategy()
+    allocation = STRATEGY_BUDGET_ALLOCATIONS.get(
+        strategy,
+        STRATEGY_BUDGET_ALLOCATIONS["Bilanciato"],
+    )
+    role_budget = int(allocation.get(role, 0))
+
+    purchases = state.team_purchases_map.get(team_name, [])
+    role_spent = sum(
+        int(purchase.get("purchase_price") or 0)
+        for purchase in purchases
+        if str((purchase.get("players") or {}).get("role") or "") == role
+    )
+    total_spent = sum(
+        int(purchase.get("purchase_price") or 0)
+        for purchase in purchases
+    )
+
+    role_count = int(
+        state.team_role_totals.get(team_name, {}).get(role, 0)
+    )
+    role_limit = int(ROLE_LIMITS.get(role, 1))
+    slots_left_role = max(0, role_limit - role_count)
+
+    role_remaining = max(0, role_budget - role_spent)
+    minimum_role_reserve = slots_left_role  # 1 credito per slot.
+    discretionary_role_budget = max(
+        0,
+        role_remaining - minimum_role_reserve,
+    )
+
+    spent_share = (
+        role_spent / role_budget
+        if role_budget > 0
+        else 0.0
+    )
+    filled_share = (
+        role_count / role_limit
+        if role_limit > 0
+        else 1.0
+    )
+
+    # Recupero forte: abbiamo consumato molto budget ruolo ma coperto pochi slot.
+    recovery_mode = (
+        role in {"D", "C", "A"}
+        and slots_left_role > 0
+        and (
+            (spent_share >= 0.65 and filled_share <= 0.50)
+            or (spent_share >= 0.80 and filled_share < 0.75)
+        )
+    )
+
+    # Modalità prudente: non siamo ancora in emergenza, ma il ruolo è già caro.
+    cautious_mode = (
+        role in {"D", "C", "A"}
+        and slots_left_role > 0
+        and not recovery_mode
+        and spent_share >= 0.45
+        and filled_share <= 0.65
+    )
+
+    if recovery_mode:
+        phase = "Recupero budget"
+    elif cautious_mode:
+        phase = "Prudente"
+    else:
+        phase = "Normale"
+
+    # Quanto possiamo permetterci sul PROSSIMO slot senza compromettere il ruolo.
+    if slots_left_role > 0:
+        sustainable_avg = role_remaining / slots_left_role
+    else:
+        sustainable_avg = 0.0
+
+    if recovery_mode:
+        # Consenti un piccolo margine sopra la media sostenibile, ma evita nuovi TOP.
+        next_target_cap = max(
+            2,
+            min(
+                10,
+                int(round(max(1.0, sustainable_avg) * 2.0)),
+            ),
+        )
+    elif cautious_mode:
+        next_target_cap = max(
+            4,
+            min(
+                18,
+                int(round(max(1.0, sustainable_avg) * 2.4)),
+            ),
+        )
+    else:
+        next_target_cap = max(
+            1,
+            int(round(max(1.0, sustainable_avg) * 3.0)),
+        )
+
+    return {
+        "strategy": strategy,
+        "role_budget": role_budget,
+        "role_spent": role_spent,
+        "role_remaining": role_remaining,
+        "role_count": role_count,
+        "role_limit": role_limit,
+        "slots_left_role": slots_left_role,
+        "minimum_role_reserve": minimum_role_reserve,
+        "discretionary_role_budget": discretionary_role_budget,
+        "spent_share": spent_share,
+        "filled_share": filled_share,
+        "sustainable_avg": sustainable_avg,
+        "next_target_cap": next_target_cap,
+        "phase": phase,
+        "recovery_mode": recovery_mode,
+        "cautious_mode": cautious_mode,
+        "total_spent": total_spent,
+    }
+
+
+def _adaptive_low_budget_candidate(
+    row: dict[str, Any],
+    cap: int,
+    recovery_mode: bool,
+) -> bool:
+    """
+    Profilo adatto a una fase low-budget:
+    - titolare;
+    - rating almeno decente;
+    - niente ballottaggio singolo;
+    - prezzo entro il tetto dinamico.
+    """
+    player = row["player"]
+    rating = float(row["details"]["final_rating"])
+    price = int(row["estimate"]["estimated_price"])
+
+    is_ballot = (
+        str(player.get("status_titolarita") or "") == "Ballottaggio"
+        or bool(str(player.get("ballottaggio_con") or "").strip())
+    )
+
+    minimum_rating = 6.2 if recovery_mode else 6.5
+
+    return (
+        str(player.get("status_titolarita") or "") == "Titolare"
+        and not is_ballot
+        and rating >= minimum_rating
+        and price <= cap
+    )
+
+
 def build_smart_next_purchase_recommendation(
     state: AuctionState,
     rosters: list[dict[str, Any]],
@@ -8091,7 +8257,85 @@ def build_smart_next_purchase_recommendation(
             )
             return rows[0]
 
-    # 3/4) Movement roles.
+    # 3) D/C/A — adattamento alla situazione reale della rosa.
+    if role in {"D", "C", "A"}:
+        budget_context = get_adaptive_role_budget_context(
+            state,
+            team_name,
+            role,
+        )
+
+        if (
+            budget_context["recovery_mode"]
+            or budget_context["cautious_mode"]
+        ):
+            adaptive_rows = []
+            for p in available:
+                row = enrich(
+                    p,
+                    (
+                        "Hai già investito molto in questo ruolo rispetto agli slot "
+                        "coperti: ora cerco titolari affidabili a basso costo per "
+                        "proteggere il budget dei prossimi reparti."
+                        if budget_context["recovery_mode"]
+                        else
+                        "Il ruolo sta assorbendo una quota importante del budget: "
+                        "meglio privilegiare titolari solidi con costo contenuto."
+                    ),
+                    120 if budget_context["recovery_mode"] else 95,
+                )
+                adaptive_rows.append(row)
+
+            target_cap = int(budget_context["next_target_cap"])
+            suitable = [
+                row
+                for row in adaptive_rows
+                if _adaptive_low_budget_candidate(
+                    row,
+                    target_cap,
+                    budget_context["recovery_mode"],
+                )
+            ]
+
+            # Se il cap è troppo severo, allarghiamo gradualmente ma restiamo low budget.
+            if not suitable:
+                relaxed_cap = min(
+                    15 if budget_context["recovery_mode"] else 22,
+                    max(target_cap + 4, int(round(target_cap * 1.6))),
+                )
+                suitable = [
+                    row
+                    for row in adaptive_rows
+                    if _adaptive_low_budget_candidate(
+                        row,
+                        relaxed_cap,
+                        budget_context["recovery_mode"],
+                    )
+                ]
+
+            if suitable:
+                # In recupero: prima efficienza e titolarità, poi rating.
+                suitable.sort(
+                    key=lambda row: (
+                        float(row["details"]["final_rating"])
+                        / max(1, int(row["estimate"]["estimated_price"])),
+                        float(row["details"]["final_rating"]),
+                        -int(row["estimate"]["estimated_price"]),
+                    ),
+                    reverse=True,
+                )
+                best = suitable[0]
+                best["reason"] = (
+                    f"Modalità {budget_context['phase']}: hai speso "
+                    f"{budget_context['role_spent']}/{budget_context['role_budget']} cr "
+                    f"del budget {role} con {budget_context['role_count']}/"
+                    f"{budget_context['role_limit']} slot coperti. "
+                    f"Ora cerco titolari di rendimento decente intorno a "
+                    f"≤ {target_cap} cr."
+                )
+                return best
+
+    # 4) Movement roles.
     starters_owned = sum(
         p.get("status_titolarita") == "Titolare"
         for p in owned_role
@@ -8241,12 +8485,13 @@ def render_top5(
     state: AuctionState | None = None,
 ) -> None:
     """
-    Top 5 liberi dinamici:
-    - segue il ruolo selezionato nella sezione Asta;
-    - ordina per tetto di spesa consigliato / % budget;
-    - mostra solo le informazioni economiche davvero utili.
+    Top 5 dinamica e contestuale.
+
+    In fase normale mostra i giocatori con maggiore previsione di spesa.
+    Se il ruolo ha già assorbito troppo budget rispetto agli slot coperti,
+    passa automaticamente a "Low budget" e mostra titolari affidabili ed economici.
     """
-    if role not in {"P", "D", "C", "A"}:
+    if role not in {"P", "D", "C", "A"} or state is None:
         return
 
     role_titles = {
@@ -8256,111 +8501,97 @@ def render_top5(
         "A": "Attaccanti",
     }
 
+    target_team = get_my_team_name_from_state(state)
+    if not target_team:
+        return
+
+    budget_context = get_adaptive_role_budget_context(
+        state,
+        target_team,
+        role,
+    )
+
+    adaptive_mode = (
+        role in {"D", "C", "A"}
+        and (
+            budget_context["recovery_mode"]
+            or budget_context["cautious_mode"]
+        )
+    )
+
+    title_prefix = "💡 Low budget" if adaptive_mode else "🔥 Top 5"
+    title = (
+        f"{title_prefix} {role_titles[role]}"
+        if adaptive_mode
+        else f"{title_prefix} {role_titles[role]} liberi"
+    )
+
     st.sidebar.markdown(
         f"""
         <style>
         .top5-title {{
-            display:flex;
-            align-items:center;
-            gap:8px;
-            margin:.15rem 0 .65rem 0;
-            font-size:1.02rem;
-            font-weight:900;
-            color:#172033 !important;
+            display:flex;align-items:center;gap:8px;margin:.15rem 0 .45rem 0;
+            font-size:1.02rem;font-weight:900;color:#172033!important;
         }}
-        .top5-stack {{
-            display:flex;
-            flex-direction:column;
-            gap:8px;
-            margin-bottom:.65rem;
+        .top5-context {{
+            margin:-.05rem 0 .6rem 0;padding:7px 9px;border-radius:10px;
+            background:#eff6ff;border:1px solid #dbeafe;
+            font-size:.68rem;font-weight:750;line-height:1.3;color:#475569!important;
         }}
+        .top5-stack {{display:flex;flex-direction:column;gap:8px;margin-bottom:.65rem;}}
         .top5-card {{
-            display:grid;
-            grid-template-columns:36px minmax(0,1fr) auto;
-            grid-template-areas:
-                "rank name spend"
-                "rank team pct";
-            gap:3px 9px;
-            align-items:center;
-            padding:10px 11px;
-            border:1px solid #cfe0f8;
-            border-radius:13px;
+            display:grid;grid-template-columns:36px minmax(0,1fr) auto;
+            grid-template-areas:"rank name spend" "rank team pct";
+            gap:3px 9px;align-items:center;padding:10px 11px;
+            border:1px solid #cfe0f8;border-radius:13px;
             background:linear-gradient(145deg,#ffffff 0%,#f1f6ff 100%);
             box-shadow:0 4px 12px rgba(30,64,175,.055);
         }}
-        .top5-card:first-child {{
-            border-color:#93c5fd;
-            background:
-                radial-gradient(circle at 92% 5%,rgba(59,130,246,.13),transparent 30%),
-                linear-gradient(145deg,#ffffff 0%,#edf5ff 100%);
-        }}
+        .top5-card:first-child {{border-color:#93c5fd;}}
         .top5-rank {{
-            grid-area:rank;
-            width:30px;
-            height:30px;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            border-radius:9px;
-            background:#1d4ed8;
-            color:#ffffff !important;
-            font-weight:900;
-            font-size:.82rem;
+            grid-area:rank;width:30px;height:30px;display:flex;align-items:center;
+            justify-content:center;border-radius:9px;background:#1d4ed8;
+            color:#fff!important;font-weight:900;font-size:.82rem;
         }}
         .top5-name {{
-            grid-area:name;
-            min-width:0;
-            overflow:hidden;
-            text-overflow:ellipsis;
-            white-space:nowrap;
-            font-weight:900;
-            font-size:.88rem;
-            color:#172033 !important;
+            grid-area:name;min-width:0;overflow:hidden;text-overflow:ellipsis;
+            white-space:nowrap;font-weight:900;font-size:.88rem;color:#172033!important;
         }}
-        .top5-team {{
-            grid-area:team;
-            font-size:.70rem;
-            font-weight:750;
-            color:#64748b !important;
-        }}
+        .top5-team {{grid-area:team;font-size:.70rem;font-weight:750;color:#64748b!important;}}
         .top5-spend {{
-            grid-area:spend;
-            white-space:nowrap;
-            font-size:.90rem;
-            font-weight:950;
-            color:#1d4ed8 !important;
-            text-align:right;
+            grid-area:spend;white-space:nowrap;font-size:.90rem;font-weight:950;
+            color:#1d4ed8!important;text-align:right;
         }}
         .top5-pct {{
-            grid-area:pct;
-            white-space:nowrap;
-            font-size:.73rem;
-            font-weight:850;
-            color:#334155 !important;
-            text-align:right;
+            grid-area:pct;white-space:nowrap;font-size:.73rem;font-weight:850;
+            color:#334155!important;text-align:right;
         }}
         </style>
-        <div class="top5-title">🔥 <span>Top 5 {role_titles[role]} liberi</span></div>
+        <div class="top5-title">{title}</div>
         """,
         unsafe_allow_html=True,
     )
 
-    players = load_players(role=role)
+    if adaptive_mode:
+        st.sidebar.markdown(
+            (
+                f'<div class="top5-context">'
+                f'{budget_context["phase"]}: {budget_context["role_spent"]}/'
+                f'{budget_context["role_budget"]} cr spesi · '
+                f'{budget_context["role_count"]}/{budget_context["role_limit"]} slot · '
+                f'target prossimo acquisto ≲ {budget_context["next_target_cap"]} cr'
+                f'</div>'
+            ),
+            unsafe_allow_html=True,
+        )
+
     available = [
         player
-        for player in players
+        for player in load_players(role=role)
         if player["id"] not in bought_player_ids
     ]
-
     if not available:
         st.sidebar.info("Nessun giocatore disponibile.")
-        return
-
-    if state is None:
-        return
-
-    target_team = get_my_team_name_from_state(state)
-    if not target_team:
         return
 
     custom_modifiers = load_custom_modifiers()
@@ -8384,21 +8615,80 @@ def render_top5(
         rows.append(
             {
                 "player": player,
+                "details": details,
                 "spend": spend,
             }
         )
 
-    # Ordinamento economico: previsione di spesa prima, % budget come tie-break.
-    rows.sort(
-        key=lambda row: (
-            int(row["spend"].get("recommended_cap") or 0),
-            float(row["spend"].get("pct_total_budget") or 0.0),
-        ),
-        reverse=True,
-    )
+    if adaptive_mode:
+        cap = int(budget_context["next_target_cap"])
+        filtered = [
+            row
+            for row in rows
+            if _adaptive_low_budget_candidate(
+                {
+                    "player": row["player"],
+                    "details": row["details"],
+                    "estimate": {
+                        "estimated_price": int(
+                            row["spend"].get("recommended_cap") or 1
+                        )
+                    },
+                },
+                cap,
+                budget_context["recovery_mode"],
+            )
+        ]
+
+        if not filtered:
+            relaxed_cap = min(
+                15 if budget_context["recovery_mode"] else 22,
+                max(cap + 4, int(round(cap * 1.6))),
+            )
+            filtered = [
+                row
+                for row in rows
+                if _adaptive_low_budget_candidate(
+                    {
+                        "player": row["player"],
+                        "details": row["details"],
+                        "estimate": {
+                            "estimated_price": int(
+                                row["spend"].get("recommended_cap") or 1
+                            )
+                        },
+                    },
+                    relaxed_cap,
+                    budget_context["recovery_mode"],
+                )
+            ]
+
+        if filtered:
+            rows = filtered
+
+        # Low budget = miglior rendimento per credito, non prezzo più alto.
+        rows.sort(
+            key=lambda row: (
+                float(row["details"]["final_rating"])
+                / max(
+                    1,
+                    int(row["spend"].get("recommended_cap") or 1),
+                ),
+                float(row["details"]["final_rating"]),
+                -int(row["spend"].get("recommended_cap") or 1),
+            ),
+            reverse=True,
+        )
+    else:
+        rows.sort(
+            key=lambda row: (
+                int(row["spend"].get("recommended_cap") or 0),
+                float(row["spend"].get("pct_total_budget") or 0.0),
+            ),
+            reverse=True,
+        )
 
     cards = ['<div class="top5-stack">']
-
     for index, row in enumerate(rows[:5], start=1):
         player = row["player"]
         spend = row["spend"]
@@ -8408,7 +8698,7 @@ def render_top5(
         recommended_cap = int(spend.get("recommended_cap") or 1)
         pct = float(spend.get("pct_total_budget") or 0.0)
 
-        card_html = (
+        cards.append(
             '<div class="top5-card">'
             f'<div class="top5-rank">{index}</div>'
             f'<div class="top5-name">{player_name}</div>'
@@ -8417,7 +8707,6 @@ def render_top5(
             f'<div class="top5-pct">{pct:.1f}% budget</div>'
             '</div>'
         )
-        cards.append(card_html)
 
     cards.append("</div>")
     st.sidebar.markdown("".join(cards), unsafe_allow_html=True)
