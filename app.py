@@ -2477,69 +2477,175 @@ def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
 
 def parse_fantacalcio_quotations(html: str) -> list[dict[str, Any]]:
     """
-    Best-effort parser del Listone ufficiale.
+    Parser robusto delle Quotazioni Fantacalcio 2026/27.
 
-    Serve soprattutto a verificare il club attuale e, quando disponibili
-    come testo HTML, quotazione/FVM. Non inserisce automaticamente nuovi
-    giocatori: quelli non presenti in Supabase vengono segnalati.
+    Estrae:
+    - name
+    - team_nfl
+    - qi_fc
+    - qa_fc
+    - fvm_fc
+
+    La pagina può essere resa come tabella HTML oppure come griglia/div.
+    Per questo usiamo due strategie:
+    1) righe <tr>;
+    2) fallback sul testo lineare della pagina.
+
+    Il ruolo Classic non è affidabilmente esposto nel testo della pagina:
+    per i giocatori già presenti manteniamo il ruolo canonico del DB;
+    per i nuovi giocatori chiediamo validazione manuale.
     """
     soup = BeautifulSoup(html, "html.parser")
-    rows: list[dict[str, Any]] = []
+    valid_teams = {
+        "ATA", "BOL", "CAG", "COM", "FIO", "FRO", "GEN", "INT", "JUV",
+        "LAZ", "LEC", "MIL", "MON", "NAP", "PAR", "ROM", "SAS", "TOR",
+        "UDI", "VEN",
+    }
 
-    # Strategia 1: tabelle HTML reali.
-    for table in soup.find_all("table"):
-        headers = [
-            th.get_text(" ", strip=True)
-            for th in table.find_all("th")
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _store(
+        name: str,
+        team: str,
+        numbers: list[int],
+    ) -> None:
+        clean_name = re.sub(r"\s+", " ", str(name or "")).strip()
+        team = str(team or "").strip().upper()
+
+        if (
+            not clean_name
+            or team not in valid_teams
+            or len(numbers) < 3
+        ):
+            return
+
+        # Prima terna = Classic: QI, QA, FVM/1000.
+        qi = int(numbers[0])
+        qa = int(numbers[1])
+        fvm = int(numbers[2])
+
+        # Scarta evidenti falsi positivi.
+        if qi < 0 or qa < 0 or fvm < 0:
+            return
+        if len(clean_name) > 60:
+            return
+
+        key = (normalize_string(clean_name), team)
+        found[key] = {
+            "name": clean_name,
+            "team_nfl": team,
+            "qi_fc": qi,
+            "qa_fc": qa,
+            "quotazione_fc": qa,
+            "fvm_fc": fvm,
+        }
+
+    # Strategia 1: vere righe HTML.
+    for tr in soup.find_all("tr"):
+        cells = [
+            re.sub(r"\s+", " ", td.get_text(" ", strip=True)).strip()
+            for td in tr.find_all(["td", "th"])
         ]
-        header_norm = [normalize_string(h) for h in headers]
-        if not any("calciatore" in h for h in header_norm):
+        cells = [cell for cell in cells if cell]
+        if not cells:
             continue
 
-        for tr in table.find_all("tr"):
-            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-            if len(cells) < 3:
+        team_idx = next(
+            (
+                idx
+                for idx, cell in enumerate(cells)
+                if cell.strip().upper() in valid_teams
+            ),
+            None,
+        )
+        if team_idx is None:
+            continue
+
+        team = cells[team_idx].strip().upper()
+
+        # Il nome è normalmente il testo immediatamente precedente alla squadra;
+        # se ci sono celle decorative vuote, scegliamo l'ultimo testo plausibile.
+        name_candidates = []
+        for cell in cells[:team_idx]:
+            value = cell.strip()
+            if not value:
+                continue
+            if re.fullmatch(r"\d+(?:[.,]\d+)?", value):
+                continue
+            if value.upper() in valid_teams:
+                continue
+            if normalize_string(value) in {
+                "calciatore", "sq", "qi", "qa", "fvm 1000"
+            }:
+                continue
+            name_candidates.append(value)
+
+        if not name_candidates:
+            continue
+
+        name = name_candidates[-1]
+        numbers = []
+        for cell in cells[team_idx + 1:]:
+            value = cell.strip().replace(",", ".")
+            if re.fullmatch(r"\d+(?:\.\d+)?", value):
+                numbers.append(int(float(value)))
+
+        _store(name, team, numbers)
+
+    # Strategia 2: testo lineare. Utile se il sito non restituisce <table>.
+    if len(found) < 100:
+        lines = [
+            re.sub(r"\s+", " ", line).strip()
+            for line in soup.get_text("\n", strip=True).splitlines()
+            if re.sub(r"\s+", " ", line).strip()
+        ]
+
+        for idx, line in enumerate(lines):
+            team = line.strip().upper()
+            if team not in valid_teams:
                 continue
 
-            # Euristica: nome è il campo testuale più lungo tra i primi,
-            # squadra è un codice di 3 lettere.
-            team_code = next(
-                (
-                    c.strip().upper()
-                    for c in cells
-                    if re.fullmatch(r"[A-Z]{3}", c.strip().upper())
-                ),
-                "",
-            )
-            text_cells = [
-                c.strip()
-                for c in cells
-                if c.strip()
-                and not re.fullmatch(r"\d+(?:[.,]\d+)?", c.strip())
-                and not re.fullmatch(r"[A-Z]{3}", c.strip().upper())
-            ]
-            if not team_code or not text_cells:
+            # Nome: cerchiamo indietro il primo token testuale plausibile.
+            name = ""
+            for back in range(idx - 1, max(-1, idx - 6), -1):
+                candidate = lines[back].strip()
+                if (
+                    candidate
+                    and candidate.upper() not in valid_teams
+                    and not re.fullmatch(r"\d+(?:[.,]\d+)?", candidate)
+                    and normalize_string(candidate)
+                    not in {
+                        "calciatore", "sq", "qi", "qa", "fvm 1000",
+                        "classic", "mantra",
+                    }
+                ):
+                    name = candidate
+                    break
+
+            if not name:
                 continue
 
-            player_name = max(text_cells, key=len)
-            numbers = [
-                int(float(c.replace(",", ".")))
-                for c in cells
-                if re.fullmatch(r"\d+(?:[.,]\d+)?", c.strip())
-            ]
+            numbers: list[int] = []
+            for forward in range(idx + 1, min(len(lines), idx + 12)):
+                value = lines[forward].strip().replace(",", ".")
+                if re.fullmatch(r"\d+(?:\.\d+)?", value):
+                    numbers.append(int(float(value)))
+                    if len(numbers) >= 6:
+                        break
+                elif numbers:
+                    # Se abbiamo iniziato a leggere i numeri e arriva testo,
+                    # la riga giocatore è terminata.
+                    break
 
-            rows.append(
-                {
-                    "name": player_name,
-                    "team_nfl": team_code,
-                    "quotazione_fc": numbers[0] if numbers else None,
-                    "fvm_fc": numbers[2] if len(numbers) >= 3 else (
-                        numbers[-1] if len(numbers) >= 2 else None
-                    ),
-                }
-            )
+            _store(name, team, numbers)
 
-    return rows
+    return sorted(
+        found.values(),
+        key=lambda row: (
+            row["team_nfl"],
+            normalize_string(row["name"]),
+        ),
+    )
 
 
 def _source_alias_token(source_name: str, team_code: str | None) -> str:
@@ -5273,6 +5379,564 @@ def render_strategy_notes_mapping_validator() -> None:
                 st.rerun()
 
 
+
+def build_fantacalcio_master_validation(
+    db_players: list[dict[str, Any]],
+    quotations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Confronto prudente Quotazioni Fantacalcio -> public.players.
+
+    Fantacalcio è la fonte canonica per:
+    - nome
+    - squadra
+    - quotazione corrente (QA)
+    - FVM
+
+    Il ruolo viene mantenuto dal DB per i record già esistenti.
+    Per i giocatori nuovi viene richiesto manualmente.
+    """
+    by_team_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+
+    for player in db_players:
+        name_norm = normalize_string(str(player.get("name") or ""))
+        team = str(player.get("team_nfl") or "").strip().upper()
+        by_team_name.setdefault((name_norm, team), []).append(player)
+        by_name.setdefault(name_norm, []).append(player)
+
+    # Duplicati REALI nel DB: stesso nome normalizzato + squadra + ruolo.
+    duplicate_groups: list[dict[str, Any]] = []
+    duplicate_map: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for player in db_players:
+        key = (
+            normalize_string(str(player.get("name") or "")),
+            str(player.get("team_nfl") or "").strip().upper(),
+            str(player.get("role") or "").strip().upper(),
+        )
+        duplicate_map.setdefault(key, []).append(player)
+
+    for key, players in duplicate_map.items():
+        if len(players) > 1:
+            duplicate_groups.append(
+                {
+                    "normalized_name": key[0],
+                    "team_nfl": key[1],
+                    "role": key[2],
+                    "players": players,
+                }
+            )
+
+    duplicate_ids = {
+        str(player.get("id"))
+        for group in duplicate_groups
+        for player in group["players"]
+    }
+
+    safe_updates: list[dict[str, Any]] = []
+    transfers: list[dict[str, Any]] = []
+    new_source_players: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    matched_db_ids: set[str] = set()
+
+    for source in quotations:
+        source_name = str(source.get("name") or "").strip()
+        source_norm = normalize_string(source_name)
+        source_team = str(source.get("team_nfl") or "").strip().upper()
+
+        exact = by_team_name.get((source_norm, source_team), [])
+
+        if len(exact) == 1:
+            player = exact[0]
+            player_id = str(player.get("id"))
+
+            if player_id in duplicate_ids:
+                ambiguous.append(
+                    {
+                        "source_name": source_name,
+                        "source_team": source_team,
+                        "reason": "Record DB coinvolto in un duplicato reale",
+                        "candidate_ids": player_id,
+                    }
+                )
+                continue
+
+            matched_db_ids.add(player_id)
+            canonical_name = source_name.upper()
+            qa = source.get("qa_fc")
+            fvm = source.get("fvm_fc")
+
+            changed = (
+                str(player.get("name") or "") != canonical_name
+                or int(player.get("list_price") or 0) != int(qa or 0)
+                or int(player.get("quotazione_fc") or 0) != int(qa or 0)
+                or int(player.get("fvm_fc") or 0) != int(fvm or 0)
+            )
+
+            if changed:
+                safe_updates.append(
+                    {
+                        "player_id": player.get("id"),
+                        "old_name": player.get("name"),
+                        "new_name": canonical_name,
+                        "team_nfl": source_team,
+                        "role": player.get("role"),
+                        "old_list_price": player.get("list_price"),
+                        "new_list_price": qa,
+                        "old_quotazione_fc": player.get("quotazione_fc"),
+                        "new_quotazione_fc": qa,
+                        "old_fvm_fc": player.get("fvm_fc"),
+                        "new_fvm_fc": fvm,
+                        "qi_fc": source.get("qi_fc"),
+                    }
+                )
+            continue
+
+        if len(exact) > 1:
+            ambiguous.append(
+                {
+                    "source_name": source_name,
+                    "source_team": source_team,
+                    "reason": f"{len(exact)} match esatti nome+squadra nel DB",
+                    "candidate_ids": ", ".join(
+                        str(p.get("id")) for p in exact
+                    ),
+                }
+            )
+            continue
+
+        # Possibile trasferimento: stesso nome normalizzato unico nel DB.
+        same_name = by_name.get(source_norm, [])
+        if len(same_name) == 1:
+            player = same_name[0]
+            player_id = str(player.get("id"))
+
+            if player_id in duplicate_ids:
+                ambiguous.append(
+                    {
+                        "source_name": source_name,
+                        "source_team": source_team,
+                        "reason": "Possibile trasferimento ma record DB duplicato",
+                        "candidate_ids": player_id,
+                    }
+                )
+                continue
+
+            matched_db_ids.add(player_id)
+            transfers.append(
+                {
+                    "player_id": player.get("id"),
+                    "old_name": player.get("name"),
+                    "new_name": source_name.upper(),
+                    "old_team": player.get("team_nfl"),
+                    "new_team": source_team,
+                    "role": player.get("role"),
+                    "new_list_price": source.get("qa_fc"),
+                    "new_quotazione_fc": source.get("qa_fc"),
+                    "new_fvm_fc": source.get("fvm_fc"),
+                    "qi_fc": source.get("qi_fc"),
+                }
+            )
+            continue
+
+        # Fuzzy solo come SUGGERIMENTO, mai auto-update.
+        same_team_players = [
+            player
+            for player in db_players
+            if str(player.get("team_nfl") or "").strip().upper()
+            == source_team
+        ]
+        ranked = sorted(
+            same_team_players,
+            key=lambda player: _name_similarity(
+                source_name,
+                str(player.get("name") or ""),
+            ),
+            reverse=True,
+        )
+        best = ranked[0] if ranked else None
+        best_score = (
+            _name_similarity(source_name, str(best.get("name") or ""))
+            if best
+            else 0.0
+        )
+
+        if best is not None and best_score >= 0.82:
+            ambiguous.append(
+                {
+                    "source_name": source_name,
+                    "source_team": source_team,
+                    "reason": f"Possibile alias/match fuzzy ({best_score:.2f})",
+                    "candidate_ids": str(best.get("id")),
+                    "candidate_name": best.get("name"),
+                }
+            )
+        else:
+            new_source_players.append(source)
+
+    db_extras = [
+        {
+            "player_id": player.get("id"),
+            "name": player.get("name"),
+            "team_nfl": player.get("team_nfl"),
+            "role": player.get("role"),
+            "in_roster": False,
+        }
+        for player in db_players
+        if str(player.get("id")) not in matched_db_ids
+    ]
+
+    # Protezione giocatori già acquistati.
+    roster_ids = {
+        str(row.get("player_id"))
+        for row in load_rosters()
+        if row.get("player_id") is not None
+    }
+    for row in db_extras:
+        row["in_roster"] = str(row.get("player_id")) in roster_ids
+
+    return {
+        "safe_updates": safe_updates,
+        "transfers": transfers,
+        "new_source_players": new_source_players,
+        "ambiguous": ambiguous,
+        "duplicate_groups": duplicate_groups,
+        "db_extras": db_extras,
+        "source_count": len(quotations),
+        "source_teams": sorted(
+            {
+                str(row.get("team_nfl") or "").strip().upper()
+                for row in quotations
+                if row.get("team_nfl")
+            }
+        ),
+    }
+
+
+def apply_fantacalcio_master_safe_updates(
+    validation: dict[str, Any],
+    include_transfers: bool = False,
+) -> tuple[int, list[str]]:
+    """
+    Applica solo aggiornamenti validati:
+    - nome in MAIUSCOLO
+    - squadra
+    - list_price = QA Fantacalcio
+    - quotazione_fc = QA
+    - fvm_fc = FVM
+    """
+    rows = list(validation.get("safe_updates") or [])
+    if include_transfers:
+        rows += list(validation.get("transfers") or [])
+
+    updated = 0
+    errors: list[str] = []
+
+    for row in rows:
+        payload = {
+            "name": str(row.get("new_name") or "").upper(),
+            "team_nfl": str(
+                row.get("new_team")
+                or row.get("team_nfl")
+                or ""
+            ).upper(),
+            "list_price": int(row.get("new_list_price") or 1),
+            "quotazione_fc": int(
+                row.get("new_quotazione_fc")
+                or row.get("new_list_price")
+                or 1
+            ),
+            "fvm_fc": int(row.get("new_fvm_fc") or 0),
+            "data_source": "Fantacalcio Quotazioni 2026/27",
+            "source_updated_at": datetime.now(
+                ZoneInfo("Europe/Rome")
+            ).isoformat(),
+        }
+
+        try:
+            (
+                supabase.table("players")
+                .update(payload)
+                .eq("id", row["player_id"])
+                .execute()
+            )
+            updated += 1
+        except Exception as exc:
+            errors.append(
+                f"{row.get('old_name') or row.get('new_name')}: {exc}"
+            )
+
+    if updated:
+        invalidate_data_cache()
+
+    return updated, errors
+
+
+def apply_uppercase_cleanup_safe() -> tuple[int, int, list[str]]:
+    """
+    Porta i nomi in maiuscolo SOLO quando non crea collisioni
+    su nome normalizzato+squadra+ruolo.
+    """
+    players = load_players()
+
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for player in players:
+        key = (
+            normalize_string(str(player.get("name") or "")),
+            str(player.get("team_nfl") or "").strip().upper(),
+            str(player.get("role") or "").strip().upper(),
+        )
+        groups.setdefault(key, []).append(player)
+
+    updated = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for group in groups.values():
+        if len(group) != 1:
+            skipped += len(group)
+            continue
+
+        player = group[0]
+        old_name = str(player.get("name") or "")
+        new_name = old_name.upper()
+
+        if old_name == new_name:
+            continue
+
+        try:
+            (
+                supabase.table("players")
+                .update({"name": new_name})
+                .eq("id", player.get("id"))
+                .execute()
+            )
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{old_name}: {exc}")
+
+    if updated:
+        invalidate_data_cache()
+
+    return updated, skipped, errors
+
+
+def render_fantacalcio_master_validation() -> None:
+    st.markdown("### 🧾 Fantacalcio Quotazioni — Master List")
+    st.caption(
+        "Fantacalcio Quotazioni è la fonte canonica per nome, squadra, "
+        "quotazione corrente e FVM. Nessuna modifica viene scritta senza preview."
+    )
+
+    if st.button(
+        "🔎 Confronta Fantacalcio Quotazioni con Supabase",
+        type="primary",
+        use_container_width=True,
+        key="fc_master_compare",
+    ):
+        with st.spinner("Leggo Quotazioni Fantacalcio e confronto il database..."):
+            try:
+                html = _source_http_get(FANTACALCIO_QUOTES_URL)
+                quotations = parse_fantacalcio_quotations(html)
+
+                validation = build_fantacalcio_master_validation(
+                    load_players(),
+                    quotations,
+                )
+
+                st.session_state["fc_master_validation"] = validation
+                st.session_state["fc_master_fetched_at"] = datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).strftime("%d/%m/%Y %H:%M")
+            except Exception as exc:
+                st.error(f"Errore lettura Quotazioni Fantacalcio: {exc}")
+
+    validation = st.session_state.get("fc_master_validation")
+    if not validation:
+        st.info(
+            "Premi il pulsante per ottenere la preview del database "
+            "rispetto alla lista ufficiale Fantacalcio."
+        )
+        return
+
+    source_count = int(validation.get("source_count") or 0)
+    source_teams = validation.get("source_teams") or []
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Righe Fantacalcio", source_count)
+    m2.metric("Squadre", len(source_teams))
+    m3.metric(
+        "Aggiornamenti sicuri",
+        len(validation.get("safe_updates") or []),
+    )
+    m4.metric(
+        "Nuovi / da validare",
+        len(validation.get("new_source_players") or [])
+        + len(validation.get("ambiguous") or []),
+    )
+
+    st.caption(
+        f"Ultima lettura: "
+        f"{st.session_state.get('fc_master_fetched_at', '—')}"
+    )
+
+    # Safety gate: il master deve sembrare completo.
+    safe_source = source_count >= 400 and len(source_teams) >= 18
+    if not safe_source:
+        st.error(
+            "Fonte incompleta: per sicurezza nessun aggiornamento può essere "
+            "applicato finché non leggo almeno 400 giocatori e 18 squadre."
+        )
+
+    safe_updates = validation.get("safe_updates") or []
+    transfers = validation.get("transfers") or []
+    duplicates = validation.get("duplicate_groups") or []
+    new_players = validation.get("new_source_players") or []
+    ambiguous = validation.get("ambiguous") or []
+    db_extras = validation.get("db_extras") or []
+
+    if safe_updates:
+        with st.expander(
+            f"✅ Aggiornamenti sicuri ({len(safe_updates)})",
+            expanded=False,
+        ):
+            st.dataframe(
+                pd.DataFrame(safe_updates),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    if transfers:
+        with st.expander(
+            f"🔄 Possibili trasferimenti ({len(transfers)})",
+            expanded=True,
+        ):
+            st.caption(
+                "Stesso nome univoco nel DB ma squadra diversa. "
+                "Questi NON vengono applicati automaticamente."
+            )
+            st.dataframe(
+                pd.DataFrame(transfers),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    if duplicates:
+        with st.expander(
+            f"👥 Duplicati reali nel DB ({len(duplicates)})",
+            expanded=True,
+        ):
+            duplicate_rows = []
+            for group in duplicates:
+                for player in group["players"]:
+                    duplicate_rows.append(
+                        {
+                            "name": player.get("name"),
+                            "team_nfl": player.get("team_nfl"),
+                            "role": player.get("role"),
+                            "player_id": player.get("id"),
+                        }
+                    )
+            st.dataframe(
+                pd.DataFrame(duplicate_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.warning(
+                "Non elimino duplicati automaticamente. Prima va scelto "
+                "quale ID mantenere, soprattutto se uno è già in una rosa."
+            )
+
+    if new_players:
+        with st.expander(
+            f"➕ Presenti su Fantacalcio ma mancanti nel DB ({len(new_players)})",
+            expanded=True,
+        ):
+            st.dataframe(
+                pd.DataFrame(new_players),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(
+                "Il ruolo non viene inventato: i nuovi giocatori vanno "
+                "inseriti tramite la validazione manuale della sezione "
+                "'Controllo fonti online', scegliendo P/D/C/A."
+            )
+
+    if ambiguous:
+        with st.expander(
+            f"❓ Match ambigui / alias ({len(ambiguous)})",
+            expanded=True,
+        ):
+            st.dataframe(
+                pd.DataFrame(ambiguous),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    if db_extras:
+        with st.expander(
+            f"➖ Record DB non riconosciuti nel master ({len(db_extras)})",
+            expanded=False,
+        ):
+            st.caption(
+                "Non vengono cancellati automaticamente. I record presenti "
+                "in una rosa sono sempre protetti."
+            )
+            st.dataframe(
+                pd.DataFrame(db_extras),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if st.button(
+            "✅ Applica aggiornamenti sicuri",
+            use_container_width=True,
+            type="primary",
+            disabled=not safe_source or not safe_updates,
+            key="fc_master_apply_safe",
+        ):
+            updated, errors = apply_fantacalcio_master_safe_updates(
+                validation,
+                include_transfers=False,
+            )
+            if errors:
+                st.error(
+                    f"Aggiornati {updated} record · Errori {len(errors)}"
+                )
+                st.write(errors)
+            else:
+                st.success(
+                    f"Aggiornati {updated} record da Fantacalcio. "
+                    "QA è ora anche il list_price usato dal modello economico."
+                )
+                st.session_state.pop("fc_master_validation", None)
+                st.rerun()
+
+    with c2:
+        if st.button(
+            "🔠 Porta in MAIUSCOLO i nomi sicuri",
+            use_container_width=True,
+            disabled=bool(duplicates),
+            key="fc_master_uppercase",
+        ):
+            updated, skipped, errors = apply_uppercase_cleanup_safe()
+            if errors:
+                st.error(
+                    f"Maiuscolo: {updated} aggiornati · "
+                    f"{skipped} saltati · {len(errors)} errori"
+                )
+                st.write(errors)
+            else:
+                st.success(
+                    f"Nomi uniformati: {updated} aggiornati. "
+                    f"{skipped} record duplicati/ambigui saltati."
+                )
+                st.rerun()
+
 def render_player_data_updater_page(user: dict[str, Any]) -> None:
     st.markdown(
         '<div class="rcd-section">🔄 Aggiornamento dati giocatori</div>',
@@ -5285,6 +5949,9 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         "su Supabase finché non confermi esplicitamente."
     )
 
+    render_fantacalcio_master_validation()
+
+    st.divider()
     render_uploaded_listone_checker()
 
     st.divider()
