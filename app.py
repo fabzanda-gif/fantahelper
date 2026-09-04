@@ -2315,115 +2315,151 @@ def _team_code_from_heading(team_name: str) -> str:
 
 def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
     """
-    Estrae dall'articolo Fantacalcio:
-    XI probabile, ballottaggi, rigoristi e calci da fermo.
+    Parser robusto dell'articolo Fantacalcio 2026/27.
 
-    Parser robusto:
-    - individua ogni heading di squadra;
-    - raccoglie TUTTO il testo fino al successivo h2/h3, anche se i paragrafi
-      sono annidati in wrapper/div differenti;
-    - non dipende dalle classi CSS del sito.
+    Strategia:
+    1. converte l'articolo in testo lineare;
+    2. individua le 20 sezioni squadra tramite heading;
+    3. estrae da ogni sezione:
+       - Probabile formazione
+       - Ballottaggi
+       - Rigoristi
+       - Calci da fermo
+
+    Questo evita di dipendere dalla struttura HTML/CSS del sito.
     """
     soup = BeautifulSoup(html, "html.parser")
+
+    # Testo lineare: molto più stabile della navigazione per sibling/div.
+    raw_text = soup.get_text("\n", strip=True)
+    lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in raw_text.splitlines()
+        if re.sub(r"\s+", " ", line).strip()
+    ]
+
+    # Individua le righe che corrispondono a una squadra.
+    valid_codes = set(TEAM_MAP.values())
+    team_starts: list[tuple[int, str, str]] = []
+
+    for idx, line in enumerate(lines):
+        code = _team_code_from_heading(line)
+        if code in valid_codes:
+            # Evita falsi positivi dentro testi lunghi: l'heading deve essere corto.
+            if len(line) <= 30:
+                team_starts.append((idx, code, line))
+
+    # Deduplica eventuali heading ripetuti mantenendo la prima occorrenza utile.
+    deduped: list[tuple[int, str, str]] = []
+    seen_codes: set[str] = set()
+    for item in team_starts:
+        if item[1] not in seen_codes:
+            seen_codes.add(item[1])
+            deduped.append(item)
+
     parsed: dict[str, dict[str, Any]] = {}
 
-    valid_codes = set(TEAM_MAP.values())
+    for pos, (start_idx, team_code, team_heading) in enumerate(deduped):
+        end_idx = (
+            deduped[pos + 1][0]
+            if pos + 1 < len(deduped)
+            else len(lines)
+        )
+        section_lines = lines[start_idx + 1:end_idx]
+        section = "\n".join(section_lines)
 
-    for heading in soup.find_all(["h2", "h3"]):
-        team_heading = heading.get_text(" ", strip=True)
-        team_code = _team_code_from_heading(team_heading)
-        if team_code not in valid_codes:
-            continue
-
-        pieces: list[str] = []
-        for node in heading.next_elements:
-            if node is heading:
-                continue
-
-            node_name = getattr(node, "name", None)
-            if node_name in {"h2", "h3"}:
-                break
-
-            # Prendiamo solo blocchi testuali significativi per evitare
-            # duplicazioni da ogni singolo nodo figlio.
-            if node_name not in {"p", "div", "li"}:
-                continue
-
-            text = node.get_text(" ", strip=True)
-            if not text:
-                continue
-
-            wanted = (
-                "Probabile formazione" in text
-                or "Ballottaggi:" in text
-                or "Rigoristi:" in text
-                or "Calci da fermo:" in text
+        def _extract_field(label: str, next_labels: list[str]) -> str:
+            stop = "|".join(re.escape(x) for x in next_labels)
+            pattern = (
+                rf"{re.escape(label)}\s*(?:\([^)]*\))?\s*:\s*"
+                rf"(.+?)(?=\n(?:{stop})\s*:|\Z)"
             )
-            if wanted and text not in pieces:
-                pieces.append(text)
+            match = re.search(pattern, section, flags=re.I | re.S)
+            return match.group(1).strip() if match else ""
 
-        block = "\n".join(pieces)
-        if "Probabile formazione" not in block:
-            continue
-
-        formation_match = re.search(
-            r"Probabile formazione[^:]*:\s*(.+?)(?=\n|Ballottaggi:|Rigoristi:|Calci da fermo:)",
-            block,
-            flags=re.I | re.S,
+        formation_text = _extract_field(
+            "Probabile formazione",
+            ["Ballottaggi", "Rigoristi", "Calci da fermo"],
         )
-        ballot_match = re.search(
-            r"Ballottaggi:\s*(.+?)(?=\n|Rigoristi:|Calci da fermo:)",
-            block,
-            flags=re.I | re.S,
+        ballot_text = _extract_field(
+            "Ballottaggi",
+            ["Rigoristi", "Calci da fermo"],
         )
-        penalty_match = re.search(
-            r"Rigoristi:\s*(.+?)(?=\n|Calci da fermo:)",
-            block,
-            flags=re.I | re.S,
+        penalty_text = _extract_field(
+            "Rigoristi",
+            ["Calci da fermo"],
         )
-        set_piece_match = re.search(
-            r"Calci da fermo:\s*(.+?)(?=\n|$)",
-            block,
-            flags=re.I | re.S,
+        set_piece_text = _extract_field(
+            "Calci da fermo",
+            ["Allenatore", "Modulo", "Probabile formazione", "Ballottaggi", "Rigoristi"],
         )
 
-        formation_text = formation_match.group(1) if formation_match else ""
+        # In alcuni rendering il campo può stare tutto su una sola riga:
+        # fallback limitato fino al prossimo label noto.
+        if not formation_text:
+            m = re.search(
+                r"Probabile formazione[^:]*:\s*(.+?)(?=Ballottaggi:|Rigoristi:|Calci da fermo:|$)",
+                section.replace("\n", " "),
+                flags=re.I | re.S,
+            )
+            formation_text = m.group(1).strip() if m else ""
+
+        if not ballot_text:
+            m = re.search(
+                r"Ballottaggi:\s*(.+?)(?=Rigoristi:|Calci da fermo:|$)",
+                section.replace("\n", " "),
+                flags=re.I | re.S,
+            )
+            ballot_text = m.group(1).strip() if m else ""
+
+        if not penalty_text:
+            m = re.search(
+                r"Rigoristi:\s*(.+?)(?=Calci da fermo:|$)",
+                section.replace("\n", " "),
+                flags=re.I | re.S,
+            )
+            penalty_text = m.group(1).strip() if m else ""
+
+        if not set_piece_text:
+            m = re.search(
+                r"Calci da fermo:\s*(.+)$",
+                section.replace("\n", " "),
+                flags=re.I | re.S,
+            )
+            set_piece_text = m.group(1).strip() if m else ""
+
+        # XI probabile
         starters: list[str] = []
         for part in re.split(r"[;,]", formation_text):
             name = _clean_source_player_name(part)
             if name:
                 starters.append(name)
 
+        # Ballottaggi
         ballot_groups: list[list[str]] = []
-        ballot_text = ballot_match.group(1) if ballot_match else ""
-
-        # Le parentesi contengono spesso note tattiche, non nomi.
-        ballot_text = re.sub(r"\([^)]*\)", "", ballot_text)
-
-        # Ogni coppia/gruppo è separato da ; oppure ,.
-        for chunk in re.split(r"[;,]", ballot_text):
-            names = [
-                _clean_source_player_name(name)
-                for name in chunk.split("/")
-                if _clean_source_player_name(name)
-            ]
+        # Rimuove spiegazioni tattiche tra parentesi senza perdere la coppia.
+        clean_ballot_text = re.sub(r"\([^)]*\)", "", ballot_text)
+        for chunk in re.split(r"[;,]", clean_ballot_text):
+            names = []
+            for raw_name in chunk.split("/"):
+                cleaned = _clean_source_player_name(raw_name)
+                if cleaned:
+                    names.append(cleaned)
             if len(names) >= 2:
                 ballot_groups.append(names)
 
-        penalties = _split_source_names(
-            penalty_match.group(1) if penalty_match else ""
-        )
-        set_pieces = _split_source_names(
-            set_piece_match.group(1) if set_piece_match else ""
-        )
+        penalties = _split_source_names(penalty_text)
+        set_pieces = _split_source_names(set_piece_text)
 
-        parsed[team_code] = {
-            "team_name": team_heading.title(),
-            "starters": starters,
-            "ballot_groups": ballot_groups,
-            "penalties": penalties,
-            "set_pieces": set_pieces,
-        }
+        # Non includere sezioni chiaramente vuote/errate.
+        if starters or ballot_groups or penalties or set_pieces:
+            parsed[team_code] = {
+                "team_name": team_heading.title(),
+                "starters": starters,
+                "ballot_groups": ballot_groups,
+                "penalties": penalties,
+                "set_pieces": set_pieces,
+            }
 
     return parsed
 
@@ -3881,6 +3917,19 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
             and normalize_string(str(row.get("name") or ""))
             in {"kean", "douvikas"}
         ]
+        # Mostra anche cosa ha letto il parser dalla sezione COMO.
+        if "COM" in formations:
+            como_source = formations["COM"]
+            st.markdown("##### 📥 Dati letti dalla fonte — COMO")
+            st.json(
+                {
+                    "starters": como_source.get("starters", []),
+                    "ballot_groups": como_source.get("ballot_groups", []),
+                    "penalties": como_source.get("penalties", []),
+                    "set_pieces": como_source.get("set_pieces", []),
+                }
+            )
+
         if como_preview:
             st.markdown("##### 🔎 Check Kean / Douvikas")
             st.dataframe(
