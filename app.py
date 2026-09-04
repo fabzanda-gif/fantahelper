@@ -6048,7 +6048,7 @@ def estimate_auction_price(
     budget: int | None = None,
     slots_left_after_purchase: int = 0,
 ) -> dict[str, Any]:
-    """Stima il prezzo d'asta usando i moltiplicatori osservati nel draft."""
+    """LEGACY: stima storica. Il consiglio economico v89 usa il modello % budget."""
     history = auction_history_ratios(rosters)
     role = player.get("role")
     list_price = float(player.get("list_price") or 1)
@@ -6140,80 +6140,428 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
     return None
 
 
+# ============================================================
+# MODELLO ECONOMICO v89 — % BUDGET
+# ============================================================
+
+PLAYER_BUDGET_MODEL_VERSION = "v89_pct_1"
+
+# Curva economica di riferimento per ruolo.
+# Ogni coppia è (rating, % budget). Il valore viene interpolato.
+ROLE_BUDGET_PCT_CURVES: dict[str, list[tuple[float, float]]] = {
+    "A": [
+        (5.5, 1.0),
+        (6.0, 2.5),
+        (6.5, 5.0),
+        (7.0, 9.0),
+        (7.5, 13.0),
+        (8.0, 17.0),
+        (8.5, 22.0),
+        (9.0, 27.0),
+        (9.5, 30.0),
+        (10.0, 32.0),
+    ],
+    "C": [
+        (5.5, 0.5),
+        (6.0, 1.5),
+        (6.5, 3.5),
+        (7.0, 6.0),
+        (7.5, 8.0),
+        (8.0, 10.5),
+        (8.5, 13.5),
+        (9.0, 16.0),
+        (9.5, 18.0),
+        (10.0, 20.0),
+    ],
+    "D": [
+        (5.5, 0.3),
+        (6.0, 0.8),
+        (6.5, 1.5),
+        (7.0, 2.5),
+        (7.5, 3.5),
+        (8.0, 4.5),
+        (8.5, 6.0),
+        (9.0, 7.5),
+        (9.5, 9.0),
+        (10.0, 11.0),
+    ],
+    # Per i portieri questa curva rappresenta il BUDGET DI REPARTO.
+    "P": [
+        (5.5, 3.0),
+        (6.0, 4.5),
+        (6.5, 6.0),
+        (7.0, 8.0),
+        (7.5, 10.0),
+        (8.0, 12.0),
+        (8.5, 14.0),
+        (9.0, 15.5),
+        (9.5, 16.5),
+        (10.0, 17.0),
+    ],
+}
+
+# Il listino è un segnale di mercato molto utile, ma NON deve dominare da solo.
+# Per gli attaccanti lo usiamo soprattutto per evitare differenze assurde fra
+# profili molto simili (es. Kean / Douvikas).
+ROLE_MARKET_WEIGHT = {
+    "A": 0.72,
+    "C": 0.62,
+    "D": 0.58,
+    "P": 0.55,
+}
+
+RIGORISTA_PCT_BONUS = {
+    1: 1.5,
+    2: 0.7,
+    3: 0.2,
+}
+
+PIAZZATI_PCT_BONUS = {
+    1: 0.7,
+    2: 0.4,
+    3: 0.2,
+}
+
+BALLLOT_SINGLE_PCT_MALUS = -2.0
+BALLLOT_COVERED_PCT_MALUS = -0.5
+TITOLARE_PCT_BONUS = 0.7
+RISERVA_PCT_MALUS = -4.0
+
+# Nei ballottaggi diretti il valore economico viene avvicinato alla media
+# della coppia, poi gerarchie/rigori possono creare piccole differenze.
+BALLOT_PAIR_SMOOTHING = 0.75
+
+
+def _interpolate_budget_pct(
+    rating: float,
+    curve: list[tuple[float, float]],
+) -> float:
+    r = float(rating)
+    points = sorted(curve)
+
+    if r <= points[0][0]:
+        return float(points[0][1])
+    if r >= points[-1][0]:
+        return float(points[-1][1])
+
+    for (r1, p1), (r2, p2) in zip(points, points[1:]):
+        if r1 <= r <= r2:
+            weight = (r - r1) / max(0.0001, r2 - r1)
+            return float(p1 + (p2 - p1) * weight)
+
+    return float(points[-1][1])
+
+
+def _role_list_price_pct(
+    player: dict[str, Any],
+    role: str,
+) -> float:
+    """
+    Converte il listino del giocatore in una % coerente con la curva del ruolo.
+    Il massimo listino del ruolo viene mappato al vertice della curva.
+    """
+    role_players = load_players(role=role)
+    prices = [
+        max(1.0, float(p.get("list_price") or 1))
+        for p in role_players
+    ]
+    current = max(1.0, float(player.get("list_price") or 1))
+
+    if not prices:
+        return 0.0
+
+    max_price = max(prices)
+    if max_price <= 1:
+        return 0.0
+
+    # Curva leggermente concava: preserva differenze ma non esplode.
+    normalized = min(1.0, current / max_price)
+    top_pct = ROLE_BUDGET_PCT_CURVES[role][-1][1]
+    return float(top_pct * (normalized ** 1.18))
+
+
+def _player_pre_adjustment_pct(
+    player: dict[str, Any],
+    rating: float,
+) -> float:
+    role = str(player.get("role") or "").strip().upper()
+    curve = ROLE_BUDGET_PCT_CURVES.get(role)
+    if not curve:
+        return 0.2
+
+    rating_pct = _interpolate_budget_pct(rating, curve)
+    market_pct = _role_list_price_pct(player, role)
+    market_weight = ROLE_MARKET_WEIGHT.get(role, 0.60)
+
+    # Rating e listino sono due segnali distinti.
+    return (
+        rating_pct * (1.0 - market_weight)
+        + market_pct * market_weight
+    )
+
+
+def _ballot_pair_adjusted_pct(
+    player: dict[str, Any],
+    own_pct: float,
+    preferred_players: set[Any],
+    custom_modifiers: dict[Any, dict[str, Any]],
+    goalkeeper_ranking: dict[Any, float],
+) -> float:
+    """
+    Se esiste un partner di ballottaggio diretto, avvicina il valore economico
+    dei due profili. Questo impedisce casi tipo 80 vs 168 per due concorrenti
+    dello stesso posto.
+    """
+    raw = str(player.get("ballottaggio_con") or "").strip()
+    if not raw:
+        return own_pct
+
+    partners = _find_ballot_partner_players(
+        player,
+        load_players(role=str(player.get("role") or "")),
+    )
+    if not partners:
+        return own_pct
+
+    partner_pcts: list[float] = []
+    for partner in partners:
+        details = calculate_player_rating_detailed(
+            partner,
+            preferred_players,
+            custom_modifiers,
+            goalkeeper_ranking,
+        )
+        partner_pcts.append(
+            _player_pre_adjustment_pct(
+                partner,
+                float(details["final_rating"]),
+            )
+        )
+
+    if not partner_pcts:
+        return own_pct
+
+    pair_mean = (own_pct + sum(partner_pcts)) / (1 + len(partner_pcts))
+    return (
+        own_pct * (1.0 - BALLOT_PAIR_SMOOTHING)
+        + pair_mean * BALLOT_PAIR_SMOOTHING
+    )
+
+
+def _goalkeeper_block_prediction(
+    player: dict[str, Any],
+    rating: float,
+    target_team: str,
+    state: AuctionState,
+    total_budget: int,
+) -> tuple[float, int, str]:
+    """
+    Per i portieri il budget è quello dell'intero reparto.
+    Il primo portiere assorbe il residuo dopo aver riservato almeno 1 credito
+    per gli altri portieri del blocco.
+    """
+    department_pct = _player_pre_adjustment_pct(player, rating)
+    department_budget = max(
+        3,
+        int(round(total_budget * department_pct / 100.0)),
+    )
+
+    owned = _fantasy_team_owned_players(target_team, state)
+    owned_goalkeepers = [
+        p for p in owned
+        if str(p.get("role") or "") == "P"
+    ]
+    spent_goalkeepers = 0
+    for purchase in state.team_purchases_map.get(target_team, []):
+        p = purchase.get("players") or {}
+        if str(p.get("role") or "") == "P":
+            spent_goalkeepers += int(purchase.get("purchase_price") or 0)
+
+    keepers_after_purchase = len(owned_goalkeepers) + 1
+    remaining_keeper_slots = max(0, 3 - keepers_after_purchase)
+
+    # Se questo è il primo portiere, riserviamo 1+1 ai due compagni.
+    max_for_this_keeper = max(
+        1,
+        department_budget
+        - spent_goalkeepers
+        - remaining_keeper_slots,
+    )
+
+    return (
+        department_pct,
+        max_for_this_keeper,
+        f"Budget reparto P: {department_budget} cr",
+    )
+
+
 def get_player_budget_spend_focus(
     player: dict[str, Any],
-    estimate: dict[str, Any],
+    details: dict[str, Any],
+    state: AuctionState,
+    target_team: str,
     total_budget: int = 500,
 ) -> dict[str, Any]:
-    """Restituisce un singolo tetto di spesa chiaro e visibile per il giocatore."""
+    """
+    Nuovo motore economico v89.
+
+    max_price delle note strategiche NON entra nel calcolo.
+    Viene restituito solo come informazione separata.
+    """
+    role = str(player.get("role") or "").strip().upper()
+    rating = float(details.get("final_rating") or 0.0)
+    current_custom = load_custom_modifiers()
+    goalkeeper_ranking = build_current_goalkeeper_ranking(state)
+
     note = get_player_strategy_note_for_player(player)
-    note_max = note.get("max_price") if note else None
+    personal_max = None
+    if note and note.get("max_price") not in (None, ""):
+        try:
+            personal_max = int(note.get("max_price"))
+        except (TypeError, ValueError):
+            personal_max = None
+
+    if role == "P":
+        pct, recommended_cap, source = _goalkeeper_block_prediction(
+            player,
+            rating,
+            target_team,
+            state,
+            total_budget,
+        )
+        return {
+            "recommended_cap": recommended_cap,
+            "pct_total_budget": (
+                recommended_cap / max(1, total_budget)
+            ) * 100.0,
+            "department_pct": pct,
+            "source": source,
+            "personal_max_price": personal_max,
+            "model_version": PLAYER_BUDGET_MODEL_VERSION,
+        }
+
+    pct = _player_pre_adjustment_pct(player, rating)
+
+    is_ballot = (
+        str(player.get("status_titolarita") or "").strip()
+        == "Ballottaggio"
+        or bool(str(player.get("ballottaggio_con") or "").strip())
+    )
+
+    if is_ballot:
+        pct = _ballot_pair_adjusted_pct(
+            player,
+            pct,
+            st.session_state.preferred_players,
+            current_custom,
+            goalkeeper_ranking,
+        )
+
+    # Gerarchia rigori.
     try:
-        note_max = int(note_max) if note_max not in (None, "") else None
-    except Exception:
-        note_max = None
+        rig_order = (
+            int(player.get("rigorista_ordine"))
+            if player.get("rigorista_ordine") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        rig_order = None
 
-    estimated_price = max(1, int(estimate.get("estimated_price") or 1))
-    sustainable_cap = estimate.get("max_bid")
+    pct += RIGORISTA_PCT_BONUS.get(rig_order, 0.0)
+
+    # Calci piazzati.
     try:
-        sustainable_cap = int(sustainable_cap) if sustainable_cap is not None else None
-    except Exception:
-        sustainable_cap = None
+        set_order = (
+            int(player.get("piazzati_ordine"))
+            if player.get("piazzati_ordine") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        set_order = None
 
-    if note_max is not None and sustainable_cap is not None:
-        recommended_cap = max(1, min(note_max, sustainable_cap))
-        source = "Nota strategica + budget disponibile"
-    elif note_max is not None:
-        recommended_cap = max(1, note_max)
-        source = "Nota strategica"
-    elif sustainable_cap is not None:
-        recommended_cap = max(1, min(estimated_price, sustainable_cap))
-        source = "Stima d'asta"
-    else:
-        recommended_cap = estimated_price
-        source = "Stima d'asta"
+    pct += PIAZZATI_PCT_BONUS.get(set_order, 0.0)
 
-    pct = (recommended_cap / max(1, total_budget)) * 100.0
+    # Titolarità.
+    status = str(player.get("status_titolarita") or "").strip()
+    if status == "Titolare":
+        pct += TITOLARE_PCT_BONUS
+    elif status == "Riserva":
+        pct += RISERVA_PCT_MALUS
+
+    # Ballottaggio: forte malus se preso da solo, molto ridotto se coperto.
+    if is_ballot:
+        partners = _find_ballot_partner_players(
+            player,
+            load_players(role=role),
+        )
+        owned = _fantasy_team_owned_players(target_team, state)
+        owned_ids = {
+            str(p.get("id"))
+            for p in owned
+            if p.get("id") is not None
+        }
+        covered = any(
+            str(partner.get("id")) in owned_ids
+            for partner in partners
+        )
+        pct += (
+            BALLOT_COVERED_PCT_MALUS
+            if covered
+            else BALLOT_SINGLE_PCT_MALUS
+        )
+
+    pct = max(0.2, min(32.0, pct))
+    recommended_cap = max(
+        1,
+        int(round(total_budget * pct / 100.0)),
+    )
+
     return {
         "recommended_cap": recommended_cap,
         "pct_total_budget": pct,
-        "source": source,
-        "note": note,
+        "source": "Modello % budget v89",
+        "personal_max_price": personal_max,
+        "model_version": PLAYER_BUDGET_MODEL_VERSION,
     }
 
 
 def render_player_spend_focus_card(spend_focus: dict[str, Any]) -> None:
-    """Card compatta e leggibile: mostra solo tetto di spesa e % budget."""
+    """Card compatta: una sola stima economica + eventuale nota personale separata."""
     cap = int(spend_focus.get("recommended_cap") or 1)
     pct = float(spend_focus.get("pct_total_budget") or 0.0)
-    source = str(spend_focus.get("source") or "")
+    personal_max = spend_focus.get("personal_max_price")
 
     st.markdown(
         f"""
         <div style="
-            margin: 0.45rem 0 1rem 0;
+            margin: 0.45rem 0 0.55rem 0;
             padding: 1rem 1.2rem;
             border-radius: 20px;
             background: linear-gradient(135deg, rgba(37,99,235,0.16), rgba(29,78,216,0.26));
             border: 1px solid rgba(37,99,235,0.22);
             box-shadow: 0 10px 24px rgba(37,99,235,0.08);
         ">
-            <div style="font-size:0.92rem;font-weight:800;color:#1d4ed8;letter-spacing:0.02em;display:flex;align-items:center;gap:0.45rem;">
-                💰 Tetto di spesa consigliato
+            <div style="font-size:0.92rem;font-weight:900;color:#1d4ed8;">
+                💰 TETTO DI SPESA CONSIGLIATO
             </div>
-            <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:0.85rem;margin-top:0.55rem;">
-                <div>
-                    <div style="font-size:2.2rem;line-height:1;font-weight:900;color:#0f172a;">{cap} cr</div>
-                    <div style="font-size:0.95rem;color:#334155;font-weight:700;margin-top:0.35rem;">{pct:.1f}% del budget totale</div>
+            <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;margin-top:.55rem;">
+                <div style="font-size:2.35rem;line-height:1;font-weight:950;color:#0f172a;">
+                    {cap} cr
                 </div>
-                <div style="padding:0.55rem 0.85rem;border-radius:999px;background:rgba(255,255,255,0.72);color:#1e293b;font-weight:800;font-size:0.88rem;white-space:nowrap;">
-                    {escape(source)}
+                <div style="font-size:1.15rem;font-weight:900;color:#1e3a8a;">
+                    {pct:.1f}% budget
                 </div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    if personal_max is not None:
+        st.caption(
+            f"📝 Tua nota personale: max {int(personal_max)} cr "
+            "— non utilizzata nel calcolo."
+        )
 
 
 RECOMMENDATION_TIERS = {
@@ -6292,10 +6640,23 @@ def build_next_player_recommendations(
         tier = get_recommendation_tier(rating)
         if tier is None or tier != selected_tier:
             continue
-        estimate = estimate_auction_price(
-            player, rosters, budget=budget,
-            slots_left_after_purchase=slots_after,
+        spend_focus = get_player_budget_spend_focus(
+            player,
+            details,
+            state,
+            team_name,
+            total_budget=500,
         )
+        estimate = {
+            "estimated_price": int(spend_focus["recommended_cap"]),
+            "multiplier": 0.0,
+            "source": "Modello % budget v89",
+            "sample_size": 0,
+            "feasible": True,
+            "budget_note": "",
+            "max_bid": None,
+            "budget_pct": float(spend_focus["pct_total_budget"]),
+        }
         list_price = int(player.get("list_price") or 1)
         score = get_price_value_score(
             rating, estimate["estimated_price"], list_price
@@ -7289,12 +7650,23 @@ def build_smart_next_purchase_recommendation(
             custom_modifiers,
             goalkeeper_ranking,
         )
-        estimate = estimate_auction_price(
+        spend_focus = get_player_budget_spend_focus(
             player,
-            rosters,
-            budget=budget,
-            slots_left_after_purchase=slots_after,
+            details,
+            state,
+            team_name,
+            total_budget=500,
         )
+        estimate = {
+            "estimated_price": int(spend_focus["recommended_cap"]),
+            "multiplier": 0.0,
+            "source": "Modello % budget v89",
+            "sample_size": 0,
+            "feasible": True,
+            "budget_note": "",
+            "max_bid": None,
+            "budget_pct": float(spend_focus["pct_total_budget"]),
+        }
         return {
             "player": player,
             "details": details,
@@ -7745,8 +8117,8 @@ def render_smart_next_purchase_card(
         "<div class=\"next-buy-kicker\">🎯 PROSSIMO ACQUISTO CONSIGLIATO</div>"
         f"<div class=\"next-buy-name\">{name} · ⭐ {rating:.1f}</div>"
         f"<div class=\"next-buy-meta\">{club} · {status} · "
-        f"Listino {int(player.get('list_price') or 0)} cr · "
-        f"Stima {int(estimate['estimated_price'])} cr</div>"
+        f"Consiglio {int(estimate['estimated_price'])} cr · "
+        f"{float(estimate.get('budget_pct') or 0):.1f}% budget</div>"
         f"<div class=\"next-buy-reason\">{reason}</div>"
         "</div>"
     )
@@ -8721,7 +9093,13 @@ def render_manual_purchase(
     # sono alert visibili prima di confermare qualsiasi acquisto.
     render_ballot_and_penalty_alerts(selected_player, target_team, state)
 
-    spend_focus = get_player_budget_spend_focus(selected_player, estimate)
+    spend_focus = get_player_budget_spend_focus(
+        selected_player,
+        player_details,
+        state,
+        target_team,
+        total_budget=500,
+    )
     render_player_spend_focus_card(spend_focus)
 
     if not st.button(
