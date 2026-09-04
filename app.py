@@ -2342,12 +2342,29 @@ def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
     valid_codes = set(TEAM_MAP.values())
     team_starts: list[tuple[int, str, str]] = []
 
+    # IMPORTANTISSIMO: qui NON usiamo il fallback "prime 3 lettere"
+    # di _team_code_from_heading(), perché parole come "Comparatore" -> COM
+    # e "Mondo ..." -> MON verrebbero scambiate per COMO/MONZA e, con la
+    # deduplica, nasconderebbero gli heading reali più avanti nell'articolo.
+    normalized_team_names = {
+        normalize_string(full_name): code_value
+        for full_name, code_value in TEAM_MAP.items()
+    }
+    code_to_name = {
+        code_value: full_name
+        for full_name, code_value in TEAM_MAP.items()
+    }
+
     for idx, line in enumerate(lines):
-        code = _team_code_from_heading(line)
-        if code in valid_codes:
-            # Evita falsi positivi dentro testi lunghi: l'heading deve essere corto.
-            if len(line) <= 30:
-                team_starts.append((idx, code, line))
+        normalized_line = normalize_string(line)
+        code = normalized_team_names.get(normalized_line)
+
+        # Accetta anche un heading che sia già il codice ufficiale.
+        if code is None and line.strip().upper() in valid_codes:
+            code = line.strip().upper()
+
+        if code in valid_codes and len(line) <= 30:
+            team_starts.append((idx, code, line))
 
     # Deduplica eventuali heading ripetuti mantenendo la prima occorrenza utile.
     deduped: list[tuple[int, str, str]] = []
@@ -2366,67 +2383,61 @@ def parse_fantacalcio_formations(html: str) -> dict[str, dict[str, Any]]:
             else len(lines)
         )
         section_lines = lines[start_idx + 1:end_idx]
-        section = "\n".join(section_lines)
 
-        def _extract_field(label: str, next_labels: list[str]) -> str:
-            stop = "|".join(re.escape(x) for x in next_labels)
-            pattern = (
-                rf"{re.escape(label)}\s*(?:\([^)]*\))?\s*:\s*"
-                rf"(.+?)(?=\n(?:{stop})\s*:|\Z)"
-            )
-            match = re.search(pattern, section, flags=re.I | re.S)
-            return match.group(1).strip() if match else ""
+        def _extract_single_field_line(label: str) -> str:
+            """
+            I quattro campi utili dell'articolo sono paragrafi singoli.
+            Leggiamo SOLO la riga del campo (o al massimo la riga successiva
+            se il renderer ha separato label e valore).
 
-        formation_text = _extract_field(
-            "Probabile formazione",
-            ["Ballottaggi", "Rigoristi", "Calci da fermo"],
-        )
-        ballot_text = _extract_field(
-            "Ballottaggi",
-            ["Rigoristi", "Calci da fermo"],
-        )
-        penalty_text = _extract_field(
-            "Rigoristi",
-            ["Calci da fermo"],
-        )
-        set_piece_text = _extract_field(
-            "Calci da fermo",
-            ["Allenatore", "Modulo", "Probabile formazione", "Ballottaggi", "Rigoristi"],
-        )
+            Questo è fondamentale per l'ultima squadra: senza un heading
+            successivo, una regex multi-linea su "Calci da fermo" finirebbe
+            per inglobare articoli correlati, autore, pubblicità, ecc.
+            """
+            label_norm = normalize_string(label)
 
-        # In alcuni rendering il campo può stare tutto su una sola riga:
-        # fallback limitato fino al prossimo label noto.
-        if not formation_text:
-            m = re.search(
-                r"Probabile formazione[^:]*:\s*(.+?)(?=Ballottaggi:|Rigoristi:|Calci da fermo:|$)",
-                section.replace("\n", " "),
-                flags=re.I | re.S,
-            )
-            formation_text = m.group(1).strip() if m else ""
+            for line_idx, line in enumerate(section_lines):
+                line_norm = normalize_string(line)
 
-        if not ballot_text:
-            m = re.search(
-                r"Ballottaggi:\s*(.+?)(?=Rigoristi:|Calci da fermo:|$)",
-                section.replace("\n", " "),
-                flags=re.I | re.S,
-            )
-            ballot_text = m.group(1).strip() if m else ""
+                # Riconosce anche "Probabile formazione (da dx a sx): ..."
+                if not line_norm.startswith(label_norm):
+                    continue
 
-        if not penalty_text:
-            m = re.search(
-                r"Rigoristi:\s*(.+?)(?=Calci da fermo:|$)",
-                section.replace("\n", " "),
-                flags=re.I | re.S,
-            )
-            penalty_text = m.group(1).strip() if m else ""
+                # Prima prova: valore sulla stessa riga dopo i due punti.
+                if ":" in line:
+                    value = line.split(":", 1)[1].strip()
+                    if value:
+                        return value
 
-        if not set_piece_text:
-            m = re.search(
-                r"Calci da fermo:\s*(.+)$",
-                section.replace("\n", " "),
-                flags=re.I | re.S,
-            )
-            set_piece_text = m.group(1).strip() if m else ""
+                # Fallback: il valore può essere nella riga immediatamente dopo.
+                if line_idx + 1 < len(section_lines):
+                    next_line = section_lines[line_idx + 1].strip()
+                    next_norm = normalize_string(next_line)
+                    known_labels = {
+                        "allenatore",
+                        "modulo",
+                        "probabile formazione",
+                        "ballottaggi",
+                        "rigoristi",
+                        "calci da fermo",
+                    }
+                    if (
+                        next_line
+                        and not any(
+                            next_norm.startswith(known)
+                            for known in known_labels
+                        )
+                    ):
+                        return next_line
+
+                return ""
+
+            return ""
+
+        formation_text = _extract_single_field_line("Probabile formazione")
+        ballot_text = _extract_single_field_line("Ballottaggi")
+        penalty_text = _extract_single_field_line("Rigoristi")
+        set_piece_text = _extract_single_field_line("Calci da fermo")
 
         # XI probabile
         starters: list[str] = []
@@ -3865,6 +3876,10 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
             "UDI", "VEN",
         }
         missing_codes = sorted(expected_codes - set(teams_found))
+
+        with st.expander("🔎 Codici squadra letti dal parser", expanded=False):
+            st.write(", ".join(sorted(teams_found)))
+
         if missing_codes:
             st.error(
                 "Sync BLOCCATO: non sono state lette tutte le squadre. "
@@ -3899,6 +3914,23 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
             )
 
         if unmatched:
+            suspicious_unmatched = [
+                row
+                for row in unmatched
+                if row.get("source") == "Calci da fermo"
+                and (
+                    len(str(row.get("name") or "")) > 40
+                    or '"' in str(row.get("name") or "")
+                    or "pubblic" in normalize_string(str(row.get("name") or ""))
+                    or "autore" in normalize_string(str(row.get("name") or ""))
+                )
+            ]
+            if suspicious_unmatched:
+                st.error(
+                    "⚠️ Il parser ha ancora intercettato testo esterno alle "
+                    "gerarchie giocatori. Non salvare questa preview."
+                )
+
             with st.expander(
                 f"⚠️ Nomi non riconosciuti ({len(unmatched)})",
                 expanded=False,
@@ -3951,9 +3983,22 @@ def render_fantacalcio_hierarchy_diagnostic() -> None:
                 use_container_width=True,
             )
 
+        suspicious_unmatched_for_sync = [
+            row
+            for row in unmatched
+            if row.get("source") == "Calci da fermo"
+            and (
+                len(str(row.get("name") or "")) > 40
+                or '"' in str(row.get("name") or "")
+                or "pubblic" in normalize_string(str(row.get("name") or ""))
+                or "autore" in normalize_string(str(row.get("name") or ""))
+            )
+        ]
+
         safe_to_apply = (
             len(teams_found) == 20
             and len(preview) > 0
+            and not suspicious_unmatched_for_sync
         )
 
         if safe_to_apply:
