@@ -469,7 +469,8 @@ PLAYER_FIELDS = (
     "rigorista, affidabilita_fisica, propensione_cartellini, "
     "slot_fantacalcio, primo_anno_serie_a, "
     "ballottaggio_con, rigorista_ordine, piazzati, piazzati_ordine, "
-    "quotazione_fc, fvm_fc, data_source, source_updated_at, source_aliases"
+    "quotazione_fc, fvm_fc, data_source, source_updated_at, source_aliases, "
+    "injury_status, injury_note, injury_return, injury_source_updated_at"
 )
 
 FANTACALCIO_FORMATIONS_URL = (
@@ -477,6 +478,7 @@ FANTACALCIO_FORMATIONS_URL = (
     "asta-fantacalcio-le-probabili-formazioni-della-serie-a-enilive-2026-27-495558"
 )
 FANTACALCIO_QUOTES_URL = "https://www.fantacalcio.it/quotazioni-fantacalcio/2026-27"
+FANTACALCIO_INJURIES_URL = "https://www.fantacalcio.it/cartella-medica"
 PLAYER_DATA_SOURCE_LABEL = "Fantacalcio.it 2026/27"
 
 TEAM_MAP = {
@@ -5856,6 +5858,286 @@ def apply_fantacalcio_db_extra_actions(
     return deleted, errors
 
 
+
+def _classify_injury_severity(note: str) -> str:
+    text = normalize_string(note)
+    long_tokens = (
+        "rientro da dicembre", "rientro da gennaio", "rientro da novembre",
+        "fine novembre", "da novembre", "da dicembre", "da gennaio",
+        "rottura di tibia", "tibia e perone", "tendine d achille",
+        "legamento crociato",
+    )
+    medium_tokens = (
+        "rientro da ottobre", "rientro inizio ottobre", "rientro da inizio ottobre",
+        "fine ottobre", "da ottobre", "fine settembre",
+        "seconda meta di settembre", "seconda metà di settembre",
+    )
+    short_tokens = (
+        "meta settembre", "metà settembre", "prima meta di settembre",
+        "prima metà di settembre", "prossimo turno", "4a giornata",
+        "4 giornata", "da valutare",
+    )
+    if any(token in text for token in long_tokens):
+        return "Lungo"
+    if any(token in text for token in medium_tokens):
+        return "Medio"
+    if any(token in text for token in short_tokens):
+        return "Breve/Da valutare"
+    return "Da valutare"
+
+
+def _extract_return_hint(note: str) -> str | None:
+    text = re.sub(r"\\s+", " ", str(note or "")).strip()
+    if not text:
+        return None
+    patterns = [
+        r"(?:rientro|recuperabile|convocabile|arruolabile|tornare in campo|tornare convocabile)[^.;]{0,70}",
+        r"(?:da valutare)[^.;]{0,70}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return match.group(0).strip()
+    return None
+
+
+def parse_fantacalcio_injuries(html: str) -> dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    lines = [
+        re.sub(r"\\s+", " ", line).strip()
+        for line in soup.get_text("\\n", strip=True).splitlines()
+        if re.sub(r"\\s+", " ", line).strip()
+    ]
+    team_names = {
+        normalize_string(full_name): code_value
+        for full_name, code_value in TEAM_MAP.items()
+    }
+    team_starts: list[tuple[int, str, str]] = []
+    for i, line in enumerate(lines):
+        team_code = team_names.get(normalize_string(line))
+        if team_code:
+            team_starts.append((i, team_code, line))
+    compact_starts: list[tuple[int, str, str]] = []
+    last_by_team: dict[str, int] = {}
+    for item in team_starts:
+        pos, team_code, label = item
+        if team_code in last_by_team and pos - last_by_team[team_code] <= 2:
+            continue
+        last_by_team[team_code] = pos
+        compact_starts.append(item)
+
+    injuries: list[dict[str, Any]] = []
+    team_sections: set[str] = set()
+    stop_labels = {
+        "prossimo turno", "classifica", "squalificati", "diffidati",
+        "nessuno", "nessun calciatore",
+    }
+    for pos, (start_idx, team_code, _) in enumerate(compact_starts):
+        end_idx = compact_starts[pos + 1][0] if pos + 1 < len(compact_starts) else len(lines)
+        section = lines[start_idx + 1:end_idx]
+        team_sections.add(team_code)
+        j = 0
+        while j < len(section) - 1:
+            name = section[j].strip()
+            note = section[j + 1].strip()
+            name_norm = normalize_string(name)
+            plausible_name = (
+                1 <= len(name) <= 45
+                and name_norm not in stop_labels
+                and not name.endswith(":")
+                and not re.search(r"\\d{1,2}/\\d{1,2}", name)
+                and len(name.split()) <= 5
+            )
+            plausible_note = len(note) >= 25 and normalize_string(note) not in stop_labels
+            if plausible_name and plausible_note:
+                injuries.append({
+                    "source_name": name,
+                    "team": team_code,
+                    "injury_note": note,
+                    "injury_status": _classify_injury_severity(note),
+                    "injury_return": _extract_return_hint(note),
+                })
+                j += 2
+            else:
+                j += 1
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in injuries:
+        key = (normalize_string(str(row.get("source_name") or "")), str(row.get("team") or ""))
+        deduped[key] = row
+    return {"teams": sorted(team_sections), "injuries": list(deduped.values())}
+
+
+def build_injury_preview(db_players: list[dict[str, Any]], injury_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    preview: list[dict[str, Any]] = []
+    unmatched: list[dict[str, Any]] = []
+    for source in injury_rows:
+        source_name = str(source.get("source_name") or "")
+        team = str(source.get("team") or "").upper()
+        candidates = [p for p in db_players if str(p.get("team_nfl") or "").upper() == team]
+        alias_match = None
+        token = _source_alias_token(source_name, team)
+        for player in db_players:
+            aliases = player.get("source_aliases") or []
+            if isinstance(aliases, str): aliases = [aliases]
+            if token in aliases:
+                alias_match = player
+                break
+        if alias_match is not None:
+            match, score = alias_match, 1.0
+        else:
+            ranked = sorted(candidates, key=lambda p: _name_similarity(source_name, str(p.get("name") or "")), reverse=True)
+            match = ranked[0] if ranked else None
+            score = _name_similarity(source_name, str(match.get("name") or "")) if match else 0.0
+        if match is not None and score >= 0.80:
+            preview.append({
+                "player_id": match.get("id"), "name": match.get("name"), "team": team,
+                "role": match.get("role"), "old_status": match.get("injury_status"),
+                "new_status": source.get("injury_status"), "injury_note": source.get("injury_note"),
+                "injury_return": source.get("injury_return"), "match": round(score, 2),
+            })
+        else:
+            unmatched.append({
+                "source_name": source_name, "team": team,
+                "injury_status": source.get("injury_status"), "injury_note": source.get("injury_note"),
+                "best_match": match.get("name") if match else None, "score": round(score, 2),
+            })
+    return preview, unmatched
+
+
+def apply_injury_preview(preview: list[dict[str, Any]], clear_other_players: bool = False) -> tuple[int, int, list[str]]:
+    updated = 0; cleared = 0; errors: list[str] = []
+    now_iso = datetime.now(ZoneInfo("Europe/Rome")).isoformat()
+    injured_ids = {str(row.get("player_id")) for row in preview if row.get("player_id") is not None}
+    for row in preview:
+        try:
+            supabase.table("players").update({
+                "injury_status": row.get("new_status"), "injury_note": row.get("injury_note"),
+                "injury_return": row.get("injury_return"), "injury_source_updated_at": now_iso,
+            }).eq("id", row.get("player_id")).execute()
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{row.get('name')}: {exc}")
+    if clear_other_players:
+        for player in load_players():
+            pid = str(player.get("id"))
+            if pid in injured_ids or player.get("injury_status") in (None, "", "Disponibile"):
+                continue
+            try:
+                supabase.table("players").update({
+                    "injury_status": "Disponibile", "injury_note": None,
+                    "injury_return": None, "injury_source_updated_at": now_iso,
+                }).eq("id", player.get("id")).execute()
+                cleared += 1
+            except Exception as exc:
+                errors.append(f"{player.get('name')}: {exc}")
+    if updated or cleared: invalidate_data_cache()
+    return updated, cleared, errors
+
+
+def resolve_duplicate_group(group: dict[str, Any], keep_id: str, roster_ids: set[str]) -> tuple[int, list[str]]:
+    players = group.get("players") or []
+    errors: list[str] = []
+    rostered = [str(p.get("id")) for p in players if str(p.get("id")) in roster_ids]
+    if rostered and keep_id not in rostered:
+        return 0, ["Il record da mantenere deve essere quello già presente in una rosa."]
+    if len(rostered) > 1:
+        return 0, ["Più duplicati risultano già presenti in rose: risoluzione automatica bloccata."]
+    keep = next((p for p in players if str(p.get("id")) == keep_id), None)
+    if keep is None: return 0, ["Record da mantenere non trovato."]
+    merged_aliases: list[str] = []
+    for p in players:
+        aliases = p.get("source_aliases") or []
+        if isinstance(aliases, str): aliases = [aliases]
+        merged_aliases.extend(str(a) for a in aliases)
+    try:
+        supabase.table("players").update({
+            "name": str(keep.get("name") or "").upper(),
+            "source_aliases": list(dict.fromkeys(merged_aliases)),
+        }).eq("id", keep_id).execute()
+    except Exception as exc:
+        return 0, [f"Errore aggiornamento record mantenuto: {exc}"]
+    deleted = 0
+    for p in players:
+        pid = str(p.get("id"))
+        if pid == keep_id: continue
+        if pid in roster_ids:
+            errors.append(f"{p.get('name')}: record in rosa, non cancellato"); continue
+        try:
+            supabase.table("players").delete().eq("id", pid).execute(); deleted += 1
+        except Exception as exc:
+            errors.append(f"{p.get('name')}: {exc}")
+    if deleted: invalidate_data_cache()
+    return deleted, errors
+
+
+def render_asta_day_validation() -> None:
+    st.markdown("### 🚨 Asta Day — validazione finale")
+    st.caption("Checklist finale: master list Fantacalcio, duplicati, giocatori usciti, nuovi ingressi e cartella medica.")
+    st.markdown("#### 🏥 Cartella medica Fantacalcio")
+    if st.button("Aggiorna infortunati da Fantacalcio", type="primary", use_container_width=True, key="asta_day_fetch_injuries"):
+        with st.spinner("Leggo la Cartella Medica Fantacalcio..."):
+            try:
+                html = _source_http_get(FANTACALCIO_INJURIES_URL)
+                parsed = parse_fantacalcio_injuries(html)
+                preview, unmatched = build_injury_preview(load_players(), parsed["injuries"])
+                st.session_state["asta_day_injury_preview"] = preview
+                st.session_state["asta_day_injury_unmatched"] = unmatched
+                st.session_state["asta_day_injury_teams"] = parsed["teams"]
+            except Exception as exc:
+                st.error(f"Errore lettura cartella medica: {exc}")
+    injury_preview = st.session_state.get("asta_day_injury_preview") or []
+    injury_unmatched = st.session_state.get("asta_day_injury_unmatched") or []
+    injury_teams = st.session_state.get("asta_day_injury_teams") or []
+    if injury_preview or injury_unmatched:
+        i1, i2, i3 = st.columns(3)
+        i1.metric("Infortunati riconosciuti", len(injury_preview)); i2.metric("Da validare", len(injury_unmatched)); i3.metric("Squadre lette", len(injury_teams))
+        if injury_preview:
+            preview_df = pd.DataFrame(injury_preview)
+            order_map = {"Lungo": 0, "Medio": 1, "Breve/Da valutare": 2, "Da valutare": 3}
+            preview_df["_order"] = preview_df["new_status"].map(lambda x: order_map.get(x, 9))
+            st.dataframe(preview_df.sort_values(["_order", "team", "name"]).drop(columns=["_order"]), hide_index=True, use_container_width=True)
+        if injury_unmatched:
+            with st.expander(f"⚠️ Infortunati non riconosciuti ({len(injury_unmatched)})", expanded=True):
+                st.dataframe(pd.DataFrame(injury_unmatched), hide_index=True, use_container_width=True)
+        safe_injury_source = len(injury_preview) >= 10
+        if not safe_injury_source:
+            st.error("Fonte infortuni apparentemente incompleta: sync bloccato.")
+        else:
+            clear_others = st.checkbox("Segna come Disponibile chi non compare più nella Cartella Medica", value=False, key="asta_day_clear_old_injuries")
+            if st.button("✅ Salva cartella medica in Supabase", type="primary", use_container_width=True, key="asta_day_apply_injuries"):
+                updated, cleared, errors = apply_injury_preview(injury_preview, clear_other_players=clear_others)
+                if errors:
+                    st.error(f"Aggiornati {updated} · Ripuliti {cleared} · Errori {len(errors)}"); st.write(errors)
+                else:
+                    st.success(f"Infortuni aggiornati: {updated}. Vecchi stati ripuliti: {cleared}.")
+                    for key in ("asta_day_injury_preview", "asta_day_injury_unmatched", "asta_day_injury_teams"):
+                        st.session_state.pop(key, None)
+                    st.rerun()
+    validation = st.session_state.get("fc_master_validation")
+    if validation:
+        duplicates = validation.get("duplicate_groups") or []
+        if duplicates:
+            st.markdown("#### 👥 Duplicati reali")
+            roster_ids = {str(row.get("player_id")) for row in load_rosters() if row.get("player_id") is not None}
+            for idx, group in enumerate(duplicates):
+                players = group.get("players") or []
+                title = f"{players[0].get('name') if players else 'Duplicato'} · {group.get('team_nfl')} · {group.get('role')}"
+                with st.expander(title, expanded=False):
+                    labels=[]; by_label={}
+                    for p in players:
+                        pid=str(p.get("id")); in_roster=pid in roster_ids
+                        label=f"{p.get('name')} · ID {pid[:8]} · {'IN ROSA' if in_roster else 'libero'}"
+                        labels.append(label); by_label[label]=p
+                    default_idx=next((i for i,l in enumerate(labels) if "IN ROSA" in l),0)
+                    keep_label=st.selectbox("Record da mantenere", labels, index=default_idx, key=f"asta_day_dup_keep_{idx}")
+                    if st.button("Risolvi duplicato", use_container_width=True, key=f"asta_day_dup_apply_{idx}"):
+                        deleted, errors = resolve_duplicate_group(group, str(by_label[keep_label].get("id")), roster_ids)
+                        if errors:
+                            st.error(f"Eliminati {deleted} duplicati · Errori {len(errors)}"); st.write(errors)
+                        else:
+                            st.success(f"Duplicato risolto. Record eliminati: {deleted}.")
+                            st.session_state.pop("fc_master_validation", None); st.rerun()
+
 def render_fantacalcio_master_validation() -> None:
     st.markdown("### 🧾 Fantacalcio Quotazioni — Master List")
     st.caption(
@@ -6366,6 +6648,9 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         "su Supabase finché non confermi esplicitamente."
     )
 
+    render_asta_day_validation()
+
+    st.divider()
     render_fantacalcio_master_validation()
 
     st.divider()
@@ -7228,7 +7513,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
 # MODELLO ECONOMICO v89 — % BUDGET
 # ============================================================
 
-PLAYER_BUDGET_MODEL_VERSION = "v94_role_budget_phase_1"
+PLAYER_BUDGET_MODEL_VERSION = "v99_asta_day_injuries_1"
 
 # Curva economica di riferimento per ruolo.
 # Ogni coppia è (rating, % budget). Il valore viene interpolato.
@@ -7698,6 +7983,14 @@ def get_player_budget_spend_focus(
             if covered
             else BALLLOT_SINGLE_PCT_MALUS
         )
+
+    injury_status = str(player.get("injury_status") or "").strip()
+    if injury_status == "Lungo":
+        pct -= 5.0
+    elif injury_status == "Medio":
+        pct -= 2.0
+    elif injury_status in {"Breve/Da valutare", "Da valutare"}:
+        pct -= 0.7
 
     pct = max(0.2, min(32.0, pct))
     recommended_cap = max(
@@ -8988,8 +9281,10 @@ def _adaptive_low_budget_candidate(
 
     minimum_rating = 6.0 if recovery_mode else 6.5
 
+    injury_status = str(player.get("injury_status") or "").strip()
     return (
         _player_is_currently_usable_starter(player)
+        and injury_status != "Lungo"
         and not is_ballot
         and rating >= minimum_rating
         and price <= cap
@@ -9712,6 +10007,7 @@ def render_top5(
         player
         for player in load_players(role=role)
         if player["id"] not in bought_player_ids
+        and str(player.get("injury_status") or "").strip() != "Lungo"
     ]
     if not available:
         st.sidebar.info("Nessun giocatore disponibile.")
@@ -10632,6 +10928,16 @@ def render_manual_purchase(
     # Ballottaggi e rigoristi provengono dal dataset Fantacalcio aggiornato:
     # sono alert visibili prima di confermare qualsiasi acquisto.
     render_ballot_and_penalty_alerts(selected_player, target_team, state)
+
+    injury_status = str(selected_player.get("injury_status") or "").strip()
+    injury_note = str(selected_player.get("injury_note") or "").strip()
+    injury_return = str(selected_player.get("injury_return") or "").strip()
+    if injury_status == "Lungo":
+        st.error("🚑 **Infortunio lungo: acquisto fortemente sconsigliato.** " + (injury_note or "Stop di lunga durata segnalato.") + (f" · {injury_return}" if injury_return else ""))
+    elif injury_status == "Medio":
+        st.warning("🩹 **Infortunato: stop non breve.** " + (injury_note or "Rientro non immediato.") + (f" · {injury_return}" if injury_return else ""))
+    elif injury_status in {"Breve/Da valutare", "Da valutare"}:
+        st.info("🩺 **Condizione fisica da monitorare.** " + injury_note + (f" · {injury_return}" if injury_return else ""))
 
     spend_focus = get_player_budget_spend_focus(
         selected_player,
