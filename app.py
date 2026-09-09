@@ -1056,7 +1056,7 @@ def render_login_page() -> None:
         '<div class="login-brand">'
         '<div class="login-eyebrow">fantahe1per</div>'
         '<div class="login-title">⚽ Auction &amp; Season Center</div>'
-        '<div class="login-subtitle">Asta, rosa, formazione e campionato in un unico posto.</div>'
+        '<div class="login-subtitle">Rosa, formazione, statistiche e campionato in un unico posto.</div>'
         '</div>'
         '<div class="login-card">'
         '<div class="login-card-title">Accedi per continuare</div>'
@@ -1320,8 +1320,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
     avatar = escape(_auth_avatar_url(user), quote=True)
 
     pages = {
-        "Asta": "🎯",
-        "Lega": "📊",
+        "Valutazioni": "📊",
         "Giocatori": "⭐",
         "Giornate": "📥",
         "Formazione": "🧠",
@@ -1332,7 +1331,7 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
         pages["Dati giocatori"] = "🔄"
 
     if st.session_state.get("active_page") not in pages:
-        st.session_state["active_page"] = "Asta"
+        st.session_state["active_page"] = "Valutazioni"
 
     st.markdown(
         """
@@ -6648,22 +6647,13 @@ def render_player_data_updater_page(user: dict[str, Any]) -> None:
         "su Supabase finché non confermi esplicitamente."
     )
 
-    render_asta_day_validation()
+    st.info(
+        "Modalità post-asta: rimossi listone, mapping, validazione asta e strumenti "
+        "di acquisto. Restano gli aggiornamenti utili a formazione, disponibilità "
+        "e statistiche dei giocatori."
+    )
 
-    st.divider()
-    render_fantacalcio_master_validation()
-
-    st.divider()
-    render_uploaded_listone_checker()
-
-    st.divider()
-    render_strategy_notes_mapping_validator()
-
-    st.divider()
-    render_fantacalcio_hierarchy_diagnostic()
-
-    st.divider()
-    st.markdown("### 🌐 Controllo fonti online")
+    st.markdown("### 🌐 Aggiornamento dati online")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -7513,7 +7503,7 @@ def get_player_strategy_note_for_player(player: dict[str, Any]) -> dict[str, Any
 # MODELLO ECONOMICO v89 — % BUDGET
 # ============================================================
 
-PLAYER_BUDGET_MODEL_VERSION = "v99_asta_day_injuries_1"
+PLAYER_BUDGET_MODEL_VERSION = "v101_post_auction"
 
 # Curva economica di riferimento per ruolo.
 # Ogni coppia è (rating, % budget). Il valore viene interpolato.
@@ -8847,7 +8837,7 @@ def render_team_analysis(
     ratings: dict[str, float],
 ) -> None:
     st.sidebar.divider()
-    st.sidebar.subheader("🔮 Analisi Asta & Valutazione")
+    st.sidebar.subheader("🔮 Valutazione rosa")
 
     team_names = teams_df["name"].tolist()
     if not team_names:
@@ -12895,138 +12885,15 @@ def main() -> None:
         else 0
     )
 
-    sidebar_role = get_my_team_draft_role(state)
-
-    # La Top 5 segue il ruolo selezionato nell'Asta SOLO se quel ruolo
-    # ha ancora slot disponibili. Se il ruolo è stato completato, passa
-    # automaticamente al prossimo ruolo di draft (es. D 8/8 -> C).
-    selected_sidebar_role = sidebar_role
-    if active_page == "Asta":
-        selected_role_label = st.session_state.get("main_role_select")
-        selected_role = ROLE_LABELS.get(selected_role_label)
-
-        if selected_role in {"P", "D", "C", "A"}:
-            selected_count = int(
-                state.team_role_totals
-                .get(my_team_name or "", {})
-                .get(selected_role, 0)
-            )
-            selected_limit = int(ROLE_LIMITS.get(selected_role, 0))
-
-            if selected_count < selected_limit:
-                selected_sidebar_role = selected_role
-            else:
-                # Il ruolo selezionato è completo: riallinea subito anche
-                # il selectbox dell'Asta al prossimo ruolo necessario.
-                selected_sidebar_role = sidebar_role
-                if sidebar_role in {"P", "D", "C", "A"}:
-                    st.session_state["main_role_select"] = role_label(
-                        sidebar_role
-                    )
-
-    # Il prossimo acquisto consigliato segue sempre il prossimo ruolo
-    # ancora incompleto della rosa.
-    if not auction_finished and sidebar_role:
-        render_smart_next_purchase_card(
-            state,
-            rosters,
-            preferred_players,
-            sidebar_role,
-        )
-
-    if not auction_finished and selected_sidebar_role:
-        render_top5(
-            selected_sidebar_role,
-            state.bought_player_ids,
-            preferred_players,
-            state,
-        )
-
+    # Post-asta: niente consigli acquisto / Top 5.
+    # Manteniamo soltanto la valutazione della rosa e il confronto tra squadre.
     render_team_analysis(
         teams_df,
         state,
         ratings,
     )
 
-    if active_page == "Asta":
-        render_auction_dashboard_header(teams_df, state, ratings)
-
-        # Mostrato dopo il rerun dell'acquisto.
-        render_pending_purchase_banner()
-
-        refresh_col, _ = st.columns([1, 6])
-        with refresh_col:
-            if st.button("↻ Aggiorna", key="refresh_live_data"):
-                invalidate_data_cache()
-                st.rerun()
-
-        st.markdown('<div class="rcd-section">🎯 Acquista giocatore</div>', unsafe_allow_html=True)
-
-        if auction_finished:
-            st.success(
-                "🎉 **ASTA CONCLUSA!** Tutte le squadre hanno completato "
-                "le proprie rose."
-            )
-            current_role = "ALL"
-        else:
-            current_role = "ALL"
-
-        # Il pannello contiene tutti e 5 i dropdown/controlli sulla stessa riga.
-        draft_role = get_my_team_draft_role(state)
-        if draft_role:
-            draft_label = role_label(draft_role)
-            valid_role_labels = [
-                label for label, role in ROLE_LABELS.items()
-                if role == "ALL" or role == draft_role or (
-                    role in DRAFT_ORDER and state.team_role_totals.get(my_team_name or "", {}).get(role, 0) < ROLE_LIMITS[role]
-                )
-            ]
-            if st.session_state.get("main_role_select") not in valid_role_labels:
-                st.session_state["main_role_select"] = draft_label
-            current_role = draft_role
-        else:
-            current_role = "ALL"
-
-        current_role = render_manual_purchase(
-            teams_df,
-            state,
-            current_role,
-            rosters,
-        )
-
-        resolved_my_team = resolve_my_team_name(teams_df["name"].tolist())
-        if resolved_my_team:
-            db_team_count = sum(
-                1 for roster in rosters
-                if roster.get("teams", {}).get("name") == resolved_my_team
-                and roster.get("players")
-            )
-            if db_team_count != state.team_total_bought.get(resolved_my_team, 0):
-                st.warning(
-                    "⚠️ Incoerenza nei dati caricati: "
-                    f"Supabase contiene {db_team_count} giocatori per **{resolved_my_team}**, "
-                    f"ma lo stato dell'asta ne ha caricati {state.team_total_bought.get(resolved_my_team, 0)}. "
-                    "La query delle rose è stata resa esplicita tramite team_id/player_id per evitare questo problema."
-                )
-
-        render_my_team_evaluation(
-            teams_df,
-            state,
-            ratings,
-            rosters,
-        )
-
-        render_my_roster(state)
-
-        if _is_player_data_admin(current_user):
-            with st.expander("🛠️ Strumenti asta e diagnostica", expanded=False):
-                render_admin_tools(
-                    teams_df,
-                    state,
-                    current_user,
-                )
-
-    elif active_page == "Lega":
+    if active_page == "Valutazioni":
         render_team_overview(
             teams_df,
             state,
@@ -13062,11 +12929,6 @@ def main() -> None:
     elif active_page == "Dati giocatori":
         if _is_player_data_admin(current_user):
             render_player_data_updater_page(current_user)
-            with st.expander(
-                "🛠️ Correzioni manuali rating (legacy / emergenza)",
-                expanded=False,
-            ):
-                render_player_modifiers_tab()
 
 
 if __name__ == "__main__":
