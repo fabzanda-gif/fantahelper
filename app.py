@@ -13098,12 +13098,15 @@ def render_formation_lab_tab(state: AuctionState) -> None:
     c2.metric("Titolari", len(xi))
     c3.metric("Alert rosa", len(alerts))
 
-    st.dataframe(
-        xi[["Ruolo", "Nome", "Stato", "Motivo", "Rating"]],
-        hide_index=True,
-        use_container_width=True,
-        column_config={"Rating": st.column_config.NumberColumn(format="%.1f")},
-    )
+    render_pitch(module, xi)
+
+    with st.expander("📋 Dettaglio XI consigliato", expanded=False):
+        st.dataframe(
+            xi[["Ruolo", "Nome", "Stato", "Motivo", "Rating"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Rating": st.column_config.NumberColumn(format="%.1f")},
+        )
 
     team_name, players, _ = get_my_team_players_and_purchases(state)
     chosen_names = set(xi["Nome"].astype(str))
@@ -13127,17 +13130,44 @@ def render_formation_lab_tab(state: AuctionState) -> None:
         })
 
     if bench:
-        st.markdown("### 🪑 Panchina consigliata / alternative")
+        st.markdown("### 🪑 Panchina / alternative")
         bench_df = pd.DataFrame(bench).sort_values(
             ["Ruolo", "Rating"],
             ascending=[True, False],
         )
-        st.dataframe(
-            bench_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={"Rating": st.column_config.NumberColumn(format="%.1f")},
-        )
+
+        # Prima fascia di alternative, leggibile anche da mobile.
+        top_bench = bench_df.head(7)
+        cols = st.columns(min(4, len(top_bench)))
+        for idx, (_, row) in enumerate(top_bench.iterrows()):
+            with cols[idx % len(cols)]:
+                status = str(row.get("Stato") or "")
+                icon = "🟢" if status == "START" else "🟠" if status == "BALLOTTAGGIO" else "🔴" if status == "OUT" else "⚪"
+                st.markdown(
+                    f"""
+                    <div style="
+                        border:1px solid #e2e8f0;
+                        border-radius:12px;
+                        padding:10px 12px;
+                        margin-bottom:8px;
+                        background:white;
+                    ">
+                        <div style="font-weight:900;color:#17325f;">{icon} {escape(str(row['Nome']))}</div>
+                        <div style="font-size:.78rem;color:#64748b;">
+                            {escape(str(row['Ruolo']))} · rating {float(row['Rating']):.1f}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        with st.expander("Vedi tutta la panchina", expanded=False):
+            st.dataframe(
+                bench_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Rating": st.column_config.NumberColumn(format="%.1f")},
+            )
 
     if alerts:
         st.markdown("### ⚠️ Cose da controllare prima del turno")
@@ -13756,6 +13786,287 @@ def build_recommended_xi(
     return module, xi.drop(columns=["_role_order"]), alerts
 
 
+
+def _pitch_positions_for_module(module: str) -> dict[str, list[tuple[float, float]]]:
+    """
+    Coordinate percentuali (left, top) per un campo verticale.
+    top=88 è il portiere; top=16 è la linea offensiva.
+    """
+    layouts = {
+        "3-4-3": {
+            "P": [(50, 88)],
+            "D": [(20, 70), (50, 73), (80, 70)],
+            "C": [(14, 47), (38, 52), (62, 52), (86, 47)],
+            "A": [(20, 22), (50, 16), (80, 22)],
+        },
+        "3-5-2": {
+            "P": [(50, 88)],
+            "D": [(20, 70), (50, 73), (80, 70)],
+            "C": [(12, 47), (31, 52), (50, 45), (69, 52), (88, 47)],
+            "A": [(35, 20), (65, 20)],
+        },
+        "4-3-3": {
+            "P": [(50, 88)],
+            "D": [(12, 69), (37, 73), (63, 73), (88, 69)],
+            "C": [(24, 48), (50, 43), (76, 48)],
+            "A": [(20, 22), (50, 16), (80, 22)],
+        },
+        "4-4-2": {
+            "P": [(50, 88)],
+            "D": [(12, 69), (37, 73), (63, 73), (88, 69)],
+            "C": [(14, 46), (38, 51), (62, 51), (86, 46)],
+            "A": [(35, 20), (65, 20)],
+        },
+        "4-5-1": {
+            "P": [(50, 88)],
+            "D": [(12, 69), (37, 73), (63, 73), (88, 69)],
+            "C": [(12, 47), (31, 52), (50, 45), (69, 52), (88, 47)],
+            "A": [(50, 18)],
+        },
+        "5-3-2": {
+            "P": [(50, 88)],
+            "D": [(8, 67), (29, 73), (50, 76), (71, 73), (92, 67)],
+            "C": [(24, 47), (50, 43), (76, 47)],
+            "A": [(35, 20), (65, 20)],
+        },
+        "5-4-1": {
+            "P": [(50, 88)],
+            "D": [(8, 67), (29, 73), (50, 76), (71, 73), (92, 67)],
+            "C": [(14, 46), (38, 51), (62, 51), (86, 46)],
+            "A": [(50, 18)],
+        },
+    }
+    return layouts.get(module, layouts["4-3-3"])
+
+
+def render_pitch(
+    module: str,
+    xi: pd.DataFrame,
+    compact: bool = False,
+) -> None:
+    if xi is None or xi.empty:
+        st.info("Formazione non disponibile.")
+        return
+
+    positions = _pitch_positions_for_module(module)
+    counters = {"P": 0, "D": 0, "C": 0, "A": 0}
+    cards = []
+
+    status_class = {
+        "START": "pitch-start",
+        "BALLOTTAGGIO": "pitch-ballot",
+        "PANCA": "pitch-bench",
+        "OUT": "pitch-out",
+    }
+
+    for _, row in xi.iterrows():
+        role = str(row.get("Ruolo") or "")
+        role_positions = positions.get(role) or []
+        idx = counters.get(role, 0)
+        counters[role] = idx + 1
+        if idx >= len(role_positions):
+            continue
+
+        left, top = role_positions[idx]
+        name = escape(str(row.get("Nome") or "—"))
+        status = str(row.get("Stato") or "START")
+        rating = row.get("Rating")
+        try:
+            rating_label = f"{float(rating):.1f}"
+        except Exception:
+            rating_label = "—"
+
+        cls = status_class.get(status, "pitch-start")
+        cards.append(
+            f"""
+            <div class="pitch-player {cls}" style="left:{left}%; top:{top}%;">
+                <div class="pitch-player-top">
+                    <span class="pitch-role pitch-role-{role.lower()}">{escape(role)}</span>
+                    <span class="pitch-rating">{rating_label}</span>
+                </div>
+                <div class="pitch-name">{name}</div>
+                <div class="pitch-status">{escape(status)}</div>
+            </div>
+            """
+        )
+
+    height = 610 if not compact else 500
+    st.markdown(
+        f"""
+        <style>
+        .fh-pitch-wrap {{
+            width:100%;
+            max-width:980px;
+            margin:0 auto 14px auto;
+        }}
+        .fh-pitch {{
+            position:relative;
+            width:100%;
+            height:{height}px;
+            border-radius:22px;
+            overflow:hidden;
+            border:3px solid rgba(255,255,255,.92);
+            box-shadow:0 12px 34px rgba(15,23,42,.18);
+            background:
+                repeating-linear-gradient(
+                    90deg,
+                    rgba(255,255,255,.035) 0,
+                    rgba(255,255,255,.035) 11%,
+                    rgba(0,0,0,.025) 11%,
+                    rgba(0,0,0,.025) 22%
+                ),
+                linear-gradient(180deg,#219653 0%,#168247 100%);
+        }}
+        .fh-pitch:before {{
+            content:"";
+            position:absolute;
+            inset:3.2% 4.2%;
+            border:2px solid rgba(255,255,255,.8);
+            border-radius:4px;
+            pointer-events:none;
+        }}
+        .fh-pitch:after {{
+            content:"";
+            position:absolute;
+            left:4.2%;
+            right:4.2%;
+            top:50%;
+            height:2px;
+            background:rgba(255,255,255,.78);
+            pointer-events:none;
+        }}
+        .pitch-center-circle {{
+            position:absolute;
+            width:112px;
+            height:112px;
+            border:2px solid rgba(255,255,255,.78);
+            border-radius:50%;
+            left:50%;
+            top:50%;
+            transform:translate(-50%,-50%);
+            z-index:1;
+        }}
+        .pitch-center-dot {{
+            position:absolute;
+            width:7px;
+            height:7px;
+            background:rgba(255,255,255,.85);
+            border-radius:50%;
+            left:50%;
+            top:50%;
+            transform:translate(-50%,-50%);
+            z-index:1;
+        }}
+        .pitch-box {{
+            position:absolute;
+            left:31%;
+            width:38%;
+            height:14%;
+            border:2px solid rgba(255,255,255,.78);
+            z-index:1;
+        }}
+        .pitch-box-top {{ top:3.2%; border-top:none; }}
+        .pitch-box-bottom {{ bottom:3.2%; border-bottom:none; }}
+        .pitch-goal {{
+            position:absolute;
+            left:41%;
+            width:18%;
+            height:4%;
+            border:2px solid rgba(255,255,255,.78);
+            z-index:1;
+        }}
+        .pitch-goal-top {{ top:3.2%; border-top:none; }}
+        .pitch-goal-bottom {{ bottom:3.2%; border-bottom:none; }}
+        .pitch-player {{
+            position:absolute;
+            transform:translate(-50%,-50%);
+            width:118px;
+            min-height:72px;
+            padding:8px 9px 7px 9px;
+            border-radius:13px;
+            background:rgba(255,255,255,.96);
+            box-shadow:0 5px 18px rgba(0,0,0,.20);
+            z-index:4;
+            color:#13213c;
+            border:2px solid rgba(255,255,255,.85);
+        }}
+        .pitch-player-top {{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:6px;
+            margin-bottom:5px;
+        }}
+        .pitch-role {{
+            display:inline-flex;
+            min-width:25px;
+            height:23px;
+            padding:0 7px;
+            align-items:center;
+            justify-content:center;
+            border-radius:8px;
+            font-size:.73rem;
+            font-weight:900;
+            color:white;
+        }}
+        .pitch-role-p {{ background:#f5a623; }}
+        .pitch-role-d {{ background:#20b75a; }}
+        .pitch-role-c {{ background:#3788e8; }}
+        .pitch-role-a {{ background:#ee4055; }}
+        .pitch-rating {{
+            font-size:.78rem;
+            font-weight:900;
+            background:#e8f7ed;
+            border-radius:7px;
+            padding:3px 6px;
+        }}
+        .pitch-name {{
+            font-size:.79rem;
+            font-weight:950;
+            text-align:center;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+        }}
+        .pitch-status {{
+            margin-top:4px;
+            font-size:.61rem;
+            text-align:center;
+            font-weight:900;
+            letter-spacing:.04em;
+        }}
+        .pitch-start {{ border-bottom:4px solid #22c55e; }}
+        .pitch-ballot {{ border-bottom:4px solid #f59e0b; }}
+        .pitch-bench {{ border-bottom:4px solid #94a3b8; }}
+        .pitch-out {{ border-bottom:4px solid #ef4444; opacity:.82; }}
+        @media (max-width: 760px) {{
+            .fh-pitch {{ height:520px; }}
+            .pitch-player {{
+                width:92px;
+                min-height:64px;
+                padding:6px 6px;
+            }}
+            .pitch-name {{ font-size:.69rem; }}
+            .pitch-status {{ font-size:.53rem; }}
+            .pitch-center-circle {{ width:82px; height:82px; }}
+        }}
+        </style>
+        <div class="fh-pitch-wrap">
+            <div class="fh-pitch">
+                <div class="pitch-box pitch-box-top"></div>
+                <div class="pitch-box pitch-box-bottom"></div>
+                <div class="pitch-goal pitch-goal-top"></div>
+                <div class="pitch-goal pitch-goal-bottom"></div>
+                <div class="pitch-center-circle"></div>
+                <div class="pitch-center-dot"></div>
+                {''.join(cards)}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_matchday_home(
     state: AuctionState,
     teams_df: pd.DataFrame,
@@ -13831,15 +14142,7 @@ def render_matchday_home(
         top2.metric("Alert rosa", len(alerts))
         top3.metric("XI disponibile", "11/11")
 
-        show = xi[["Ruolo", "Nome", "Stato", "Motivo", "Rating"]].copy()
-        st.dataframe(
-            show,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Rating": st.column_config.NumberColumn(format="%.1f"),
-            },
-        )
+        render_pitch(module, xi, compact=True)
 
         if alerts:
             with st.expander(f"⚠️ Dubbi / indisponibili ({len(alerts)})", expanded=True):
