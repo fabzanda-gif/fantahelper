@@ -12864,39 +12864,34 @@ def render_matchday_import_tab() -> None:
 
     if selected_round is not None:
         st.markdown("### ⏳ Deadline formazione")
-        current_deadline = _parse_iso_datetime(selected_round.get("formation_deadline"))
-        dcol1, dcol2, dcol3 = st.columns([1, 1, 1])
-        with dcol1:
-            deadline_date = st.date_input(
-                "Data",
-                value=current_deadline.date() if current_deadline else datetime.now(ZoneInfo("Europe/Rome")).date(),
-                key=f"deadline_date_{selected_round['id']}",
-            )
-        with dcol2:
-            deadline_time = st.time_input(
-                "Ora",
-                value=current_deadline.time().replace(second=0, microsecond=0) if current_deadline else datetime.strptime("15:00", "%H:%M").time(),
-                key=f"deadline_time_{selected_round['id']}",
-            )
-        with dcol3:
-            countdown_label, _ = format_deadline_countdown(selected_round.get("formation_deadline"))
-            st.metric("Tempo rimasto", countdown_label)
+        deadline_iso, deadline_source, deadline_auto = effective_round_deadline(
+            selected_round,
+            persist=True,
+        )
+        countdown_label, countdown_state = format_deadline_countdown(deadline_iso)
+        deadline_dt = _parse_iso_datetime(deadline_iso)
 
-        if st.button(
-            "Salva deadline",
-            use_container_width=True,
-            key=f"save_deadline_{selected_round['id']}",
-        ):
-            ok, error = save_round_deadline(
-                str(selected_round["id"]),
-                deadline_date,
-                deadline_time,
+        dcol1, dcol2, dcol3 = st.columns([1.2, 1, 1])
+        dcol1.metric(
+            "Prima partita Serie A",
+            deadline_dt.strftime("%d/%m · %H:%M") if deadline_dt else "Non disponibile",
+        )
+        dcol2.metric("Tempo rimasto", countdown_label)
+        dcol3.metric(
+            "Fonte",
+            "Automatica" if deadline_auto else "Fallback",
+        )
+
+        if deadline_auto:
+            st.caption(
+                f"Deadline = calcio d'inizio della prima partita della "
+                f"{int(selected_round['serie_a_round'])}ª giornata di Serie A."
             )
-            if ok:
-                st.success("Deadline salvata.")
-                st.rerun()
-            else:
-                st.error(error)
+        else:
+            st.warning(
+                "Non riesco a leggere in questo momento l'orario del turno da Fantacalcio. "
+                "Uso l'eventuale valore già salvato in Supabase."
+            )
 
         st.markdown("### 🔄 Import ufficiale da Leghe Fantacalcio")
         st.caption(
@@ -13767,6 +13762,106 @@ def build_recommended_xi(
 
 
 
+
+FANTACALCIO_ROUND_SCHEDULE_URL = "https://www.fantacalcio.it/convocati-serie-a/{round_number}"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_serie_a_round_deadline(
+    serie_a_round: int,
+    season: str = "2026-27",
+) -> tuple[str | None, str | None]:
+    """
+    La deadline della nostra lega coincide con il calcio d'inizio della
+    prima partita della giornata Serie A corrispondente.
+    Fonte: calendario turno Fantacalcio.
+    """
+    url = FANTACALCIO_ROUND_SCHEDULE_URL.format(round_number=int(serie_a_round))
+    try:
+        response = requests.get(
+            url,
+            timeout=20,
+            headers={
+                "User-Agent": "Mozilla/5.0 fantahe1per/1.0",
+                "Accept-Language": "it-IT,it;q=0.9",
+            },
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        matches = re.findall(
+            r"\b(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})\b",
+            text,
+        )
+        if not matches:
+            return None, url
+
+        start_year = int(str(season).split("-")[0])
+        candidates: list[datetime] = []
+        for day, month, hour, minute in matches:
+            d = int(day)
+            m = int(month)
+            h = int(hour)
+            mi = int(minute)
+
+            # Agosto-Dicembre appartengono al primo anno della stagione;
+            # Gennaio-Giugno al secondo.
+            year = start_year if m >= 7 else start_year + 1
+            try:
+                candidates.append(
+                    datetime(
+                        year, m, d, h, mi,
+                        tzinfo=ZoneInfo("Europe/Rome"),
+                    )
+                )
+            except ValueError:
+                continue
+
+        if not candidates:
+            return None, url
+
+        deadline = min(candidates)
+        return deadline.isoformat(), url
+    except Exception:
+        return None, url
+
+
+def effective_round_deadline(
+    round_row: dict[str, Any] | None,
+    persist: bool = True,
+) -> tuple[str | None, str | None, bool]:
+    """
+    Ritorna (deadline_iso, source_url, automatic).
+    Preferisce sempre il calendario ufficiale del turno; il valore Supabase
+    resta come fallback se la fonte online non è momentaneamente raggiungibile.
+    """
+    if not round_row:
+        return None, None, False
+
+    serie_a_round = int(round_row.get("serie_a_round") or 0)
+    season = str(round_row.get("season") or "2026-27")
+    fetched, source_url = fetch_serie_a_round_deadline(serie_a_round, season)
+
+    if fetched:
+        current = str(round_row.get("formation_deadline") or "")
+        if persist and fetched != current:
+            try:
+                supabase.table("league_rounds").update({
+                    "formation_deadline": fetched,
+                    "updated_at": datetime.now(
+                        ZoneInfo("Europe/Rome")
+                    ).isoformat(),
+                }).eq("id", round_row["id"]).execute()
+                round_row["formation_deadline"] = fetched
+            except Exception:
+                pass
+        return fetched, source_url, True
+
+    fallback = round_row.get("formation_deadline")
+    return (str(fallback) if fallback else None), source_url, False
+
+
 def _parse_iso_datetime(value: Any) -> datetime | None:
     if not value:
         return None
@@ -13782,7 +13877,7 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
 def format_deadline_countdown(deadline_value: Any) -> tuple[str, str]:
     deadline = _parse_iso_datetime(deadline_value)
     if deadline is None:
-        return "Deadline da impostare", "neutral"
+        return "Orario non disponibile", "neutral"
 
     now = datetime.now(ZoneInfo("Europe/Rome"))
     delta = deadline - now
@@ -14338,9 +14433,8 @@ def render_matchday_sidebar(state: AuctionState) -> None:
         "away" if side == "home" else "home",
     )
     opp = opponent_form_summary(opponent_id)
-    countdown, countdown_state = format_deadline_countdown(
-        current_round.get("formation_deadline")
-    )
+    deadline_iso, _, _ = effective_round_deadline(current_round, persist=True)
+    countdown, countdown_state = format_deadline_countdown(deadline_iso)
     lineup = load_team_lineup_submission(str(current_round.get("id")), my_team_id)
     standings = load_league_standings()
     my_standing = next(
@@ -14723,7 +14817,8 @@ def render_matchday_home(
         side_opp = "away" if side == "home" else "home"
         opponent_id = _team_id_from_fixture_side(next_fixture, side_opp)
         opp_form = opponent_form_summary(opponent_id)
-        countdown_label, _ = format_deadline_countdown(current_round.get("formation_deadline"))
+        deadline_iso, _, _ = effective_round_deadline(current_round, persist=True)
+        countdown_label, _ = format_deadline_countdown(deadline_iso)
 
         c1, c2, c3, c4 = st.columns([1.45, 1, 1, 1])
         c1.metric("Avversario", opponent, opp_form["difficulty"])
