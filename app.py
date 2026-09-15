@@ -13891,8 +13891,7 @@ def render_pitch(
         )
 
     height = 610 if not compact else 500
-    st.markdown(
-        f"""
+    pitch_html = f"""
         <style>
         .fh-pitch-wrap {{
             width:100%;
@@ -14062,8 +14061,11 @@ def render_pitch(
                 {''.join(cards)}
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+    """
+    components.html(
+        pitch_html,
+        height=height + 40,
+        scrolling=False,
     )
 
 
