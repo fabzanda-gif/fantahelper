@@ -1,3 +1,5 @@
+-- Manual rollback stored outside migrations so Supabase CLI never applies it automatically.
+
 begin;
 
 alter table public.player_strategy_notes
