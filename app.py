@@ -12411,12 +12411,180 @@ def get_season_rules_ui() -> dict[str, float]:
     return st.session_state.season_rules
 
 
+
+def load_season_rounds(season: str = "2026-27") -> list[dict[str, Any]]:
+    try:
+        result = (
+            supabase.table("league_rounds")
+            .select("id,season,league_round,serie_a_round,status")
+            .eq("season", season)
+            .order("league_round")
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        return []
+
+
+def load_round_fixtures(round_id: str) -> list[dict[str, Any]]:
+    if not round_id:
+        return []
+    try:
+        result = (
+            supabase.table("league_fixtures")
+            .select(
+                "id,round_id,home_team_id,away_team_id,home_fantapoints,"
+                "away_fantapoints,home_goals,away_goals,status"
+            )
+            .eq("round_id", round_id)
+            .execute()
+        )
+        rows = result.data or []
+        teams_by_id = {str(t.get("id")): t.get("name") for t in load_teams()}
+        for row in rows:
+            row["home_team_name"] = teams_by_id.get(str(row.get("home_team_id")), "—")
+            row["away_team_name"] = teams_by_id.get(str(row.get("away_team_id")), "—")
+        return rows
+    except Exception:
+        return []
+
+
+def _vote_player_candidates(vote_row: pd.Series, players: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    target = normalize_string(vote_row.get("Giocatore", ""))
+    source_team = str(vote_row.get("Squadra") or "").strip().upper()
+    if not target:
+        return []
+
+    exact = [p for p in players if normalize_string(p.get("name", "")) == target]
+    if source_team:
+        same_team = [p for p in exact if str(p.get("team_nfl") or "").upper() == source_team]
+        if len(same_team) == 1:
+            return same_team
+    if len(exact) == 1:
+        return exact
+
+    # Alias persistenti: TEAM|NOME_FONTE.
+    alias_hits = []
+    for player in players:
+        aliases = player.get("source_aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        for alias in aliases:
+            token = str(alias or "")
+            alias_name = token.split("|", 1)[1] if "|" in token else token
+            if normalize_string(alias_name) == target:
+                alias_hits.append(player)
+                break
+    if source_team:
+        same_team = [p for p in alias_hits if str(p.get("team_nfl") or "").upper() == source_team]
+        if len(same_team) == 1:
+            return same_team
+    if len(alias_hits) == 1:
+        return alias_hits
+
+    return exact or alias_hits
+
+
+def save_votes_to_supabase(
+    votes: pd.DataFrame,
+    serie_a_round: int,
+    season: str = "2026-27",
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+    players = load_players()
+    payload = []
+    missing = []
+    ambiguous = []
+
+    for _, row in votes.iterrows():
+        candidates = _vote_player_candidates(row, players)
+        if not candidates:
+            missing.append({
+                "Giocatore": row.get("Giocatore"),
+                "Squadra": row.get("Squadra"),
+                "Ruolo": row.get("Ruolo"),
+            })
+            continue
+        if len(candidates) > 1:
+            ambiguous.append({
+                "Giocatore": row.get("Giocatore"),
+                "Squadra": row.get("Squadra"),
+                "Candidati": " | ".join(str(p.get("name")) for p in candidates),
+            })
+            continue
+
+        player = candidates[0]
+        vote = row.get("Voto")
+        fantasy_score = row.get("Fantavoto")
+        payload.append({
+            "season": season,
+            "serie_a_round": int(serie_a_round),
+            "player_id": player.get("id"),
+            "vote": None if vote is None or pd.isna(vote) else float(vote),
+            "fantasy_score": None if fantasy_score is None or pd.isna(fantasy_score) else float(fantasy_score),
+            "goals_scored": int(row.get("Gf", 0) or 0),
+            "goals_conceded": int(row.get("Gs", 0) or 0),
+            "penalties_saved": int(row.get("Rp", 0) or 0),
+            "penalties_missed": int(row.get("Rs", 0) or 0),
+            "penalties_scored": int(row.get("Rf", 0) or 0),
+            "own_goals": int(row.get("Au", 0) or 0),
+            "yellow_cards": int(row.get("Amm", 0) or 0),
+            "red_cards": int(row.get("Esp", 0) or 0),
+            "assists": int(row.get("Ass", 0) or 0),
+            "clean_sheet": bool(row.get("Ruolo") == "P" and int(row.get("Gs", 0) or 0) == 0 and vote is not None and not pd.isna(vote)),
+            "played": bool(vote is not None and not pd.isna(vote)),
+            "source": "Fantacalcio XLSX",
+            "source_player_name": str(row.get("Giocatore") or ""),
+            "updated_at": datetime.now(ZoneInfo("Europe/Rome")).isoformat(),
+        })
+
+    if payload:
+        supabase.table("player_round_scores").upsert(
+            payload,
+            on_conflict="season,serie_a_round,player_id",
+        ).execute()
+
+    return len(payload), missing, ambiguous
+
+
 def render_matchday_import_tab() -> None:
-    st.markdown('<div class="rcd-section">📥 Importa voti giornata</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rcd-section">📥 Giornata · calendario e voti</div>', unsafe_allow_html=True)
     st.caption(
-        "Area di test per i file XLSX Fantacalcio. Per ora i dati restano nella sessione "
-        "e non vengono scritti su Supabase."
+        "Il calendario è persistente in Supabase. Seleziona la giornata di lega, "
+        "carica l'XLSX voti Fantacalcio e salva i voti sul database."
     )
+
+    rounds = load_season_rounds("2026-27")
+    selected_round = None
+    if rounds:
+        labels = {
+            f"{r['league_round']}ª lega · {r['serie_a_round']}ª Serie A": r
+            for r in rounds
+        }
+        selected_label = st.selectbox(
+            "Giornata",
+            list(labels.keys()),
+            key="season_selected_round",
+        )
+        selected_round = labels[selected_label]
+        fixtures = load_round_fixtures(str(selected_round.get("id")))
+        if fixtures:
+            fixture_df = pd.DataFrame([
+                {
+                    "Casa": f.get("home_team_name"),
+                    "Trasferta": f.get("away_team_name"),
+                    "FP casa": f.get("home_fantapoints"),
+                    "FP trasferta": f.get("away_fantapoints"),
+                    "Gol casa": f.get("home_goals"),
+                    "Gol trasferta": f.get("away_goals"),
+                    "Stato": f.get("status"),
+                }
+                for f in fixtures
+            ])
+            st.dataframe(fixture_df, hide_index=True, use_container_width=True)
+    else:
+        st.warning(
+            "Calendario Supabase non trovato. Esegui prima setup_stagione_calendario_v110.sql."
+        )
 
     left, right = st.columns([1.25, 1])
     with left:
@@ -12488,6 +12656,37 @@ def render_matchday_import_tab() -> None:
             c4.metric("Assist", int(votes["Ass"].sum()))
 
             st.success(f"File letto correttamente: **{uploaded.name}** · redazione **{sheet}**.")
+
+            if selected_round is not None:
+                if st.button(
+                    f"💾 Salva voti · {selected_round['serie_a_round']}ª Serie A",
+                    type="primary",
+                    use_container_width=True,
+                    key="save_round_votes_supabase",
+                ):
+                    try:
+                        saved, missing, ambiguous = save_votes_to_supabase(
+                            votes,
+                            int(selected_round["serie_a_round"]),
+                            "2026-27",
+                        )
+                        if missing or ambiguous:
+                            st.warning(
+                                f"Salvati {saved} voti. Da validare: "
+                                f"{len(missing)} mancanti, {len(ambiguous)} ambigui."
+                            )
+                            if missing:
+                                st.dataframe(pd.DataFrame(missing), hide_index=True, use_container_width=True)
+                            if ambiguous:
+                                st.dataframe(pd.DataFrame(ambiguous), hide_index=True, use_container_width=True)
+                        else:
+                            st.success(f"Salvati {saved} record in Supabase.")
+                            supabase.table("league_rounds").update({
+                                "status": "votes_loaded",
+                                "updated_at": datetime.now(ZoneInfo("Europe/Rome")).isoformat(),
+                            }).eq("id", selected_round["id"]).execute()
+                    except Exception as save_exc:
+                        st.error(f"Errore salvataggio voti su Supabase: {save_exc}")
         except Exception as exc:
             st.error(f"Errore durante la lettura del file: {exc}")
             return
@@ -12540,8 +12739,8 @@ def _match_vote_for_player(player: dict[str, Any], votes: pd.DataFrame) -> pd.Se
 def render_formation_lab_tab(state: AuctionState) -> None:
     st.markdown('<div class="rcd-section">🧠 Formation Lab</div>', unsafe_allow_html=True)
     st.caption(
-        "Prototype retrospettivo: usa i voti caricati per verificare abbinamenti e logica "
-        "della futura formazione consigliata."
+        "Usa i voti caricati per analisi e formazione. Le formazioni ufficiali della lega "
+        "verranno salvate nelle nuove tabelle lineup_submissions / lineup_players."
     )
 
     votes = st.session_state.get("season_votes_df")
