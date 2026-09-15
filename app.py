@@ -1320,18 +1320,19 @@ def render_authenticated_user_header(user: dict[str, Any]) -> str:
     avatar = escape(_auth_avatar_url(user), quote=True)
 
     pages = {
-        "Valutazioni": "📊",
-        "Giocatori": "⭐",
-        "Giornate": "📥",
+        "Home": "🏠",
         "Formazione": "🧠",
+        "Giornata": "📥",
         "Campionato": "🏆",
+        "Giocatori": "⭐",
+        "Rosa": "👕",
         "Impostazioni": "⚙️",
     }
     if _is_player_data_admin(user):
         pages["Dati giocatori"] = "🔄"
 
     if st.session_state.get("active_page") not in pages:
-        st.session_state["active_page"] = "Valutazioni"
+        st.session_state["active_page"] = "Home"
 
     st.markdown(
         """
@@ -13081,124 +13082,148 @@ def _match_vote_for_player(player: dict[str, Any], votes: pd.DataFrame) -> pd.Se
 
 
 def render_formation_lab_tab(state: AuctionState) -> None:
-    st.markdown('<div class="rcd-section">🧠 Formation Lab</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rcd-section">🧠 Formazione</div>', unsafe_allow_html=True)
     st.caption(
-        "Usa i voti caricati per analisi e formazione. Le formazioni ufficiali della lega "
-        "verranno salvate nelle nuove tabelle lineup_submissions / lineup_players."
+        "Suggerimento per la prossima giornata basato sulla rosa attuale, "
+        "titolarità, ballottaggi, infortuni e rating del modello."
     )
 
-    votes = st.session_state.get("season_votes_df")
-    if not isinstance(votes, pd.DataFrame) or votes.empty:
-        st.info("Carica prima un XLSX nella tab **📥 GIORNATE**.")
+    module, xi, alerts = build_recommended_xi(state)
+    if xi.empty:
+        st.info("Non riesco ancora a costruire una formazione completa.")
         return
 
-    team_name, players, _ = get_my_team_players_and_purchases(state)
-    if team_name is None or not players:
-        st.info(
-            f"Non trovo la rosa **{get_current_user_team_name()}** da confrontare con i voti."
-        )
-        return
-
-    matched = []
-    missing = []
-    for player in players:
-        row = _match_vote_for_player(player, votes)
-        if row is None:
-            missing.append(player.get("name", ""))
-            continue
-        matched.append({
-            "Nome": player.get("name", ""),
-            "Ruolo": player.get("role", ""),
-            "Squadra": row.get("Squadra", ""),
-            "Voto": row.get("Voto"),
-            "Fantavoto": row.get("Fantavoto"),
-            "Gol": row.get("Gf", 0),
-            "Assist": row.get("Ass", 0),
-        })
-
-    if not matched:
-        st.warning(
-            "Nessun giocatore della rosa attuale coincide con il file storico. "
-            "È normale se stai usando rose/stagioni diverse."
-        )
-        return
-
-    df = pd.DataFrame(matched)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Abbinati", f"{len(df)}/{len(players)}")
-    c2.metric("Con voto", int(df["Voto"].notna().sum()))
-    c3.metric(
-        "Fantavoto medio",
-        f"{df['Fantavoto'].dropna().mean():.2f}" if df["Fantavoto"].notna().any() else "—",
-    )
-
-    # XI di test 3-4-3: non pretende ancora di essere il motore finale.
-    chosen = []
-    for role, n in [("P", 1), ("D", 3), ("C", 4), ("A", 3)]:
-        part = df[(df["Ruolo"] == role) & df["Fantavoto"].notna()].nlargest(n, "Fantavoto")
-        chosen.append(part)
-    xi = pd.concat(chosen, ignore_index=True) if chosen else pd.DataFrame()
-
-    st.markdown('<div class="rcd-section">🧪 Miglior XI retrospettivo · 3-4-3</div>', unsafe_allow_html=True)
-    st.caption(
-        "Serve solo per validare l'import: usa i fantavoti già avvenuti, quindi non è ancora "
-        "un consiglio predittivo per la giornata successiva."
-    )
-    if len(xi) == 11:
-        total = float(xi["Fantavoto"].sum())
-        c1, c2 = st.columns(2)
-        c1.metric("Punteggio XI", f"{total:.1f}")
-        c2.metric("Gol da soglia", points_to_goals(total))
-    else:
-        st.warning(f"XI incompleto: trovati {len(xi)}/11 giocatori con voto nei ruoli richiesti.")
+    c1.metric("Modulo consigliato", module)
+    c2.metric("Titolari", len(xi))
+    c3.metric("Alert rosa", len(alerts))
 
     st.dataframe(
-        xi[["Ruolo", "Nome", "Squadra", "Voto", "Fantavoto", "Gol", "Assist"]],
-        use_container_width=True,
+        xi[["Ruolo", "Nome", "Stato", "Motivo", "Rating"]],
         hide_index=True,
+        use_container_width=True,
+        column_config={"Rating": st.column_config.NumberColumn(format="%.1f")},
     )
 
-    if missing:
-        with st.expander(f"Giocatori non abbinati ({len(missing)})", expanded=False):
-            st.write(", ".join(missing))
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    chosen_names = set(xi["Nome"].astype(str))
+    bench = []
+    for player in players:
+        if str(player.get("name")) in chosen_names:
+            continue
+        label, reason = _player_availability_label(player)
+        details = calculate_player_rating_detailed(
+            player,
+            st.session_state.get("preferred_players", set()),
+            load_custom_modifiers(),
+            build_current_goalkeeper_ranking(state),
+        )
+        bench.append({
+            "Ruolo": player.get("role"),
+            "Nome": player.get("name"),
+            "Stato": label,
+            "Motivo": reason,
+            "Rating": float(details.get("final_rating") or 0),
+        })
 
+    if bench:
+        st.markdown("### 🪑 Panchina consigliata / alternative")
+        bench_df = pd.DataFrame(bench).sort_values(
+            ["Ruolo", "Rating"],
+            ascending=[True, False],
+        )
+        st.dataframe(
+            bench_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Rating": st.column_config.NumberColumn(format="%.1f")},
+        )
 
-def render_championship_lab_tab() -> None:
-    st.markdown('<div class="rcd-section">🏆 Campionato & Classifica</div>', unsafe_allow_html=True)
-    st.caption("Struttura già pronta per la fase post-asta.")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Soglia 1° gol", "66 pt")
-    c2.metric("Scatto successivo", "+4 pt")
-    c3.metric("Squadre", "12")
+    if alerts:
+        st.markdown("### ⚠️ Cose da controllare prima del turno")
+        for alert in alerts:
+            icon = "🚑" if alert["status"] == "OUT" else "⚠️"
+            st.write(f"{icon} **{alert['name']}** — {alert['reason']}")
 
     st.info(
-        "Per produrre la **classifica ufficiale** servono anche le formazioni schierate "
-        "da ciascuna fantasquadra e il calendario degli scontri diretti. Il solo file voti "
-        "Fantacalcio contiene i voti dei calciatori reali, non dice quali 11 siano stati "
-        "schierati da ogni squadra della lega."
+        "Il suggerimento non usa ancora probabili formazioni live/deadline del turno: "
+        "quando collegheremo quella fonte, START/BALLOTTAGGIO/OUT diventeranno ancora più precisi."
     )
 
-    st.markdown('<div class="rcd-section">📐 Motore punteggio già impostato</div>', unsafe_allow_html=True)
-    demo = pd.DataFrame({
-        "Punti": [65.5, 66, 69.5, 70, 74, 78, 82, 90, 102, 110],
-    })
-    demo["Gol"] = demo["Punti"].map(points_to_goals)
-    st.dataframe(demo, use_container_width=True, hide_index=True)
+def render_championship_lab_tab() -> None:
+    st.markdown('<div class="rcd-section">🏆 Campionato</div>', unsafe_allow_html=True)
+    st.caption("Classifica e andamento della lega calcolati dai risultati ufficiali importati.")
 
-    st.markdown('<div class="rcd-section">🚧 Prossimi dati da importare</div>', unsafe_allow_html=True)
-    st.write(
-        "Quando avremo un export Fantaleghe con **formazioni/risultati/calendario**, "
-        "questa tab potrà generare automaticamente: classifica, GF/GS, differenza reti, "
-        "fantapunti, forma ultime 5, miglior attacco/difesa e analisi fortuna/sfortuna."
+    standings = load_league_standings()
+    if not standings:
+        st.info("Importa almeno una giornata finale da Leghe Fantacalcio per generare la classifica.")
+        return
+
+    df = pd.DataFrame(standings)
+    table = df[
+        ["position", "team_name", "played", "wins", "draws", "losses",
+         "goals_for", "goals_against", "goal_difference", "points", "fantasy_points"]
+    ].copy()
+    table.columns = ["#", "Squadra", "G", "V", "N", "P", "GF", "GS", "DR", "Pt", "Fantapunti"]
+
+    st.dataframe(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"Fantapunti": st.column_config.NumberColumn(format="%.1f")},
     )
 
+    my_team_id = str(get_current_user_team_id() or "")
+    mine = df[df["team_id"].astype(str) == my_team_id]
+    if not mine.empty:
+        me = mine.iloc[0]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Posizione", f"{int(me['position'])}°")
+        c2.metric("Punti", int(me["points"]))
+        c3.metric("Differenza reti", f"{int(me['goal_difference']):+d}")
+        c4.metric("Fantapunti", f"{float(me['fantasy_points']):.1f}")
+
+    rounds = load_season_rounds()
+    completed = []
+    for round_row in rounds:
+        fixtures = load_round_fixtures(str(round_row.get("id")))
+        if fixtures and all(
+            str(f.get("status") or "").lower() in {"final", "calculated"}
+            for f in fixtures
+        ):
+            completed.append((round_row, fixtures))
+
+    if completed:
+        st.markdown("### 📈 Ultimi risultati")
+        rows = []
+        for round_row, fixtures in completed[-5:]:
+            for fixture in fixtures:
+                if str(fixture.get("home_team_id")) != my_team_id and str(fixture.get("away_team_id")) != my_team_id:
+                    continue
+                result, my_fp, opp_fp, outcome = _fixture_result_for_my_team(
+                    fixture,
+                    my_team_id,
+                )
+                rows.append({
+                    "Giornata": int(round_row.get("league_round") or 0),
+                    "Avversario": _fixture_opponent_name(fixture, my_team_id),
+                    "Risultato": result,
+                    "Esito": outcome,
+                    "Fantapunti": my_fp,
+                })
+        if rows:
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Fantapunti": st.column_config.NumberColumn(format="%.1f")},
+            )
 
 def render_settings_page(
     user: dict[str, Any],
     teams: list[dict[str, Any]],
 ) -> None:
-    """Impostazioni account, squadra e strategia d'asta."""
+    """Impostazioni account, squadra e preferenze della stagione."""
     st.markdown(
         '<div class="rcd-section">⚙️ Impostazioni</div>',
         unsafe_allow_html=True,
@@ -13378,6 +13403,583 @@ def render_settings_page(
         st.rerun()
 
 
+
+# ============================================================
+# POST-AUCTION MATCHDAY HUB
+# ============================================================
+
+def load_league_standings(season: str = "2026-27") -> list[dict[str, Any]]:
+    try:
+        return (
+            supabase.table("league_standings_v")
+            .select("*")
+            .eq("season", season)
+            .order("position")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+
+
+def load_team_lineup_submission(
+    round_id: str,
+    team_id: str,
+) -> dict[str, Any] | None:
+    try:
+        rows = (
+            supabase.table("lineup_submissions")
+            .select(
+                "id,round_id,team_id,module,submitted_at,source,source_url,locked,"
+                "fantacalcio_team_id,total_fantapoints,league_points,"
+                "api_created_at,api_last_update,raw_payload"
+            )
+            .eq("round_id", round_id)
+            .eq("team_id", team_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _round_status_rank(status: str | None) -> int:
+    value = str(status or "").lower()
+    if value in {"final", "calculated"}:
+        return 3
+    if value in {"live", "votes_loaded"}:
+        return 2
+    return 1
+
+
+def get_matchday_context(
+    my_team_id: str,
+    season: str = "2026-27",
+) -> dict[str, Any]:
+    rounds = load_season_rounds(season)
+    if not rounds:
+        return {
+            "rounds": [],
+            "current_round": None,
+            "previous_round": None,
+            "next_fixture": None,
+            "previous_fixture": None,
+        }
+
+    rounds = sorted(rounds, key=lambda r: int(r.get("league_round") or 0))
+    fixture_cache: dict[str, list[dict[str, Any]]] = {}
+
+    def fixtures_for(round_row: dict[str, Any]) -> list[dict[str, Any]]:
+        rid = str(round_row.get("id"))
+        if rid not in fixture_cache:
+            fixture_cache[rid] = load_round_fixtures(rid)
+        return fixture_cache[rid]
+
+    completed_rounds = []
+    pending_rounds = []
+    for round_row in rounds:
+        fixtures = fixtures_for(round_row)
+        played = bool(fixtures) and all(
+            str(f.get("status") or "").lower() in {"final", "calculated"}
+            and f.get("home_goals") is not None
+            and f.get("away_goals") is not None
+            for f in fixtures
+        )
+        if played:
+            completed_rounds.append(round_row)
+        else:
+            pending_rounds.append(round_row)
+
+    previous_round = completed_rounds[-1] if completed_rounds else None
+    current_round = pending_rounds[0] if pending_rounds else (
+        rounds[-1] if rounds else None
+    )
+
+    def my_fixture(round_row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not round_row:
+            return None
+        for fixture in fixtures_for(round_row):
+            if str(fixture.get("home_team_id")) == str(my_team_id) or \
+               str(fixture.get("away_team_id")) == str(my_team_id):
+                return fixture
+        return None
+
+    return {
+        "rounds": rounds,
+        "current_round": current_round,
+        "previous_round": previous_round,
+        "next_fixture": my_fixture(current_round),
+        "previous_fixture": my_fixture(previous_round),
+        "current_fixtures": fixtures_for(current_round) if current_round else [],
+        "previous_fixtures": fixtures_for(previous_round) if previous_round else [],
+    }
+
+
+def _my_side_from_fixture(
+    fixture: dict[str, Any] | None,
+    my_team_id: str,
+) -> str | None:
+    if not fixture:
+        return None
+    if str(fixture.get("home_team_id")) == str(my_team_id):
+        return "home"
+    if str(fixture.get("away_team_id")) == str(my_team_id):
+        return "away"
+    return None
+
+
+def _fixture_opponent_name(
+    fixture: dict[str, Any] | None,
+    my_team_id: str,
+) -> str:
+    side = _my_side_from_fixture(fixture, my_team_id)
+    if side == "home":
+        return str(fixture.get("away_team_name") or "—")
+    if side == "away":
+        return str(fixture.get("home_team_name") or "—")
+    return "—"
+
+
+def _fixture_result_for_my_team(
+    fixture: dict[str, Any] | None,
+    my_team_id: str,
+) -> tuple[str, float | None, float | None, str]:
+    if not fixture:
+        return "—", None, None, "—"
+
+    side = _my_side_from_fixture(fixture, my_team_id)
+    hg = fixture.get("home_goals")
+    ag = fixture.get("away_goals")
+    hfp = fixture.get("home_fantapoints")
+    afp = fixture.get("away_fantapoints")
+
+    if hg is None or ag is None:
+        return "—", None, None, "—"
+
+    if side == "home":
+        gf, ga = int(hg), int(ag)
+        my_fp, opp_fp = hfp, afp
+    else:
+        gf, ga = int(ag), int(hg)
+        my_fp, opp_fp = afp, hfp
+
+    outcome = "Vittoria" if gf > ga else "Pareggio" if gf == ga else "Sconfitta"
+    return f"{gf}-{ga}", my_fp, opp_fp, outcome
+
+
+def _api_bonus_parts(value: Any) -> list[int]:
+    raw = str(value or "")
+    out: list[int] = []
+    for token in raw.split(";"):
+        try:
+            out.append(int(float(token)))
+        except Exception:
+            out.append(0)
+    return out
+
+
+def analyze_previous_lineup(
+    submission: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Analisi compatta della giornata precedente usando il raw payload ufficiale.
+    L'indice 2 di `b` corrisponde ai gol, verificabile dai fantavoti API.
+    """
+    if not submission:
+        return {
+            "available": False,
+            "bench_goals": 0,
+            "bench_bonus_points": 0.0,
+            "best_xi_delta": None,
+            "luck_label": "—",
+            "message": "Formazione ufficiale non ancora importata.",
+        }
+
+    raw = submission.get("raw_payload") or {}
+    starts = raw.get("starts") or []
+    bench = raw.get("bench") or []
+
+    def fv(row: dict[str, Any]) -> float | None:
+        return _fc_api_number(row.get("cscr"))
+
+    bench_goals = 0
+    for row in bench:
+        parts = _api_bonus_parts(row.get("b"))
+        if len(parts) > 2:
+            bench_goals += max(0, parts[2])
+
+    # "Punti potenziali" non pretende di ricostruire le sostituzioni regolamentari:
+    # misura quanto valore fantacalcio è rimasto in panchina rispetto agli 11 schierati.
+    starter_scores = [x for x in (fv(r) for r in starts) if x is not None]
+    bench_scores = [x for x in (fv(r) for r in bench) if x is not None]
+    all_scores = starter_scores + bench_scores
+    best_xi_delta = None
+    if len(starter_scores) >= 8 and len(all_scores) >= 11:
+        actual = sum(starter_scores)
+        best_any_11 = sum(sorted(all_scores, reverse=True)[:11])
+        best_xi_delta = max(0.0, round(best_any_11 - actual, 1))
+
+    if best_xi_delta is None:
+        luck_label = "Da valutare"
+    elif best_xi_delta >= 10 or bench_goals >= 2:
+        luck_label = "Sfortunato"
+    elif best_xi_delta >= 5 or bench_goals >= 1:
+        luck_label = "Un po' sfortunato"
+    else:
+        luck_label = "Scelte efficienti"
+
+    if bench_goals >= 2:
+        message = f"Hai lasciato {bench_goals} gol in panchina."
+    elif bench_goals == 1:
+        message = "Hai lasciato 1 gol in panchina."
+    elif best_xi_delta is not None and best_xi_delta >= 5:
+        message = f"Il potenziale in panchina era circa +{best_xi_delta:.1f} punti."
+    else:
+        message = "Pochissimo valore rilevante lasciato in panchina."
+
+    return {
+        "available": True,
+        "bench_goals": bench_goals,
+        "best_xi_delta": best_xi_delta,
+        "luck_label": luck_label,
+        "message": message,
+    }
+
+
+def _player_availability_label(player: dict[str, Any]) -> tuple[str, str]:
+    injury = str(player.get("injury_status") or "").strip()
+    starter = str(player.get("status_titolarita") or "").strip()
+    ballot = str(player.get("ballottaggio_con") or "").strip()
+
+    if injury == "Lungo":
+        return "OUT", "Infortunio lungo"
+    if injury == "Medio":
+        return "OUT", "Infortunato"
+    if injury in {"Breve/Da valutare", "Da valutare"}:
+        return "BALLOTTAGGIO", injury
+    if ballot:
+        return "BALLOTTAGGIO", f"Con {ballot}"
+    if normalize_string(starter) in {"titolare", "titolarissimo"}:
+        return "START", starter or "Titolare"
+    if normalize_string(starter) in {"riserva", "panchina"}:
+        return "PANCA", starter
+    return "START", starter or "Da monitorare"
+
+
+def build_recommended_xi(
+    state: AuctionState,
+) -> tuple[str, pd.DataFrame, list[dict[str, Any]]]:
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    if not players:
+        return "—", pd.DataFrame(), []
+
+    ranking = build_current_goalkeeper_ranking(state)
+    modifiers = load_custom_modifiers()
+    preferred = st.session_state.get("preferred_players", set())
+
+    records = []
+    alerts = []
+    for player in players:
+        details = calculate_player_rating_detailed(
+            player,
+            preferred,
+            modifiers,
+            ranking,
+        )
+        label, reason = _player_availability_label(player)
+        rating = float(details.get("final_rating") or 0)
+        if label == "OUT":
+            adjusted = rating - 5.0
+        elif label == "BALLOTTAGGIO":
+            adjusted = rating - 1.0
+        elif label == "PANCA":
+            adjusted = rating - 1.5
+        else:
+            adjusted = rating
+
+        records.append({
+            "player": player,
+            "Nome": player.get("name"),
+            "Ruolo": player.get("role"),
+            "Rating": round(rating, 2),
+            "Score": adjusted,
+            "Stato": label,
+            "Motivo": reason,
+        })
+        if label in {"OUT", "BALLOTTAGGIO"}:
+            alerts.append({
+                "name": player.get("name"),
+                "status": label,
+                "reason": reason,
+            })
+
+    df = pd.DataFrame(records)
+    modules = [
+        ("3-4-3", {"P": 1, "D": 3, "C": 4, "A": 3}),
+        ("3-5-2", {"P": 1, "D": 3, "C": 5, "A": 2}),
+        ("4-3-3", {"P": 1, "D": 4, "C": 3, "A": 3}),
+        ("4-4-2", {"P": 1, "D": 4, "C": 4, "A": 2}),
+        ("4-5-1", {"P": 1, "D": 4, "C": 5, "A": 1}),
+        ("5-3-2", {"P": 1, "D": 5, "C": 3, "A": 2}),
+        ("5-4-1", {"P": 1, "D": 5, "C": 4, "A": 1}),
+    ]
+
+    candidates = []
+    for module, counts in modules:
+        parts = []
+        valid = True
+        for role, n in counts.items():
+            role_df = df[df["Ruolo"] == role].sort_values(
+                ["Score", "Rating"],
+                ascending=False,
+            )
+            if len(role_df) < n:
+                valid = False
+                break
+            parts.append(role_df.head(n))
+        if not valid:
+            continue
+        xi = pd.concat(parts, ignore_index=True)
+        candidates.append((float(xi["Score"].sum()), module, xi))
+
+    if not candidates:
+        return "—", pd.DataFrame(), alerts
+
+    _, module, xi = max(candidates, key=lambda x: x[0])
+    role_order = {"P": 0, "D": 1, "C": 2, "A": 3}
+    xi["_role_order"] = xi["Ruolo"].map(role_order)
+    xi = xi.sort_values(["_role_order", "Score"], ascending=[True, False])
+    return module, xi.drop(columns=["_role_order"]), alerts
+
+
+def render_matchday_home(
+    state: AuctionState,
+    teams_df: pd.DataFrame,
+) -> None:
+    my_team_id = str(get_current_user_team_id() or "")
+    my_team_name = str(get_current_user_team_name() or get_my_team_name_from_state(state) or "La mia squadra")
+
+    st.markdown(
+        f"""
+        <div style="
+            border:1px solid #dbeafe;
+            background:linear-gradient(135deg,#eff6ff 0%,#ffffff 62%,#f0fdf4 100%);
+            border-radius:20px;
+            padding:22px 24px;
+            margin-bottom:18px;
+            box-shadow:0 8px 24px rgba(30,64,175,.08);
+        ">
+            <div style="font-size:.82rem;font-weight:900;color:#2563eb;letter-spacing:.08em;">
+                MATCHDAY HUB
+            </div>
+            <div style="font-size:2rem;font-weight:950;color:#17325f;line-height:1.12;">
+                {escape(my_team_name)}
+            </div>
+            <div style="color:#52657f;margin-top:6px;">
+                Tutto quello che serve per preparare la prossima giornata.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    context = get_matchday_context(my_team_id)
+    current_round = context.get("current_round")
+    next_fixture = context.get("next_fixture")
+    previous_round = context.get("previous_round")
+    previous_fixture = context.get("previous_fixture")
+
+    # ------------------------------------------------------------
+    # 1. Prossima partita
+    # ------------------------------------------------------------
+    st.markdown('<div class="rcd-section">⚔️ Prossima partita</div>', unsafe_allow_html=True)
+    if current_round and next_fixture:
+        opponent = _fixture_opponent_name(next_fixture, my_team_id)
+        side = _my_side_from_fixture(next_fixture, my_team_id)
+        venue = "Casa" if side == "home" else "Trasferta"
+        round_id = str(current_round.get("id"))
+        official_lineup = load_team_lineup_submission(round_id, my_team_id)
+
+        c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
+        c1.metric("Avversario", opponent)
+        c2.metric("Giornata lega", int(current_round.get("league_round") or 0))
+        c3.metric("Serie A", int(current_round.get("serie_a_round") or 0))
+        c4.metric("Campo", venue)
+
+        if official_lineup:
+            st.success(
+                f"✅ Formazione ufficiale già presente · modulo "
+                f"{official_lineup.get('module') or '—'}"
+            )
+        else:
+            st.warning("⏳ Formazione ufficiale non ancora importata per questa giornata.")
+    else:
+        st.info("Non trovo una prossima partita nel calendario Supabase.")
+
+    # ------------------------------------------------------------
+    # 2. Formazione consigliata
+    # ------------------------------------------------------------
+    st.markdown('<div class="rcd-section">🧠 Formazione consigliata</div>', unsafe_allow_html=True)
+    module, xi, alerts = build_recommended_xi(state)
+    if not xi.empty:
+        top1, top2, top3 = st.columns(3)
+        top1.metric("Modulo suggerito", module)
+        top2.metric("Alert rosa", len(alerts))
+        top3.metric("XI disponibile", "11/11")
+
+        show = xi[["Ruolo", "Nome", "Stato", "Motivo", "Rating"]].copy()
+        st.dataframe(
+            show,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Rating": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+        if alerts:
+            with st.expander(f"⚠️ Dubbi / indisponibili ({len(alerts)})", expanded=True):
+                for item in alerts[:8]:
+                    icon = "🚑" if item["status"] == "OUT" else "⚠️"
+                    st.write(f"{icon} **{item['name']}** — {item['reason']}")
+    else:
+        st.info("Non riesco ancora a costruire un XI consigliato con la rosa disponibile.")
+
+    # ------------------------------------------------------------
+    # 3. Analisi giornata scorsa
+    # ------------------------------------------------------------
+    st.markdown('<div class="rcd-section">🪞 Com’è andata davvero la scorsa giornata?</div>', unsafe_allow_html=True)
+    if previous_round and previous_fixture:
+        result, my_fp, opp_fp, outcome = _fixture_result_for_my_team(
+            previous_fixture,
+            my_team_id,
+        )
+        prev_submission = load_team_lineup_submission(
+            str(previous_round.get("id")),
+            my_team_id,
+        )
+        review = analyze_previous_lineup(prev_submission)
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Risultato", result, outcome)
+        r2.metric("Fantapunti", f"{float(my_fp):.1f}" if my_fp is not None else "—")
+        r3.metric("Gol in panchina", review["bench_goals"])
+        r4.metric(
+            "Potenziale lasciato",
+            f"+{review['best_xi_delta']:.1f}" if review["best_xi_delta"] is not None else "—",
+        )
+
+        label = review["luck_label"]
+        if label == "Sfortunato":
+            st.warning(f"🎲 **{label}.** {review['message']}")
+        elif label == "Un po' sfortunato":
+            st.info(f"🎲 **{label}.** {review['message']}")
+        else:
+            st.success(f"🎯 **{label}.** {review['message']}")
+    else:
+        st.info("La prima giornata ufficiale non è ancora disponibile.")
+
+    # ------------------------------------------------------------
+    # 4. Classifica
+    # ------------------------------------------------------------
+    st.markdown('<div class="rcd-section">🏆 Classifica</div>', unsafe_allow_html=True)
+    standings = load_league_standings()
+    if standings:
+        sdf = pd.DataFrame(standings)
+        my_row = sdf[sdf["team_id"].astype(str) == my_team_id]
+        if not my_row.empty:
+            row = my_row.iloc[0]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Posizione", f"{int(row['position'])}°")
+            c2.metric("Punti", int(row["points"]))
+            c3.metric("GF / GS", f"{int(row['goals_for'])} / {int(row['goals_against'])}")
+            c4.metric("Fantapunti", f"{float(row['fantasy_points']):.1f}")
+
+        table = sdf[
+            ["position", "team_name", "played", "wins", "draws", "losses",
+             "goals_for", "goals_against", "goal_difference", "points"]
+        ].copy()
+        table.columns = ["#", "Squadra", "G", "V", "N", "P", "GF", "GS", "DR", "Pt"]
+        st.dataframe(
+            table,
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("La classifica comparirà appena importeremo la prima giornata finale.")
+
+    # ------------------------------------------------------------
+    # 5. Tutte le partite del turno
+    # ------------------------------------------------------------
+    st.markdown('<div class="rcd-section">📅 Giornata corrente</div>', unsafe_allow_html=True)
+    fixtures = context.get("current_fixtures") or []
+    if current_round and fixtures:
+        rows = []
+        for fixture in fixtures:
+            hg = fixture.get("home_goals")
+            ag = fixture.get("away_goals")
+            result = f"{hg}-{ag}" if hg is not None and ag is not None else "—"
+            hfp = fixture.get("home_fantapoints")
+            afp = fixture.get("away_fantapoints")
+            rows.append({
+                "Casa": fixture.get("home_team_name"),
+                "Ris.": result,
+                "Trasferta": fixture.get("away_team_name"),
+                "FP Casa": hfp,
+                "FP Trasferta": afp,
+                "Stato": fixture.get("status") or "scheduled",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    # ------------------------------------------------------------
+    # 6. Rosa oggi
+    # ------------------------------------------------------------
+    st.markdown('<div class="rcd-section">👕 Rosa oggi</div>', unsafe_allow_html=True)
+    team_name, players, _ = get_my_team_players_and_purchases(state)
+    if players:
+        status_rows = []
+        for player in players:
+            label, reason = _player_availability_label(player)
+            status_rows.append({
+                "Ruolo": player.get("role"),
+                "Giocatore": player.get("name"),
+                "Stato": label,
+                "Dettaglio": reason,
+                "Infortunio": player.get("injury_return") or player.get("injury_note") or "",
+            })
+        status_df = pd.DataFrame(status_rows)
+        counts = status_df["Stato"].value_counts().to_dict()
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("START", counts.get("START", 0))
+        a2.metric("Ballottaggi", counts.get("BALLOTTAGGIO", 0))
+        a3.metric("Panchina", counts.get("PANCA", 0))
+        a4.metric("OUT", counts.get("OUT", 0))
+        risky = status_df[status_df["Stato"].isin(["OUT", "BALLOTTAGGIO"])]
+        if not risky.empty:
+            st.dataframe(risky, hide_index=True, use_container_width=True)
+
+
+def render_roster_analysis_page(
+    teams: list[dict[str, Any]],
+    teams_df: pd.DataFrame,
+    rosters: list[dict[str, Any]],
+    state: AuctionState,
+    ratings: dict[str, Any],
+) -> None:
+    st.markdown('<div class="rcd-section">👕 Rosa & analisi storica</div>', unsafe_allow_html=True)
+    st.caption(
+        "La stagione è iniziata: qui restano le analisi della rosa e, come archivio, "
+        "la valutazione dell'asta. Non influenzano il Matchday Hub."
+    )
+    render_team_overview(teams_df, state, ratings)
+    st.divider()
+    render_rosters_tab(teams, teams_df, rosters, state, ratings)
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -13393,7 +13995,7 @@ def main() -> None:
     sync_user_strategy_session(current_user)
     rosters = load_rosters()
 
-    # Il budget visualizzato/usato dall'asta viene ricostruito dagli acquisti:
+    # Il budget storico viene ricostruito dagli acquisti:
     # initial_budget - purchase_price. In questo modo un remaining_budget
     # accidentalmente azzerato nel DB non porta tutte le squadre a 0 crediti.
     teams = reconcile_team_budgets_from_rosters(teams, rosters)
@@ -13428,40 +14030,35 @@ def main() -> None:
         else 0
     )
 
-    # Post-asta: niente consigli acquisto / Top 5.
-    # Manteniamo soltanto la valutazione della rosa e il confronto tra squadre.
-    render_team_analysis(
-        teams_df,
-        state,
-        ratings,
-    )
+    # Stagione in corso: nessun elemento d'asta persistente nella sidebar.
+    # Le valutazioni storiche restano soltanto nella pagina Rosa.
 
-    if active_page == "Valutazioni":
-        render_team_overview(
-            teams_df,
+    if active_page == "Home":
+        render_matchday_home(
             state,
-            ratings,
+            teams_df,
         )
-        st.divider()
-        render_rosters_tab(
+
+    elif active_page == "Formazione":
+        render_formation_lab_tab(state)
+
+    elif active_page == "Giornata":
+        render_matchday_import_tab()
+
+    elif active_page == "Campionato":
+        render_championship_lab_tab()
+
+    elif active_page == "Giocatori":
+        render_all_players_tab()
+
+    elif active_page == "Rosa":
+        render_roster_analysis_page(
             teams,
             teams_df,
             rosters,
             state,
             ratings,
         )
-
-    elif active_page == "Giocatori":
-        render_all_players_tab()
-
-    elif active_page == "Giornate":
-        render_matchday_import_tab()
-
-    elif active_page == "Formazione":
-        render_formation_lab_tab(state)
-
-    elif active_page == "Campionato":
-        render_championship_lab_tab()
 
     elif active_page == "Impostazioni":
         render_settings_page(
