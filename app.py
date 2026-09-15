@@ -1532,7 +1532,7 @@ def require_authentication() -> dict[str, Any]:
 def load_teams() -> list[dict[str, Any]]:
     return (
         supabase.table("teams")
-        .select("id, name, remaining_budget, initial_budget")
+        .select("id, name, remaining_budget, initial_budget, fantacalcio_team_id")
         .execute()
         .data
     )
@@ -12546,11 +12546,284 @@ def save_votes_to_supabase(
     return len(payload), missing, ambiguous
 
 
+
+FANTACALCIO_COMPETITION_ID = 678694
+FANTACALCIO_TEAM_LINEUP_BASE = "https://apileague.fantacalcio.it/gaming/v1/teamLineup"
+
+
+def _fc_api_number(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    # L'API Leghe usa codici interni alti (es. 55/56 e 100) per SV/non voto.
+    if number >= 50:
+        return None
+    return number
+
+
+def fetch_leghe_fantacalcio_fixture(
+    competition_id: int,
+    league_round: int,
+    serie_a_round: int,
+    home_tid: int,
+    away_tid: int,
+    bearer_token: str,
+    app_key: str,
+) -> tuple[dict[str, Any], str]:
+    url = (
+        f"{FANTACALCIO_TEAM_LINEUP_BASE}/"
+        f"{competition_id}/{league_round}/{serie_a_round}/{home_tid}/{away_tid}"
+    )
+    token = str(bearer_token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Authorization": f"Bearer {token}",
+        "App_key": str(app_key or "").strip(),
+        "Origin": "https://leghe.fantacalcio.it",
+        "Referer": "https://leghe.fantacalcio.it/",
+        "User-Agent": "Mozilla/5.0 fantahe1per/1.0",
+    }
+
+    response = requests.get(url, headers=headers, timeout=25)
+    if response.status_code in (401, 403):
+        raise RuntimeError(
+            f"Autenticazione Leghe Fantacalcio rifiutata ({response.status_code}). "
+            "Aggiorna Bearer token / App_key dalla richiesta del browser."
+        )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or "home" not in payload or "away" not in payload:
+        raise RuntimeError("Risposta API inattesa: home/away non presenti.")
+    return payload, url
+
+
+def _upsert_lineup_submission_from_fc_api(
+    round_id: str,
+    team_id: str,
+    side_payload: dict[str, Any],
+    source_url: str,
+) -> str:
+    api_tid = side_payload.get("tid")
+    payload = {
+        "round_id": round_id,
+        "team_id": team_id,
+        "module": str(side_payload.get("mdl") or side_payload.get("nmdl") or ""),
+        "submitted_at": None,
+        "source": "Leghe Fantacalcio API",
+        "source_url": source_url,
+        "locked": True,
+        "fantacalcio_team_id": int(api_tid) if api_tid is not None else None,
+        "total_fantapoints": side_payload.get("tot"),
+        "league_points": int(side_payload.get("points") or 0),
+        "api_created_at": str(side_payload.get("cdate") or "") or None,
+        "api_last_update": str(side_payload.get("ldate") or "") or None,
+        "raw_payload": side_payload,
+        "updated_at": datetime.now(ZoneInfo("Europe/Rome")).isoformat(),
+    }
+    result = (
+        supabase.table("lineup_submissions")
+        .upsert(payload, on_conflict="round_id,team_id")
+        .execute()
+    )
+    rows = result.data or []
+    if rows:
+        return str(rows[0]["id"])
+
+    fallback = (
+        supabase.table("lineup_submissions")
+        .select("id")
+        .eq("round_id", round_id)
+        .eq("team_id", team_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not fallback:
+        raise RuntimeError("Lineup salvata ma ID non recuperabile.")
+    return str(fallback[0]["id"])
+
+
+def _save_fc_api_lineup_players(
+    lineup_id: str,
+    side_payload: dict[str, Any],
+) -> tuple[int, int]:
+    # Sovrascrive la fotografia della formazione per quella giornata.
+    supabase.table("lineup_players").delete().eq("lineup_id", lineup_id).execute()
+
+    players_by_fc_pid = {
+        int(p["fantacalcio_pid"]): p
+        for p in load_players()
+        if p.get("fantacalcio_pid") is not None
+    }
+
+    rows: list[dict[str, Any]] = []
+    mapped = 0
+
+    for is_starter, key in ((True, "starts"), (False, "bench")):
+        source_rows = side_payload.get(key) or []
+        for order, item in enumerate(source_rows, start=1):
+            pid = item.get("pid")
+            if pid is None:
+                continue
+            pid_int = int(pid)
+            mapped_player = players_by_fc_pid.get(pid_int)
+            if mapped_player:
+                mapped += 1
+
+            raw_vote = item.get("scr")
+            raw_fantasy = item.get("cscr")
+            rows.append({
+                "lineup_id": lineup_id,
+                "player_id": mapped_player.get("id") if mapped_player else None,
+                "role": mapped_player.get("role") if mapped_player else "C",
+                "is_starter": is_starter,
+                "position_order": order if is_starter else None,
+                "bench_order": None if is_starter else order,
+                "entered_pitch": str(item.get("ptype") or "-") not in ("-", "U"),
+                "counted_in_score": _fc_api_number(raw_fantasy) is not None,
+                "fantacalcio_pid": pid_int,
+                "vote": _fc_api_number(raw_vote),
+                "fantasy_score": _fc_api_number(raw_fantasy),
+                "api_vote_raw": raw_vote,
+                "api_fantasy_score_raw": raw_fantasy,
+                "bonus_raw": str(item.get("b") or ""),
+                "player_type": str(item.get("ptype") or "-"),
+                "source": "Leghe Fantacalcio API",
+            })
+
+    # Se il PID non è ancora mappato non conosciamo il ruolo. Per non inventarlo,
+    # proviamo a ricavarlo dalla rosa della fantasquadra solo quando il mapping esiste.
+    # La constraint role impone P/D/C/A: i non mappati vengono salvati separatamente
+    # nel raw_payload della lineup e saranno collegati quando mapperemo i PID.
+    safe_rows = [r for r in rows if r.get("player_id") is not None]
+    if safe_rows:
+        supabase.table("lineup_players").insert(safe_rows).execute()
+
+    return len(rows), mapped
+
+
+def import_leghe_fantacalcio_round(
+    selected_round: dict[str, Any],
+    bearer_token: str,
+    app_key: str,
+    competition_id: int = FANTACALCIO_COMPETITION_ID,
+) -> dict[str, Any]:
+    round_id = str(selected_round["id"])
+    league_round = int(selected_round["league_round"])
+    serie_a_round = int(selected_round["serie_a_round"])
+    fixtures = load_round_fixtures(round_id)
+
+    teams = load_teams()
+    teams_by_id = {str(t["id"]): t for t in teams}
+
+    imported = 0
+    lineups = 0
+    api_players = 0
+    mapped_players = 0
+    errors: list[str] = []
+
+    for fixture in fixtures:
+        home = teams_by_id.get(str(fixture.get("home_team_id")))
+        away = teams_by_id.get(str(fixture.get("away_team_id")))
+        if not home or not away:
+            errors.append(f"Fixture {fixture.get('id')}: squadra Supabase non trovata")
+            continue
+
+        home_tid = home.get("fantacalcio_team_id")
+        away_tid = away.get("fantacalcio_team_id")
+        if home_tid is None or away_tid is None:
+            errors.append(
+                f"{home.get('name')} - {away.get('name')}: fantacalcio_team_id mancante"
+            )
+            continue
+
+        try:
+            payload, source_url = fetch_leghe_fantacalcio_fixture(
+                competition_id,
+                league_round,
+                serie_a_round,
+                int(home_tid),
+                int(away_tid),
+                bearer_token,
+                app_key,
+            )
+
+            result_text = str(payload.get("res") or "")
+            home_goals = away_goals = None
+            if re.fullmatch(r"\d+\s*-\s*\d+", result_text):
+                a, b = re.split(r"\s*-\s*", result_text)
+                home_goals, away_goals = int(a), int(b)
+
+            home_data = payload.get("home") or {}
+            away_data = payload.get("away") or {}
+
+            supabase.table("league_fixtures").update({
+                "home_fantapoints": home_data.get("tot"),
+                "away_fantapoints": away_data.get("tot"),
+                "home_goals": home_goals,
+                "away_goals": away_goals,
+                "official_result": result_text or None,
+                "status": "final" if bool(payload.get("cal")) else "live",
+                "source": "Leghe Fantacalcio API",
+                "source_url": source_url,
+                "source_imported_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+                "calculated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat() if bool(payload.get("cal")) else None,
+                "updated_at": datetime.now(
+                    ZoneInfo("Europe/Rome")
+                ).isoformat(),
+            }).eq("id", fixture["id"]).execute()
+
+            for team, side_data in ((home, home_data), (away, away_data)):
+                lineup_id = _upsert_lineup_submission_from_fc_api(
+                    round_id,
+                    str(team["id"]),
+                    side_data,
+                    source_url,
+                )
+                total, mapped = _save_fc_api_lineup_players(lineup_id, side_data)
+                api_players += total
+                mapped_players += mapped
+                lineups += 1
+
+            imported += 1
+
+        except Exception as exc:
+            errors.append(
+                f"{home.get('name')} - {away.get('name')}: {exc}"
+            )
+
+    if imported and not errors:
+        supabase.table("league_rounds").update({
+            "status": "final",
+            "updated_at": datetime.now(ZoneInfo("Europe/Rome")).isoformat(),
+        }).eq("id", round_id).execute()
+
+    return {
+        "fixtures": imported,
+        "lineups": lineups,
+        "api_players": api_players,
+        "mapped_players": mapped_players,
+        "errors": errors,
+    }
+
+
 def render_matchday_import_tab() -> None:
     st.markdown('<div class="rcd-section">📥 Giornata · calendario e voti</div>', unsafe_allow_html=True)
     st.caption(
-        "Il calendario è persistente in Supabase. Seleziona la giornata di lega, "
-        "carica l'XLSX voti Fantacalcio e salva i voti sul database."
+        "Il calendario è persistente in Supabase. Puoi importare direttamente "
+        "risultati e formazioni ufficiali da Leghe Fantacalcio oppure caricare l'XLSX voti."
     )
 
     rounds = load_season_rounds("2026-27")
@@ -12585,6 +12858,77 @@ def render_matchday_import_tab() -> None:
         st.warning(
             "Calendario Supabase non trovato. Esegui prima setup_stagione_calendario_v110.sql."
         )
+
+    if selected_round is not None:
+        st.markdown("### 🔄 Import ufficiale da Leghe Fantacalcio")
+        st.caption(
+            "Scarica automaticamente le 6 partite della giornata con risultati, "
+            "fantapunteggi, moduli, titolari e panchine. Le credenziali restano "
+            "solo nella sessione Streamlit e non vengono salvate in Supabase."
+        )
+
+        auth_col, key_col = st.columns(2)
+        with auth_col:
+            bearer_token = st.text_input(
+                "Bearer token",
+                value=st.session_state.get("fc_leghe_bearer", ""),
+                type="password",
+                key="fc_leghe_bearer",
+                help="Network → teamLineup → Headers → Authorization. Incolla anche senza 'Bearer '.",
+            )
+        with key_col:
+            app_key = st.text_input(
+                "App_key",
+                value=st.session_state.get("fc_leghe_app_key", ""),
+                type="password",
+                key="fc_leghe_app_key",
+                help="Network → teamLineup → Headers → App_key.",
+            )
+
+        competition_id = st.number_input(
+            "Competition ID",
+            min_value=1,
+            value=FANTACALCIO_COMPETITION_ID,
+            step=1,
+            key="fc_leghe_competition_id",
+        )
+
+        if st.button(
+            f"⬇️ Importa giornata {selected_round['league_round']} da Leghe Fantacalcio",
+            type="primary",
+            use_container_width=True,
+            disabled=not (str(bearer_token).strip() and str(app_key).strip()),
+            key="import_fc_leghe_round",
+        ):
+            with st.spinner("Importo le 6 partite ufficiali da Leghe Fantacalcio..."):
+                result = import_leghe_fantacalcio_round(
+                    selected_round,
+                    bearer_token,
+                    app_key,
+                    int(competition_id),
+                )
+
+            if result["errors"]:
+                st.error(
+                    f"Importate {result['fixtures']}/6 partite. "
+                    f"Errori: {len(result['errors'])}."
+                )
+                for error in result["errors"]:
+                    st.write(f"• {error}")
+            else:
+                st.success(
+                    f"Import completato: {result['fixtures']} partite · "
+                    f"{result['lineups']} formazioni · "
+                    f"{result['api_players']} righe giocatore API."
+                )
+                if result["mapped_players"] < result["api_players"]:
+                    st.info(
+                        "I risultati e le formazioni raw sono già salvati. "
+                        f"PID già collegati a public.players: "
+                        f"{result['mapped_players']}/{result['api_players']}. "
+                        "Completeremo il mapping fantacalcio_pid senza perdere i dati importati."
+                    )
+                st.rerun()
 
     left, right = st.columns([1.25, 1])
     with left:
